@@ -5,11 +5,10 @@ from typing import List
 
 from jinja2 import Environment, FileSystemLoader
 
-from benchmarks.swebench.build_images import (
+from benchmarks.swesmith.build_images import (
     extract_custom_tag,
     get_official_docker_image,
-    should_wrap_instance_id,
-    wrap_image,
+    # should_wrap_instance_id,
 )
 from benchmarks.utils.args_parser import get_parser
 from benchmarks.utils.build_utils import build_image
@@ -118,7 +117,7 @@ class SWEBenchEvaluation(Evaluation):
                            Higher values allocate more CPU/memory resources.
                            Used by APIRemoteWorkspace for remote runtime allocation.
         """
-        official_docker_image = get_official_docker_image(instance.id)
+        official_docker_image = get_official_docker_image(str(instance.data["image_name"]))
         build_target = "source-minimal"
         custom_tag = extract_custom_tag(official_docker_image)
         # For non-binary targets, append target suffix
@@ -126,7 +125,8 @@ class SWEBenchEvaluation(Evaluation):
         base_agent_image = (
             f"{EVAL_AGENT_SERVER_IMAGE}:{SDK_SHORT_SHA}-{custom_tag}{suffix}"
         )
-        wrap_needed = should_wrap_instance_id(instance.id)
+        # wrap_needed = should_wrap_instance_id(instance.id)
+        wrap_needed = False
         agent_server_image = base_agent_image
 
         if self.metadata.workspace_type == "docker":
@@ -155,13 +155,13 @@ class SWEBenchEvaluation(Evaluation):
                         f"Built image tags {output.tags} do not include expected tag "
                         f"{base_agent_image}"
                     )
-                if wrap_needed:
-                    wrapped_result = wrap_image(base_agent_image, push=False)
-                    if wrapped_result.error:
-                        raise RuntimeError(
-                            "Wrapped image build failed: "
-                            f"{wrapped_result.error}; log={wrapped_result.log_path}"
-                        )
+                # if wrap_needed:
+                #     wrapped_result = wrap_image(base_agent_image, push=False)
+                #     if wrapped_result.error:
+                #         raise RuntimeError(
+                #             "Wrapped image build failed: "
+                #             f"{wrapped_result.error}; log={wrapped_result.log_path}"
+                #         )
 
             workspace = DockerWorkspace(
                 server_image=agent_server_image,
@@ -269,6 +269,11 @@ class SWEBenchEvaluation(Evaluation):
         git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
         assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
 
+        base_commit_result = workspace.execute_command(
+            (f"cd {repo_path} ; git rev-parse HEAD")
+        )
+        base_commit = base_commit_result.stdout.strip()
+
         instruction = get_instruction(
             instance=instance.data,
             metadata=self.metadata,
@@ -290,7 +295,7 @@ class SWEBenchEvaluation(Evaluation):
         )
 
         # Get git patch
-        base_commit = instance.data["base_commit"]
+        # base_commit = instance.data["base_commit"]
         git_patch_result = workspace.execute_command(
             (f"cd {repo_path} ; git --no-pager diff --no-color {base_commit} HEAD")
         )

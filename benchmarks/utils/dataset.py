@@ -120,6 +120,39 @@ def get_dataset(
         assert isinstance(dataset, Dataset)
         df = dataset.to_pandas()
         assert isinstance(df, pd.DataFrame)
+    elif os.path.isdir(dataset_name):
+        # Load local dataset directory
+        try:
+            # First try loading as a saved arrow dataset (load_from_disk)
+            from datasets import load_from_disk
+
+            dataset = load_from_disk(dataset_name)
+            if isinstance(dataset, dict):
+                if split in dataset:
+                    dataset = dataset[split]
+                else:
+                    # Fallback to train if split not found, or error?
+                    # For now compatible with HF behavior:
+                    if "train" in dataset:
+                        logger.warning(
+                            f"Split '{split}' not found in dataset dict, defaulting to 'train'"
+                        )
+                        dataset = dataset["train"]
+                    else:
+                        raise ValueError(
+                            f"Split '{split}' not found in dataset and no 'train' split available."
+                        )
+        except Exception:
+            # Fallback to loading as a generic dataset folder (e.g. script/imagefolder)
+            try:
+                dataset = load_dataset(dataset_name, split=split)
+            except Exception as e:
+                logger.error(f"Failed to load dataset from directory {dataset_name}: {e}")
+                raise
+
+        assert isinstance(dataset, Dataset)
+        df = dataset.to_pandas()
+        assert isinstance(df, pd.DataFrame)
     else:
         # Load dataset from HuggingFace Hub
         dataset = _load_hf_dataset_with_retry(dataset_name, split)
