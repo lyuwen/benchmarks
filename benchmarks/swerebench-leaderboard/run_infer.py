@@ -7,7 +7,7 @@ from typing import List
 from jinja2 import Environment, FileSystemLoader
 
 # Load helper function from image builder
-BASE_DIR = pathlib.Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent
 sys.path.append(str(BASE_DIR))
 from build_images import (
     extract_custom_tag,
