@@ -192,6 +192,9 @@ def _get_sdk_submodule_info() -> tuple[str, str, str]:
     except Exception as e:
         logger.warning(f"Failed to read SDK version from pyproject.toml: {e}")
 
+    git_sha = os.environ.get("SDK_SHA") or git_sha
+    git_ref = os.environ.get("SDK_REF") or git_ref
+
     logger.info(
         f"SDK submodule info: ref={git_ref}, sha={git_sha[:7]}, version={sdk_version}"
     )

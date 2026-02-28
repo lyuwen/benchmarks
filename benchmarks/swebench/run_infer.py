@@ -37,6 +37,7 @@ from openhands.sdk.llm.message import Message
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
+from openhands.tools.preset.legacy import get_legacy_tools
 from openhands.workspace import APIRemoteWorkspace, DockerWorkspace
 
 
@@ -83,6 +84,13 @@ class SWEBenchEvaluation(Evaluation):
       - prepare_workspace(instance)
       - evaluate_instance(instance, workspace)
     """
+
+    use_legacy_tools: int = Field(
+        default=False, description="Use legacy CodeActAgent tools"
+    )
+    bind_dev_sdk: int = Field(
+        default=False, description="Bind SDK paths for dev features"
+    )
 
     def prepare_instances(self) -> List[EvalInstance]:
         logger.info("Setting up SWE-bench evaluation data")
@@ -163,10 +171,19 @@ class SWEBenchEvaluation(Evaluation):
                             f"{wrapped_result.error}; log={wrapped_result.log_path}"
                         )
 
+            bind_volumes = []
+            if self.bind_dev_sdk:
+                sdk_base = Path(__file__).parent.parent / "vendor/software-agent-sdk"
+                for module in ["tools", "sdk", "agent-server", "workpsace"]:
+                    bind_volumes.append(
+                        f"{sdk_base}/openhands-{module}/openhands/{module}:"\
+                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                        )
             workspace = DockerWorkspace(
                 server_image=agent_server_image,
                 working_dir="/workspace",
                 forward_env=forward_env or [],
+                bind_volumes=bind_volumes,
             )
         elif self.metadata.workspace_type == "remote":
             runtime_api_key = os.getenv("RUNTIME_API_KEY")
@@ -223,10 +240,16 @@ class SWEBenchEvaluation(Evaluation):
         Create conversation, run agent, collect history and git patch.
         Do not write files here; just return EvalOutput.
         """
-        tools = get_default_tools(
-            # Disable browser tools in CLI mode
-            enable_browser=False,
-        )
+        if self.use_legacy_tools:
+            tools = get_legacy_tools(
+                # Disable browser tools in CLI mode
+                enable_browser=False,
+            )
+        else:
+            tools = get_default_tools(
+                # Disable browser tools in CLI mode
+                enable_browser=False,
+            )
         agent = Agent(
             llm=self.metadata.llm,
             tools=tools,
@@ -368,6 +391,16 @@ def main() -> None:
         default=str(default_prompt_path),
         choices=choices,
         help="Path to prompt template file",
+    )
+    parser.add_argument(
+        "--use-legacy-tools",
+        action="store_true",
+        help="Use legacy tools",
+    )
+    parser.add_argument(
+        "--bind-dev-sdk",
+        action="store_true",
+        help="Bind SDK paths for dev features",
     )
     args = parser.parse_args()
 
