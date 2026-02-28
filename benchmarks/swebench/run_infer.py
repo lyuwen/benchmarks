@@ -453,6 +453,8 @@ def main() -> None:
     evaluator = SWEBenchEvaluation(
         metadata=metadata,
         num_workers=args.num_workers,
+        use_legacy_tools=args.use_legacy_tools,
+        bind_dev_sdk=bind_dev_sdk,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))
