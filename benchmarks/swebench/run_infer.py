@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List
 
 from jinja2 import Environment, FileSystemLoader
+from pydantic import Field
 
 from benchmarks.swebench.build_images import (
     extract_custom_tag,
@@ -173,8 +174,8 @@ class SWEBenchEvaluation(Evaluation):
 
             bind_volumes = []
             if self.bind_dev_sdk:
-                sdk_base = Path(__file__).parent.parent / "vendor/software-agent-sdk"
-                for module in ["tools", "sdk", "agent-server", "workpsace"]:
+                sdk_base = Path(__file__).parent.parent.parent / "vendor/software-agent-sdk"
+                for module in ["tools", "sdk", "agent-server", "workspace"]:
                     bind_volumes.append(
                         f"{sdk_base}/openhands-{module}/openhands/{module}:"\
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
@@ -454,7 +455,7 @@ def main() -> None:
         metadata=metadata,
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
-        bind_dev_sdk=bind_dev_sdk,
+        bind_dev_sdk=args.bind_dev_sdk,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))
