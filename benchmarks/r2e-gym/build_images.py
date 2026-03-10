@@ -3,7 +3,7 @@
 Build agent-server images for all unique R2E-Gym base images in a dataset split.
 Example:
   uv run benchmarks/r2e-gym/build_images.py \
-    --dataset /mnt/huawei/users/lfu/datasets/R2E-Gym-Subset --split train \
+    --dataset R2E-Gym/R2E-Gym-Subset --split train \
     --image ghcr.io/openhands/eval-agent-server --target source-minimal
 """
 
