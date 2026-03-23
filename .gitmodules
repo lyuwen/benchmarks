@@ -1,3 +1,6 @@
 [submodule "vendor/software-agent-sdk"]
 	path = vendor/software-agent-sdk
 	url = git@github.com:lyuwen/software-agent-sdk.git
+[submodule "vendor/agent-server-pro"]
+	path = vendor/agent-server-pro
+	url = git@github.com:lyuwen/agent-server-pro.git
