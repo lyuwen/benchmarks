@@ -17,6 +17,7 @@ JSON config file passed via ``--orchestrator-config``.  Example::
     {
         "anthropic_api_key": "sk-ant-...",
         "anthropic_base_url": "https://api.anthropic.com",
+        "anthropic_model": "claude-sonnet-4-20250514",
         "claude_binary": "/usr/local/bin/claude",
         "claude_code_path": "/host/path/to/claude",
         "claude_timeout": 1800,
@@ -106,6 +107,10 @@ class OrchestratorConfig(BaseModel):
         default="https://api.anthropic.com",
         description="Anthropic API base URL (ANTHROPIC_BASE_URL inside the container).",
     )
+    anthropic_model: str = Field(
+        default="",
+        description="Anthropic model to use (ANTHROPIC_MODEL inside the container).",
+    )
 
     # --- Claude Code binary --------------------------------------------------
     claude_binary: str = Field(
@@ -146,7 +151,7 @@ class OrchestratorConfig(BaseModel):
         a directory mount — that is handled separately by ``_ProContainer.start``
         after the volume flags are assembled.
         """
-        return {
+        env = {
             "ANTHROPIC_API_KEY": self.anthropic_api_key,
             "ANTHROPIC_BASE_URL": self.anthropic_base_url,
             "CLAUDE_BINARY": self.claude_binary,
@@ -156,6 +161,9 @@ class OrchestratorConfig(BaseModel):
             # means absolute paths (e.g. /workspace/repo/) are passed through.
             "BASE_DIR": "/",
         }
+        if self.anthropic_model:
+            env["ANTHROPIC_MODEL"] = self.anthropic_model
+        return env
 
 
 # ---------------------------------------------------------------------------
