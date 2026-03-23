@@ -289,10 +289,6 @@ class _ProContainer:
                     host_path,
                 )
 
-        # Prepend directories to PATH if needed
-        if path_prepend:
-            container_env["PATH"] = ":".join(path_prepend) + ":$PATH"
-
         # Write the fully-resolved env vars into docker flags.
         for key, value in container_env.items():
             flags += ["-e", f"{key}={value}"]
@@ -311,7 +307,12 @@ class _ProContainer:
         # LOGS_DIR in orchestrator.py is Path(__file__).parent / "logs".
         # Since the bind-mount is :ro, we copy to /tmp first so the logs
         # directory (and the JSONL trace files) can be created.
+        path_export = ""
+        if path_prepend:
+            # Export PATH inside the shell so $PATH expands correctly
+            path_export = f"export PATH={':'.join(path_prepend)}:$PATH && "
         entrypoint_cmd = (
+            f"{path_export}"
             f"cp -r {self.AGENT_SERVER_PRO_MOUNT} {self.WRITABLE_DIR} && "
             f"cd {self.WRITABLE_DIR} && "
             f"pip install -q -r requirements.txt && "
