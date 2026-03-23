@@ -652,15 +652,15 @@ class _ProWorkspace(RemoteWorkspace):
     class Config:
         arbitrary_types_allowed = True
 
-    container: Any = Field(exclude=True)  # _ProContainer (not serialisable)
+    container: Any = Field(default=None, exclude=True)  # _ProContainer (not serialisable)
 
     def __init__(self, container: _ProContainer, **kwargs: Any):
         super().__init__(
             host=container.orchestrator_url,
             working_dir="/workspace",
+            container=container,
             **kwargs,
         )
-        self.container = container
 
     def model_post_init(self, context: Any) -> None:  # noqa: ARG002
         """Skip parent's model_post_init which tries to connect to agent-server."""
