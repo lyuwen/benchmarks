@@ -20,6 +20,7 @@ JSON config file passed via ``--orchestrator-config``.  Example::
         "anthropic_model": "claude-sonnet-4-20250514",
         "claude_binary": "/usr/local/bin/claude",
         "claude_code_path": "/host/path/to/claude",
+        "nodejs_path": "/host/path/to/node",
         "claude_timeout": 1800,
         "keep_logs": true
     }
@@ -133,6 +134,16 @@ class OrchestratorConfig(BaseModel):
         ),
     )
 
+    # --- Node.js binding -----------------------------------------------------
+    nodejs_path: str = Field(
+        default="",
+        description=(
+            "Host-side path to a Node.js installation directory.  "
+            "Bind-mounted read-only into the container at /opt/nodejs.  "
+            "The bin subdirectory is prepended to PATH."
+        ),
+    )
+
     # --- Orchestrator tunables -----------------------------------------------
     claude_timeout: float = Field(
         default=1800,
@@ -215,6 +226,8 @@ class _ProContainer:
     CLAUDE_CODE_MOUNT = "/usr/local/bin/claude"
     # Mount point used when claude_code_path points to a directory.
     CLAUDE_CODE_DIR_MOUNT = "/opt/claude-code"
+    # Mount point for Node.js installation.
+    NODEJS_DIR_MOUNT = "/opt/nodejs"
 
     def __init__(
         self,
@@ -242,6 +255,7 @@ class _ProContainer:
 
         # --- Inject orchestrator env vars from config (no host env lookup) ---
         container_env = cfg.to_container_env()
+        path_prepend: list[str] = []  # Directories to prepend to PATH
 
         # --- Bind-mount Claude Code binary / directory -----------------------
         # Resolve the host path and adjust CLAUDE_BINARY inside the container
@@ -262,6 +276,22 @@ class _ProContainer:
                 logger.warning(
                     "claude_code_path %s does not exist, skipping bind", host_path
                 )
+
+        # --- Bind-mount Node.js installation ---------------------------------
+        if cfg.nodejs_path:
+            host_path = Path(cfg.nodejs_path).resolve()
+            if host_path.is_dir():
+                flags += ["-v", f"{host_path}:{self.NODEJS_DIR_MOUNT}:ro"]
+                path_prepend.append(f"{self.NODEJS_DIR_MOUNT}/bin")
+            else:
+                logger.warning(
+                    "nodejs_path %s does not exist or is not a directory, skipping bind",
+                    host_path,
+                )
+
+        # Prepend directories to PATH if needed
+        if path_prepend:
+            container_env["PATH"] = ":".join(path_prepend) + ":$PATH"
 
         # Write the fully-resolved env vars into docker flags.
         for key, value in container_env.items():
