@@ -5,6 +5,7 @@ from typing import List
 
 from jinja2 import Environment, FileSystemLoader
 from pydantic import Field
+from omegaconf import OmegaConf
 
 from benchmarks.swebench.build_images import (
     extract_custom_tag,
@@ -414,6 +415,8 @@ def main() -> None:
         raise ValueError(f"LLM config file {llm_config_path} does not exist")
     with open(llm_config_path, "r") as f:
         llm_config = f.read()
+    # use omegaconf to resolve environment variables, and then serialize back to JSON
+    llm_config = json.dumps(OmegaConf.to_container(OmegaConf.load(llm_config_path), resolve=True))
     llm = LLM.model_validate_json(llm_config)
     logger.info("Using LLM config: %s", llm.model_dump_json(indent=2))
 

@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import List
 
 from jinja2 import Environment, FileSystemLoader
+from pydantic import Field
+from omegaconf import OmegaConf
 
 from benchmarks.swesmith.build_images import (
     extract_custom_tag,
@@ -36,6 +38,7 @@ from openhands.sdk.llm.message import Message
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
+from openhands.tools.preset.legacy import get_legacy_tools
 from openhands.workspace import APIRemoteWorkspace, DockerWorkspace
 
 
@@ -82,6 +85,13 @@ class SWEBenchEvaluation(Evaluation):
       - prepare_workspace(instance)
       - evaluate_instance(instance, workspace)
     """
+
+    use_legacy_tools: int = Field(
+        default=False, description="Use legacy CodeActAgent tools"
+    )
+    bind_dev_sdk: int = Field(
+        default=False, description="Bind SDK paths for dev features"
+    )
 
     def prepare_instances(self) -> List[EvalInstance]:
         logger.info("Setting up SWE-bench evaluation data")
@@ -163,10 +173,19 @@ class SWEBenchEvaluation(Evaluation):
                 #             f"{wrapped_result.error}; log={wrapped_result.log_path}"
                 #         )
 
+            bind_volumes = []
+            if self.bind_dev_sdk:
+                sdk_base = Path(__file__).parent.parent.parent / "vendor/software-agent-sdk"
+                for module in ["tools", "sdk", "agent-server", "workspace"]:
+                    bind_volumes.append(
+                        f"{sdk_base}/openhands-{module}/openhands/{module}:"\
+                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                        )
             workspace = DockerWorkspace(
                 server_image=agent_server_image,
                 working_dir="/workspace",
                 forward_env=forward_env or [],
+                bind_volumes=bind_volumes,
             )
         elif self.metadata.workspace_type == "remote":
             runtime_api_key = os.getenv("RUNTIME_API_KEY")
@@ -223,14 +242,21 @@ class SWEBenchEvaluation(Evaluation):
         Create conversation, run agent, collect history and git patch.
         Do not write files here; just return EvalOutput.
         """
-        tools = get_default_tools(
-            # Disable browser tools in CLI mode
-            enable_browser=False,
-        )
+        if self.use_legacy_tools:
+            tools = get_legacy_tools(
+                # Disable browser tools in CLI mode
+                enable_browser=False,
+            )
+        else:
+            tools = get_default_tools(
+                # Disable browser tools in CLI mode
+                enable_browser=False,
+            )
         agent = Agent(
             llm=self.metadata.llm,
             tools=tools,
             system_prompt_kwargs={"cli_mode": True},
+            # system_prompt_filename="system_prompt_custom.j2",
             # TODO: we can enable condenser and security analyzer later
             # and have them configurable via EvalMetadata
             # condenser=get_default_condenser(
@@ -274,6 +300,11 @@ class SWEBenchEvaluation(Evaluation):
         )
         base_commit = base_commit_result.stdout.strip()
 
+        breif_history = workspace.execute_command(
+            (f"cd {repo_path} ; git --no-pager log --oneline -10")
+        )
+        logger.info(f"Repo status:\n* Current commit: {base_commit}\n* Top 10 history:\n{breif_history.stdout.strip()}")
+
         instruction = get_instruction(
             instance=instance.data,
             metadata=self.metadata,
@@ -282,6 +313,9 @@ class SWEBenchEvaluation(Evaluation):
         conversation.send_message(instruction)
         # Run conversation with fake user responses to handle agent messages
         run_conversation_with_fake_user_response(conversation)
+
+        git_status_diff_unstaged = workspace.execute_command(f"cd {repo_path} ; git status ; git --no-pager diff")
+        logger.info(f"Repo status:\n{git_status_diff_unstaged.stdout.strip()}")
 
         # git add
         workspace.execute_command(f"cd {repo_path} ; git add -A")
@@ -362,6 +396,9 @@ def main() -> None:
     prompt_dir = (Path(__file__).parent / "prompts").resolve()
     choices = [str(p.relative_to(Path.cwd())) for p in prompt_dir.glob("*.j2")]
     default_prompt_path = prompt_dir / "default.j2"
+    #
+    # prompt_dir = (Path(__file__).parent.parent / "prompts").resolve()
+    # default_prompt_path = prompt_dir / "user_template.j2"
     assert default_prompt_path.exists(), (
         f"Default prompt {default_prompt_path} not found"
     )
@@ -374,6 +411,16 @@ def main() -> None:
         choices=choices,
         help="Path to prompt template file",
     )
+    parser.add_argument(
+        "--use-legacy-tools",
+        action="store_true",
+        help="Use legacy tools",
+    )
+    parser.add_argument(
+        "--bind-dev-sdk",
+        action="store_true",
+        help="Bind SDK paths for dev features",
+    )
     args = parser.parse_args()
 
     # Validate max_attempts
@@ -385,6 +432,8 @@ def main() -> None:
         raise ValueError(f"LLM config file {llm_config_path} does not exist")
     with open(llm_config_path, "r") as f:
         llm_config = f.read()
+    # use omegaconf to resolve environment variables, and then serialize back to JSON
+    llm_config = json.dumps(OmegaConf.to_container(OmegaConf.load(llm_config_path), resolve=True))
     llm = LLM.model_validate_json(llm_config)
     logger.info("Using LLM config: %s", llm.model_dump_json(indent=2))
 
@@ -404,6 +453,8 @@ def main() -> None:
     critic = create_critic(args)
     logger.info(f"Using critic: {type(critic).__name__}")
 
+    env_vars = [f"export {k}=\"{v}\"" for k, v in os.environ.items() if k.startswith("OH_")]
+
     metadata = EvalMetadata(
         llm=llm,
         dataset=args.dataset,
@@ -413,7 +464,7 @@ def main() -> None:
         details={},
         prompt_path=args.prompt_path,
         eval_limit=args.n_limit,
-        env_setup_commands=["export PIP_CACHE_DIR=~/.cache/pip"],
+        env_setup_commands=["export PIP_CACHE_DIR=~/.cache/pip"] + env_vars,
         max_attempts=args.max_attempts,
         critic=critic,
         selected_instances_file=args.select,
@@ -425,6 +476,8 @@ def main() -> None:
     evaluator = SWEBenchEvaluation(
         metadata=metadata,
         num_workers=args.num_workers,
+        use_legacy_tools=args.use_legacy_tools,
+        bind_dev_sdk=args.bind_dev_sdk,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))
