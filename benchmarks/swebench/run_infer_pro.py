@@ -153,6 +153,10 @@ class OrchestratorConfig(BaseModel):
         default=True,
         description="Keep per-job JSONL trace files after the job completes (KEEP_LOGS).",
     )
+    pip_index_url: str = Field(
+        default="",
+        description="PyPI mirror URL passed to pip install -i (e.g. https://mirrors.ustc.edu.cn/pypi/simple).",
+    )
 
     def to_container_env(self) -> dict[str, str]:
         """
@@ -311,11 +315,14 @@ class _ProContainer:
         if path_prepend:
             # Export PATH inside the shell so $PATH expands correctly
             path_export = f"export PATH={':'.join(path_prepend)}:$PATH && "
+        pip_index = ""
+        if cfg.pip_index_url:
+            pip_index = f" -i {cfg.pip_index_url}"
         entrypoint_cmd = (
             f"{path_export}"
             f"cp -r {self.AGENT_SERVER_PRO_MOUNT} {self.WRITABLE_DIR} && "
             f"cd {self.WRITABLE_DIR} && "
-            f"pip install -q -r requirements.txt && "
+            f"pip install -q{pip_index} -r requirements.txt && "
             f"python -m uvicorn orchestrator:app "
             f"--host 0.0.0.0 --port {ORCHESTRATOR_CONTAINER_PORT}"
         )
@@ -397,6 +404,13 @@ class _ProContainer:
                         f"Container exited. Logs:\n{logs.stdout}\n{logs.stderr}"
                     )
             time.sleep(2)
+        # Capture container logs to help diagnose the failure
+        if self.container_id:
+            logs = execute_command(["docker", "logs", "--tail", "50", self.container_id])
+            raise RuntimeError(
+                f"Orchestrator did not become healthy in time. "
+                f"Container logs:\n{logs.stdout}\n{logs.stderr}"
+            )
         raise RuntimeError("Orchestrator did not become healthy in time")
 
     def _stream_logs(self) -> None:
