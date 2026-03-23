@@ -3,7 +3,7 @@
 Build agent-server images for all unique R2E-Gym base images in a dataset split.
 Example:
   uv run benchmarks/r2e-gym/build_images.py \
-    --dataset /mnt/huawei/users/lfu/datasets/R2E-Gym-Subset --split train \
+    --dataset R2E-Gym/R2E-Gym-Subset --split train \
     --image ghcr.io/openhands/eval-agent-server --target source-minimal
 """
 
@@ -45,9 +45,14 @@ def get_base_image(row) -> str:
 
 def extract_custom_tag(base_image: str) -> str:
     """
-    Extract a custom tag from the base image name.
+    Extract a custom tag from the base image name, including the image tag
+    for uniqueness (R2E-Gym images share repo names but differ by commit SHA tag).
     """
-    return base_image.split("/")[-1].split(":")[0]
+    parts = base_image.split("/")[-1]  # e.g. "scrapy_final:0c5087..."
+    name, _, tag = parts.partition(":")
+    if tag:
+        return f"{name}-{tag[:12]}"  # e.g. "scrapy_final-0c50879568de"
+    return name
 
 
 def collect_unique_base_images(
