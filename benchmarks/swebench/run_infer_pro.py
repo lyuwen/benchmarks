@@ -79,13 +79,6 @@ from trace_to_chat import extract_chat_history  # noqa: E402
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Container timeout for the full /run call (seconds).  Claude Code itself
-# is already bounded by CLAUDE_TIMEOUT inside the orchestrator; this is an
-# outer safety net.
-# ---------------------------------------------------------------------------
-CONTAINER_RUN_TIMEOUT = float(os.environ.get("CONTAINER_RUN_TIMEOUT", "1800"))
-
 # Port the orchestrator listens on inside the container.
 ORCHESTRATOR_CONTAINER_PORT = 8000
 
