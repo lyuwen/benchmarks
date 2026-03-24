@@ -574,7 +574,9 @@ class ProSWEBenchEvaluation(Evaluation):
         run_status = "error"
 
         try:
-            with httpx.Client(timeout=httpx.Timeout(CONTAINER_RUN_TIMEOUT)) as client:
+            # HTTP timeout must exceed claude_timeout to allow orchestrator to respond
+            http_timeout = self.orchestrator_config.claude_timeout + 60
+            with httpx.Client(timeout=httpx.Timeout(http_timeout)) as client:
                 resp = client.post(
                     f"{container.orchestrator_url}/run",
                     json={"prompt": instruction, "work_dir": repo_path},
