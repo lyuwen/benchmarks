@@ -46,8 +46,17 @@ class TestPromptTemplate:
 
     def test_documents_native_calling(self, template_text):
         """Prompt should show native tool-calling syntax, not CLI syntax."""
-        assert 'lsp(command="get_definition"' in template_text or \
-               "lsp(command=" in template_text
+        assert "lsp(command=" in template_text
+
+    def test_documents_all_commands_via_jinja(self, template_text):
+        """Prompt should reference all 12 commands via {{ cmd.xxx }} Jinja vars."""
+        for cmd in [
+            "get_definition", "get_type_definition", "find_references",
+            "hover", "get_implementation", "get_call_hierarchy",
+            "prepare_call_hierarchy", "incoming_calls", "outgoing_calls",
+            "get_document_symbols", "get_workspace_symbols", "get_document_highlights",
+        ]:
+            assert f"cmd.{cmd}" in template_text, f"Prompt missing cmd.{cmd} Jinja var"
 
     def test_does_not_document_cli_syntax(self, template_text):
         """With native tool calling, CLI examples should not be in prompt."""
@@ -132,7 +141,7 @@ class TestLSPToolCLI:
 
     def test_has_all_cli_arguments(self):
         src = (SWEBENCH_DIR / "lsp_tool.py").read_text()
-        for arg in ["--file_path", "--symbol", "--line", "--query"]:
+        for arg in ["--file_path", "--symbol", "--line", "--query", "--item"]:
             assert arg in src, f"CLI argument {arg} not found"
 
 
@@ -190,11 +199,23 @@ class TestNativeToolDefinition:
         vendor_base = SWEBENCH_DIR.parent.parent / "vendor" / "software-agent-sdk"
         src = (vendor_base / "openhands-tools/openhands/tools/lsp/definition.py").read_text()
         for cmd in [
-            "get_definition", "get_type_definition", "get_references",
-            "get_hover", "get_call_hierarchy", "get_document_symbols",
-            "get_workspace_symbols", "get_document_highlights",
+            "get_definition", "get_type_definition", "find_references",
+            "hover", "get_implementation", "get_call_hierarchy",
+            "prepare_call_hierarchy", "incoming_calls", "outgoing_calls",
+            "get_document_symbols", "get_workspace_symbols", "get_document_highlights",
         ]:
             assert cmd in src, f"Command {cmd} not in definition"
+
+    def test_definition_has_item_field(self):
+        vendor_base = SWEBENCH_DIR.parent.parent / "vendor" / "software-agent-sdk"
+        src = (vendor_base / "openhands-tools/openhands/tools/lsp/definition.py").read_text()
+        assert "item:" in src or "item :" in src
+
+    def test_definition_has_naming_config(self):
+        vendor_base = SWEBENCH_DIR.parent.parent / "vendor" / "software-agent-sdk"
+        src = (vendor_base / "openhands-tools/openhands/tools/lsp/definition.py").read_text()
+        assert "LSP_NAMING" in src
+        assert "COMMAND_NAMES" in src
 
 
 if __name__ == "__main__":

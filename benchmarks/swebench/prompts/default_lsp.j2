@@ -14,12 +14,28 @@ You have access to an **LSP code intelligence tool** (`lsp` tool) powered by Pyr
 It provides semantic, AST-based understanding of Python code — far more accurate than grep for navigating code.
 Call it as a native tool: `lsp(command="...", file_path="...", symbol="...", line=N)`.
 
+**Commands:**
+| Command | What it does | Required args |
+|---|---|---|
+| `{{ cmd.get_definition }}` | Jump to where a symbol is defined; returns full source code | file_path, line, symbol |
+| `{{ cmd.get_type_definition }}` | Jump to the type's definition with source code | file_path, line, symbol |
+| `{{ cmd.find_references }}` | Find all usages of a symbol across the project | file_path, line, symbol |
+| `{{ cmd.hover }}` | Get docstring, inferred type, and signature | file_path, line, symbol |
+| `{{ cmd.get_implementation }}` | Find implementations of an interface/abstract method | file_path, line, symbol |
+| `{{ cmd.get_call_hierarchy }}` | Who calls this function, and what does it call? (combined) | file_path, line, symbol |
+| `{{ cmd.prepare_call_hierarchy }}` | Get a call hierarchy item for a symbol (step 1) | file_path, line, symbol |
+| `{{ cmd.incoming_calls }}` | Who calls this function? (requires item from prepare) | item |
+| `{{ cmd.outgoing_calls }}` | What does this function call? (requires item from prepare) | item |
+| `{{ cmd.get_document_symbols }}` | List all symbols in a file (classes, functions, vars) | file_path |
+| `{{ cmd.get_workspace_symbols }}` | Search for a symbol name across the entire project | query |
+| `{{ cmd.get_document_highlights }}` | Find all usages of a symbol within one file | file_path, line, symbol |
+
 **Tips:**
-- Use `get_document_symbols` to understand a file's structure before reading it
-- Use `get_workspace_symbols` to find where something is defined across the project
-- Use `get_definition` to jump to and read the actual source code of any symbol
-- Use `get_references` to understand how widely a function or class is used
-- Use `get_call_hierarchy` to trace call relationships
+- Use `{{ cmd.get_document_symbols }}` to understand a file's structure before reading it
+- Use `{{ cmd.get_workspace_symbols }}` to find where something is defined across the project
+- Use `{{ cmd.get_definition }}` to jump to and read the actual source code of any symbol
+- Use `{{ cmd.find_references }}` to understand how widely a function or class is used
+- Use `{{ cmd.get_call_hierarchy }}` for a quick combined view, or `{{ cmd.prepare_call_hierarchy }}` + `{{ cmd.incoming_calls }}`/`{{ cmd.outgoing_calls }}` for step-by-step
 - `line` is 1-indexed; `symbol` is the identifier name (e.g., `MyClass`, `my_function`)
 - The tool automatically syncs with file changes
 </lsp_tool>
@@ -42,12 +58,13 @@ Phase 2. RUNNING: install and run the tests on the repository
 
 Phase 3. EXPLORATION: find the files and functions related to the problem
    3.1 **Prioritize the LSP tool** for code navigation and understanding:
-       - Use `lsp(command="get_workspace_symbols", query="...")` to locate classes, functions, and variables across the project
-       - Use `lsp(command="get_definition", ...)` to trace symbol origins and see full source code
-       - Use `lsp(command="get_references", ...)` to find all usages of a symbol
-       - Use `lsp(command="get_call_hierarchy", ...)` to understand function call relationships
-       - Use `lsp(command="get_document_symbols", file_path="...")` to get a file's outline before reading it
-       - Use `lsp(command="get_hover", ...)` to get type information and docstrings
+       - Use `lsp(command="{{ cmd.get_workspace_symbols }}", query="...")` to locate classes, functions, and variables across the project
+       - Use `lsp(command="{{ cmd.get_definition }}", ...)` to trace symbol origins and see full source code
+       - Use `lsp(command="{{ cmd.find_references }}", ...)` to find all usages of a symbol
+       - Use `lsp(command="{{ cmd.get_call_hierarchy }}", ...)` to understand function call relationships
+       - Use `lsp(command="{{ cmd.get_document_symbols }}", file_path="...")` to get a file's outline before reading it
+       - Use `lsp(command="{{ cmd.hover }}", ...)` to get type information and docstrings
+       - Use `lsp(command="{{ cmd.get_implementation }}", ...)` to find concrete implementations of abstract methods
    3.2 Fall back to `grep` when searching for literal strings, error messages, or non-code files
    3.3 Identify all files related to the problem statement
    3.4 Propose the methods and files to fix the issue and explain why

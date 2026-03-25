@@ -175,6 +175,7 @@ def get_instruction(
     instance: dict,
     metadata: EvalMetadata,
     workspace_path: str,
+    lsp_naming: str = "snake_case",
 ) -> str:
     """Generate instruction for the agent."""
     workspace_dir_name = instance["repo"].split("/")[-1]
@@ -187,12 +188,21 @@ def get_instruction(
     env = Environment(loader=FileSystemLoader(prompts_dir))
     template = env.get_template(template_name)
 
+    # Build command name lookup for the chosen naming convention
+    from benchmarks.swebench.lsp_tool import COMMAND_NAMES
+    if lsp_naming == "camelCase":
+        cmd_names = {k: v for k, v in COMMAND_NAMES.items()}
+    else:
+        cmd_names = {k: k for k in COMMAND_NAMES}
+
     # Prepare context for rendering
     context = {
         "instance": instance,
         "workspace_dir_name": workspace_dir_name,
         "actual_workspace_path": workspace_path,
         "metadata": metadata,
+        "lsp_naming": lsp_naming,
+        "cmd": cmd_names,  # cmd.get_definition → display name
     }
     context["test_instructions"] = ""
 
@@ -216,6 +226,10 @@ class SWEBenchEvaluation(Evaluation):
     )
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
+    )
+    lsp_naming: str = Field(
+        default="snake_case",
+        description="Naming convention for LSP commands: snake_case or camelCase",
     )
 
     def prepare_instances(self) -> List[EvalInstance]:
@@ -252,6 +266,12 @@ class SWEBenchEvaluation(Evaluation):
                            Higher values allocate more CPU/memory resources.
                            Used by APIRemoteWorkspace for remote runtime allocation.
         """
+        # Set LSP_NAMING so it gets forwarded into the container for the
+        # SDK tool definition module (definition.py reads it at import time).
+        os.environ["LSP_NAMING"] = self.lsp_naming
+        forward_env = list(forward_env or [])
+        if "LSP_NAMING" not in forward_env:
+            forward_env.append("LSP_NAMING")
         official_docker_image = get_official_docker_image(instance.id)
         build_target = "source-minimal"
         custom_tag = extract_custom_tag(official_docker_image)
@@ -443,6 +463,7 @@ class SWEBenchEvaluation(Evaluation):
             instance=instance.data,
             metadata=self.metadata,
             workspace_path=workspace.working_dir,
+            lsp_naming=self.lsp_naming,
         )
         conversation.send_message(instruction)
         # Run conversation with fake user responses to handle agent messages
@@ -553,6 +574,13 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
+    parser.add_argument(
+        "--lsp-naming",
+        type=str,
+        default="snake_case",
+        choices=["snake_case", "camelCase"],
+        help="Naming convention for LSP tool commands (default: snake_case)",
+    )
     args = parser.parse_args()
 
     # Validate max_attempts
@@ -608,6 +636,7 @@ def main() -> None:
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
+        lsp_naming=args.lsp_naming,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))

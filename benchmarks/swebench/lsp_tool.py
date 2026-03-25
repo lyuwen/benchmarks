@@ -6,11 +6,21 @@ LSP Tool for OpenHands - Code Intelligence via Language Server Protocol.
 Adapted from R2E-Gym for OpenHands benchmarks integration.
 Provides semantic code analysis via Pyright-based LSP, far beyond simple grep.
 
-Commands: get_definition, get_type_definition, get_hover, get_call_hierarchy,
-get_references, get_document_highlights, get_document_symbols, get_workspace_symbols.
+Commands (snake_case / camelCase):
+  get_definition / goToDefinition
+  get_type_definition / goToTypeDefinition
+  find_references / findReferences
+  hover / hover
+  get_implementation / goToImplementation
+  get_call_hierarchy / getCallHierarchy  (combined prepare+incoming+outgoing)
+  prepare_call_hierarchy / prepareCallHierarchy
+  incoming_calls / incomingCalls
+  outgoing_calls / outgoingCalls
+  get_document_symbols / getDocumentSymbols
+  get_workspace_symbols / getWorkspaceSymbols
+  get_document_highlights / getDocumentHighlights
 
-All positional commands require file_path, line (1-indexed), and symbol.
-get_workspace_symbols requires --query instead.
+Set LSP_NAMING=camelCase to expose camelCase names in the tool definition.
 """
 
 import json
@@ -29,6 +39,51 @@ import orjson
 # --- Configuration ---
 HOST = '127.0.0.1'
 PORT_FILE_ENV_VAR = os.environ.get("LSP_PORT_FILE", "/var/tmp/lsp_port_session_abc.pid")
+
+# --- Naming convention mapping ---
+# Canonical names are snake_case; camelCase aliases are always accepted.
+COMMAND_NAMES = {
+    # snake_case → camelCase
+    "get_definition": "goToDefinition",
+    "get_type_definition": "goToTypeDefinition",
+    "find_references": "findReferences",
+    "hover": "hover",
+    "get_implementation": "goToImplementation",
+    "get_call_hierarchy": "getCallHierarchy",
+    "prepare_call_hierarchy": "prepareCallHierarchy",
+    "incoming_calls": "incomingCalls",
+    "outgoing_calls": "outgoingCalls",
+    "get_document_symbols": "getDocumentSymbols",
+    "get_workspace_symbols": "getWorkspaceSymbols",
+    "get_document_highlights": "getDocumentHighlights",
+}
+CAMEL_TO_SNAKE = {v: k for k, v in COMMAND_NAMES.items()}
+# Backward-compat aliases for renamed commands
+_ALIASES = {
+    "get_hover": "hover",
+    "get_references": "find_references",
+}
+
+LSP_NAMING = os.environ.get("LSP_NAMING", "snake_case")  # "snake_case" or "camelCase"
+
+def get_user_facing_commands(naming: str | None = None) -> list[str]:
+    """Return the 12 user-facing command names in the configured convention."""
+    if naming is None:
+        naming = LSP_NAMING
+    if naming == "camelCase":
+        return list(COMMAND_NAMES.values())
+    return list(COMMAND_NAMES.keys())
+
+
+def normalize_command(cmd: str) -> str:
+    """Normalize any command name (camelCase, old alias, or snake_case) to canonical snake_case."""
+    if cmd in COMMAND_NAMES:
+        return cmd  # already canonical snake_case
+    if cmd in CAMEL_TO_SNAKE:
+        return CAMEL_TO_SNAKE[cmd]
+    if cmd in _ALIASES:
+        return _ALIASES[cmd]
+    return cmd  # pass through unknown commands (daemon will error)
 
 # --- Python 3.5/3.6 Compatibility Functions ---
 def run_asyncio(coro):
@@ -695,7 +750,9 @@ class EnhancedLSPTool:
         self.client = LSPToolClient()
         self.parser = LSPResponseParser()
     async def run_command(self, args) -> LSPResult:
-        cmd = args.command
+        cmd = normalize_command(args.command)
+        args.command = cmd  # ensure daemon sees canonical snake_case
+
         # 1. Enhanced: Definition / Type / Implementation (with source code)
         if cmd in ["get_definition", "get_type_definition", "get_implementation"]:
             if args.line:
@@ -706,8 +763,8 @@ class EnhancedLSPTool:
                 return LSPResult(error=f"'file_path', 'line' (1-indexed), and symbol are required for {cmd}")
 
             return await self.handle_definition_with_code(cmd, args)
-        
-        # 2. Aggregated: Call Hierarchy
+
+        # 2. Aggregated: Call Hierarchy (combined prepare + incoming + outgoing)
         if cmd == "get_call_hierarchy":
             if args.line:
                 args.line -= 1
@@ -717,21 +774,61 @@ class EnhancedLSPTool:
                 return LSPResult(error=f"'file_path', 'line' (1-indexed), and symbol are required for {cmd}")
 
             return await self.handle_full_call_hierarchy(args)
-        
-        # 3. Passthrough: Other standard commands
-        if cmd in ["get_hover", "get_references", "get_document_highlights"]:
+
+        # 3. Standalone: prepare_call_hierarchy (returns hierarchy item)
+        if cmd == "prepare_call_hierarchy":
             if args.line:
                 args.line -= 1
                 args.character = self._get_character(args.file_path, args.line, args.symbol)
                 del args.symbol
             else:
                 return LSPResult(error=f"'file_path', 'line' (1-indexed), and symbol are required for {cmd}")
+            lsp_response = await self.client.send_request(vars(args))
+            if lsp_response.error:
+                return lsp_response
+            items = lsp_response.result
+            if not items:
+                return LSPResult(error="Symbol not valid for call hierarchy.")
+            parsed_result_obj = self.parser.parse(command=cmd, data=items[0])
+            return LSPResult(result=parsed_result_obj)
+
+        # 4. Standalone: incoming_calls / outgoing_calls (requires item from prepare)
+        if cmd in ["incoming_calls", "outgoing_calls"]:
+            item = getattr(args, "item", None)
+            if item is None:
+                return LSPResult(error=f"'item' (JSON from prepare_call_hierarchy) is required for {cmd}")
+            if isinstance(item, str):
+                try:
+                    item = json.loads(item)
+                except json.JSONDecodeError:
+                    return LSPResult(error=f"'item' must be valid JSON: {item[:100]}")
+            # Map to daemon command names
+            daemon_cmd = "get_incoming_calls" if cmd == "incoming_calls" else "get_outgoing_calls"
+            lsp_response = await self.client.send_request({"command": daemon_cmd, "item": item})
+            if lsp_response.error:
+                return lsp_response
+            parsed_result_obj = self.parser.parse(command=cmd, data=lsp_response.result)
+            return LSPResult(result=parsed_result_obj)
+
+        # 5. Passthrough: Other standard commands
+        if cmd in ["hover", "find_references", "get_document_highlights"]:
+            if args.line:
+                args.line -= 1
+                args.character = self._get_character(args.file_path, args.line, args.symbol)
+                del args.symbol
+            else:
+                return LSPResult(error=f"'file_path', 'line' (1-indexed), and symbol are required for {cmd}")
+            # Map renamed commands to daemon names
+            if cmd == "hover":
+                args.command = "get_hover"
+            elif cmd == "find_references":
+                args.command = "get_references"
         if cmd in ["get_workspace_symbols"]:
             if args.file_path:
                 del args.file_path
                 safe_print("file_path is NOT allowed for `get_workspace_symbols` method, it searches the whole project as default.", file=sys.stdout)
         lsp_response = await self.client.send_request(vars(args))
-        parsed_result_obj = self.parser.parse(command=cmd,data=lsp_response.result)
+        parsed_result_obj = self.parser.parse(command=cmd, data=lsp_response.result)
         result = LSPResult(result=parsed_result_obj)
         return result
 
@@ -938,11 +1035,13 @@ ALLOWED_LSP_COMMANDS = [
     "did_create_files", "did_delete_files", "did_rename_files",
     "get_definition", "get_declaration", "get_type_definition",
     "get_implementation", "get_references", "get_hover",
+    "find_references", "hover",  # canonical aliases
     "get_signature_help", "get_document_highlights",
-    "get_call_hierarchy",
+    "get_call_hierarchy", "prepare_call_hierarchy",
+    "incoming_calls", "outgoing_calls",
     "get_document_symbols","get_workspace_symbols",
-    "daemon_shutdown"
-]
+    "daemon_shutdown",
+] + list(CAMEL_TO_SNAKE.keys())  # accept camelCase too
 
 # OpenAI function-calling format tool definition (used by tests and for reference)
 lsp_tool = {
@@ -959,16 +1058,7 @@ lsp_tool = {
                 "command": {
                     "type": "string",
                     "description": "The LSP command to run.",
-                    "enum": [
-                        "get_definition",
-                        "get_type_definition",
-                        "get_references",
-                        "get_hover",
-                        "get_call_hierarchy",
-                        "get_document_symbols",
-                        "get_workspace_symbols",
-                        "get_document_highlights",
-                    ],
+                    "enum": get_user_facing_commands(),
                 },
                 "file_path": {
                     "type": "string",
@@ -993,6 +1083,14 @@ lsp_tool = {
                     "description": (
                         "Search query for get_workspace_symbols. "
                         "Should be a symbol name (e.g., 'MyClass')."
+                    ),
+                },
+                "item": {
+                    "type": "string",
+                    "description": (
+                        "JSON string of a call hierarchy item (returned by "
+                        "prepare_call_hierarchy). Required for incoming_calls "
+                        "and outgoing_calls."
                     ),
                 },
             },
@@ -1020,6 +1118,7 @@ async def main_async():
     parser.add_argument("--character", type=int, default=None, help="Character offset (1-indexed) for positional commands.")
     parser.add_argument("--new_text", type=str, default=None, help="Required for 'change_document', provides the new file content.")
     parser.add_argument("--query", type=str, default=None, help="Required for 'get_workspace_symbols', the string to search for.")
+    parser.add_argument("--item", type=str, default=None, help="JSON string of a call hierarchy item (from prepare_call_hierarchy). Required for incoming_calls/outgoing_calls.")
 
     
     # --- File change notifications ---

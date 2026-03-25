@@ -20,6 +20,22 @@ TOOL_DEF: dict = _mod.lsp_tool  # type: ignore[attr-defined]
 # The commands exposed to the LLM (from the tool definition enum)
 LLM_COMMANDS = TOOL_DEF["function"]["parameters"]["properties"]["command"]["enum"]
 
+# All 12 user-facing commands in snake_case
+EXPECTED_SNAKE = {
+    "get_definition", "get_type_definition", "find_references",
+    "hover", "get_implementation", "get_call_hierarchy",
+    "prepare_call_hierarchy", "incoming_calls", "outgoing_calls",
+    "get_document_symbols", "get_workspace_symbols", "get_document_highlights",
+}
+
+# All 12 user-facing commands in camelCase
+EXPECTED_CAMEL = {
+    "goToDefinition", "goToTypeDefinition", "findReferences",
+    "hover", "goToImplementation", "getCallHierarchy",
+    "prepareCallHierarchy", "incomingCalls", "outgoingCalls",
+    "getDocumentSymbols", "getWorkspaceSymbols", "getDocumentHighlights",
+}
+
 
 # ---------------------------------------------------------------------------
 # Structure
@@ -60,13 +76,11 @@ class TestParameterDefinitions:
         cmd = props["command"]
         assert cmd["type"] == "string"
         assert "enum" in cmd
-        # The enum should contain all the user-facing LSP commands
-        expected = {
-            "get_definition", "get_type_definition", "get_references",
-            "get_hover", "get_call_hierarchy", "get_document_symbols",
-            "get_workspace_symbols", "get_document_highlights",
-        }
-        assert set(cmd["enum"]) == expected
+        # Default naming is snake_case
+        assert set(cmd["enum"]) == EXPECTED_SNAKE
+
+    def test_command_count(self, props):
+        assert len(props["command"]["enum"]) == 12
 
     def test_file_path(self, props):
         assert props["file_path"]["type"] == "string"
@@ -87,8 +101,11 @@ class TestParameterDefinitions:
 
     def test_optional_params_not_required(self):
         required = TOOL_DEF["function"]["parameters"]["required"]
-        for name in ("file_path", "symbol", "line", "query"):
+        for name in ("file_path", "symbol", "line", "query", "item"):
             assert name not in required
+
+    def test_item_param(self, props):
+        assert props["item"]["type"] == "string"
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +191,41 @@ class TestToolCallFormat:
         parsed = json.loads(s)
         assert parsed["role"] == "tool"
         assert "success" in parsed["content"]
+
+
+# ---------------------------------------------------------------------------
+# Naming convention
+# ---------------------------------------------------------------------------
+class TestNamingConvention:
+    def test_normalize_snake_passthrough(self):
+        assert _mod.normalize_command("get_definition") == "get_definition"
+        assert _mod.normalize_command("find_references") == "find_references"
+        assert _mod.normalize_command("hover") == "hover"
+
+    def test_normalize_camel_to_snake(self):
+        assert _mod.normalize_command("goToDefinition") == "get_definition"
+        assert _mod.normalize_command("findReferences") == "find_references"
+        assert _mod.normalize_command("goToImplementation") == "get_implementation"
+        assert _mod.normalize_command("prepareCallHierarchy") == "prepare_call_hierarchy"
+        assert _mod.normalize_command("incomingCalls") == "incoming_calls"
+        assert _mod.normalize_command("outgoingCalls") == "outgoing_calls"
+
+    def test_normalize_old_aliases(self):
+        assert _mod.normalize_command("get_hover") == "hover"
+        assert _mod.normalize_command("get_references") == "find_references"
+
+    def test_get_user_facing_commands_snake(self):
+        cmds = _mod.get_user_facing_commands("snake_case")
+        assert set(cmds) == EXPECTED_SNAKE
+
+    def test_get_user_facing_commands_camel(self):
+        cmds = _mod.get_user_facing_commands("camelCase")
+        assert set(cmds) == EXPECTED_CAMEL
+
+    def test_bidirectional_mapping_complete(self):
+        """Every snake_case key has a camelCase value and vice versa."""
+        assert len(_mod.COMMAND_NAMES) == 12
+        assert len(_mod.CAMEL_TO_SNAKE) == 12
 
 
 if __name__ == "__main__":
