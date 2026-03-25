@@ -1,39 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LSP Tool for OpenHands - Code Intelligence via Language Server Protocol
+LSP Tool for OpenHands - Code Intelligence via Language Server Protocol.
+
 Adapted from R2E-Gym for OpenHands benchmarks integration.
-"""
+Provides semantic code analysis via Pyright-based LSP, far beyond simple grep.
 
-Use this tool when you need to understand *how* code works, not just *what* it says. 
-It goes far beyond simple text search (`grep`) by analyzing the *abstract syntax tree* and symbol table.
+Commands: get_definition, get_type_definition, get_hover, get_call_hierarchy,
+get_references, get_document_highlights, get_document_symbols, get_workspace_symbols.
 
-Capabilities:
-* `get_definition`: "Go to Definition." Find where a variable, function, or class is defined AND returns the FULL source code of the target function/class.
-* `get_type_definition`: "Go to Type Definition." Finds the definition of a symbol's *type* AND returns the FULL source code. (e.g., on 'my_obj' in 'my_obj = MyClass()', this jumps to 'class MyClass:')
-* `get_hover`: "Hover." Get the symbol's docstring, inferred type, and function signature at the cursor.
-* `get_call_hierarchy`: "Call Hierarchy." Returns a complete report of Incoming Callers (all functions that *call* this function) and Outgoing Callees (all functions that *this* function calls) calls.
-* `get_references`: "Find All References." Find all usages of a symbol across the *entire project*.
-* `get_document_highlights`: "Highlight Usages." Highlights all usages of the symbol at the cursor *within the current file*.
-* `get_document_symbols`: "Document Outline." List all symbols (classes, functions, variables) in the *current file* as a hierarchical tree.
-* `get_workspace_symbols`: "Workspace Search." Search for symbols across the *entire project* by a query string. Note that the query string shoule be a symbol. (e.g., use "MyClass" instead of "class MyClass", use "my_function" instead of "def my_function")
-
-CRITICAL: This tool is AUTOMATICALLY SYNCHRONIZED.
-The system **automatically** syncs your file (e.g., when you use `str_replace_editor`) with this **Pyright-based LSP client**.
-This means you can immediately use analysis commands (like `get_definition` or `get_references`) on any file right *after* you have viewed or edited it.
-
-Notes:
-This tool is for **ANALYSIS ONLY**. To make changes, you MUST use the `str_replace_editor` tool.
-All positional commands (`get_definition`, `get_hover`, etc.) require `file_path`, `line` (1-indexed), and `symbol` (the name of a Python code entity).
-
-Parameters:
-  (1) command (string, required): The LSP command to run.
-Allowed values: [`get_definition`, `get_type_definition`, `get_references`, `get_hover`, `get_document_highlights`, `get_document_symbols`, `get_workspace_symbols`, `prepare_call_hierarchy`, `get_incoming_calls`, `get_outgoing_calls`]
-  (2) --file_path (string, optional): Absolute path to the file for the command. Except for `get_workspace_symbols`
-  (3) --symbol (string, optional): The name of a Python code entity for positional commands. Includes identifiers for Classes, Functions, Methods, Variables, Fields, and Modules. (e.g., 'MyClass', 'process_data', 'user_id').
-  (4) --line (integer, optional): Line number (1-indexed) for positional commands. Used with symbol to locate the specific symbol.
-  (5) --query (string, optional): Required for `get_workspace_symbols`, the symbol to search for.
-        Note that the query parameter shoule be a symbol. (e.g., use "MyClass" instead of "class MyClass", use "my_function" instead of "def my_function")
+All positional commands require file_path, line (1-indexed), and symbol.
+get_workspace_symbols requires --query instead.
 """
 
 import json
@@ -966,6 +943,63 @@ ALLOWED_LSP_COMMANDS = [
     "get_document_symbols","get_workspace_symbols",
     "daemon_shutdown"
 ]
+
+# OpenAI function-calling format tool definition (used by tests and for reference)
+lsp_tool = {
+    "type": "function",
+    "function": {
+        "name": "lsp_tool",
+        "description": (
+            "Code intelligence tool powered by Pyright Language Server. "
+            "Provides semantic, AST-based understanding of Python code."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The LSP command to run.",
+                    "enum": [
+                        "get_definition",
+                        "get_type_definition",
+                        "get_references",
+                        "get_hover",
+                        "get_call_hierarchy",
+                        "get_document_symbols",
+                        "get_workspace_symbols",
+                        "get_document_highlights",
+                    ],
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the file. Required for all commands "
+                        "except get_workspace_symbols."
+                    ),
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": (
+                        "Name of a Python code entity (class, function, variable). "
+                        "Required for positional commands."
+                    ),
+                },
+                "line": {
+                    "type": "integer",
+                    "description": "Line number (1-indexed) where the symbol appears.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Search query for get_workspace_symbols. "
+                        "Should be a symbol name (e.g., 'MyClass')."
+                    ),
+                },
+            },
+            "required": ["command"],
+        },
+    },
+}
 
 # --- Main ---
 async def main_async():

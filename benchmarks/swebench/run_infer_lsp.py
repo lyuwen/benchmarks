@@ -38,12 +38,137 @@ from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
 from openhands.sdk.llm.message import Message
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
+from openhands.tools.lsp import LSPTool  # registers the tool
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.legacy import get_legacy_tools
+from openhands.sdk.tool import Tool
 from openhands.workspace import APIRemoteWorkspace, DockerWorkspace
 
 
 logger = get_logger(__name__)
+
+# Paths to LSP scripts that get uploaded into the container
+LSP_DIR = Path(__file__).parent
+LSP_DAEMON_SCRIPT = LSP_DIR / "lsp_daemon.py"
+LSP_TOOL_SCRIPT = LSP_DIR / "lsp_tool.py"
+
+
+def setup_lsp_in_workspace(workspace: RemoteWorkspace) -> str:
+    """Upload LSP scripts and install dependencies. Returns the pyright-langserver path.
+
+    Call start_lsp_daemon() separately after the repo is copied to /workspace/.
+    """
+    logger.info("Setting up LSP tool in workspace...")
+
+    # Upload daemon and tool scripts
+    workspace.file_upload(str(LSP_DAEMON_SCRIPT), "/tmp/lsp_daemon.py")
+    workspace.file_upload(str(LSP_TOOL_SCRIPT), "/tmp/lsp_tool.py")
+
+    # Install dependencies.  The [nodejs] extra bundles Node.js via
+    # nodejs-wheel so pyright doesn't need to download it at runtime.
+    res = workspace.execute_command(
+        "pip install orjson 'pyright[nodejs]'",
+        timeout=120.0,
+    )
+    if res.exit_code != 0:
+        logger.warning(f"pip install failed (exit {res.exit_code}): {res.stderr}")
+    else:
+        logger.info("pip install orjson pyright succeeded")
+
+    # Find pyright-langserver binary — pip may install it to a scripts dir
+    # that isn't on PATH (e.g. /agent-server/.venv/bin/).
+    res = workspace.execute_command(
+        "python -c \""
+        "import sysconfig, os; "
+        "scripts = sysconfig.get_path('scripts'); "
+        "p = os.path.join(scripts, 'pyright-langserver'); "
+        "print(p if os.path.isfile(p) else 'NOT_FOUND')\"",
+        timeout=10.0,
+    )
+    pyright_path = res.stdout.strip()
+    if pyright_path == "NOT_FOUND":
+        # Fallback: broader search
+        res = workspace.execute_command(
+            "find / -name pyright-langserver -type f 2>/dev/null | head -1 || echo 'NOT_FOUND'",
+            timeout=15.0,
+        )
+        pyright_path = res.stdout.strip()
+    if not pyright_path or pyright_path == "NOT_FOUND":
+        logger.error(
+            "pyright-langserver not found anywhere after pip install. "
+            "LSP daemon will fail to start."
+        )
+        pyright_path = "pyright-langserver"  # fallback; will likely fail
+    else:
+        logger.info(f"pyright-langserver found at: {pyright_path}")
+
+    # Pre-warm: run pyright --version to ensure Node.js is ready.
+    # With pyright[nodejs] this should be instant; without it, this triggers
+    # the Node.js download so the daemon doesn't have to wait.
+    pyright_bin = pyright_path.replace("pyright-langserver", "pyright")
+    res = workspace.execute_command(
+        f"{pyright_bin} --version",
+        timeout=120.0,
+    )
+    if res.exit_code == 0:
+        logger.info(f"pyright pre-warm succeeded: {res.stdout.strip()}")
+    else:
+        logger.warning(f"pyright pre-warm failed (exit {res.exit_code}): {res.stderr}")
+
+    return pyright_path
+
+
+def start_lsp_daemon(
+    workspace: RemoteWorkspace,
+    pyright_path: str,
+    project_root: str,
+) -> None:
+    """Start the LSP daemon pointing at the given project root.
+
+    Must be called after the repo is copied to project_root.
+    """
+    # Start LSP daemon in background with explicit path to pyright-langserver.
+    # The daemon reads LSP_COMMAND and LSP_PROJECT_ROOT env vars.
+    lsp_command = f"{pyright_path} --stdio"
+    res = workspace.execute_command(
+        f"cd {project_root} && "
+        f"LSP_COMMAND='{lsp_command}' "
+        f"LSP_PROJECT_ROOT='{project_root}' "
+        "nohup python /tmp/lsp_daemon.py "
+        "> /tmp/lsp_daemon_stdout.log 2> /tmp/lsp_daemon.log &",
+        timeout=30.0,
+    )
+    logger.info(f"LSP daemon start result: exit_code={res.exit_code}")
+
+    # Poll for the port file — Pyright initialization on large codebases
+    # can take 60+ seconds.  The daemon writes the port file only after
+    # Pyright is fully initialized and the TCP server is listening.
+    PORT_FILE = "/var/tmp/lsp_port_session_abc.pid"
+    port_info = None
+    for attempt in range(1, 19):  # up to 90 seconds total
+        res = workspace.execute_command(
+            f"cat {PORT_FILE} 2>/dev/null || echo 'NO_PORT'",
+            timeout=10.0,
+        )
+        content = res.stdout.strip()
+        if content != "NO_PORT" and content.isdigit():
+            port_info = content
+            break
+        logger.info(f"Waiting for LSP daemon (attempt {attempt}/18)...")
+        workspace.execute_command("sleep 5", timeout=10.0)
+
+    if port_info:
+        logger.info(f"LSP daemon listening on port {port_info}")
+    else:
+        # Dump logs so we can diagnose
+        log_res = workspace.execute_command(
+            "echo '=== DAEMON LOG ===' && cat /tmp/lsp_daemon.log 2>/dev/null; "
+            "echo '=== DAEMON STDOUT ===' && cat /tmp/lsp_daemon_stdout.log 2>/dev/null",
+            timeout=10.0,
+        )
+        logger.error(
+            f"LSP daemon failed to start after 90s. Logs:\n{log_res.stdout}"
+        )
 
 
 def get_instruction(
@@ -78,13 +203,12 @@ def get_instruction(
 
 class SWEBenchEvaluation(Evaluation):
     """
-    Process-based SWE-bench evaluation implemented as a child of the
-    abstract Evaluation orchestrator.
+    LSP-enhanced SWE-bench evaluation.
 
-    Implements:
-      - prepare_instances()
-      - prepare_workspace(instance)
-      - evaluate_instance(instance, workspace)
+    Same as the base SWEBenchEvaluation but additionally:
+      - Uploads lsp_daemon.py and lsp_tool.py into the container
+      - Starts the Pyright-based LSP daemon
+      - Uses a prompt template that teaches the agent to use LSP commands
     """
 
     use_legacy_tools: int = Field(
@@ -181,6 +305,14 @@ class SWEBenchEvaluation(Evaluation):
                         f"{sdk_base}/openhands-{module}/openhands/{module}:"\
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
                         )
+            else:
+                # Always mount the LSP tool module so the agent-server can import it
+                sdk_base = Path(__file__).parent.parent.parent / "vendor/software-agent-sdk"
+                lsp_src = sdk_base / "openhands-tools/openhands/tools/lsp"
+                bind_volumes.append(
+                    f"{lsp_src}:"
+                    f"/agent-server/.venv/lib/python3.12/site-packages/openhands/tools/lsp"
+                )
             workspace = DockerWorkspace(
                 server_image=agent_server_image,
                 working_dir="/workspace",
@@ -233,16 +365,12 @@ class SWEBenchEvaluation(Evaluation):
                 )
             logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
 
-        # Start LSP daemon
-        logger.info("Starting LSP daemon...")
-        daemon_script = Path(__file__).parent / "lsp_daemon.py"
-        workspace.upload_file(str(daemon_script), "/tmp/lsp_daemon.py")
-        workspace.execute_command("chmod +x /tmp/lsp_daemon.py")
-        workspace.execute_command("pip install orjson pyright 2>/dev/null || true")
-        daemon_start = workspace.execute_command(
-            "nohup python /tmp/lsp_daemon.py > /tmp/lsp_daemon.log 2>&1 &"
-        )
-        logger.info(f"LSP daemon started: {daemon_start.stdout}")
+        # Install LSP dependencies and upload scripts (daemon started later
+        # in evaluate_instance after the repo is copied to /workspace/).
+        repo_name = instance.data["repo"].split("/")[-1]
+        project_root = f"/workspace/{repo_name}"
+        self._lsp_pyright_path = setup_lsp_in_workspace(workspace)
+        self._lsp_project_root = project_root
 
         return workspace
 
@@ -251,7 +379,10 @@ class SWEBenchEvaluation(Evaluation):
         self, instance: EvalInstance, workspace: RemoteWorkspace
     ) -> EvalOutput:
         """
-        Create conversation, run agent with LSP tool, collect history and git patch.
+        Create conversation, run agent, collect history and git patch.
+
+        The agent has access to the standard OpenHands tools plus the LSP tool,
+        which appears as a native function call: lsp_tool(command=..., file_path=..., ...)
         """
         if self.use_legacy_tools:
             tools = get_legacy_tools(
@@ -262,14 +393,8 @@ class SWEBenchEvaluation(Evaluation):
                 enable_browser=False,
             )
 
-        # Add LSP tool
-        try:
-            from lsp_tool_wrapper import get_lsp_tool
-            lsp_tool = get_lsp_tool()
-            tools.append(lsp_tool)
-            logger.info("LSP tool added to agent tools")
-        except Exception as e:
-            logger.warning(f"Failed to add LSP tool: {e}")
+        # Add the LSP tool as a native function-calling tool
+        tools.append(Tool(name=LSPTool.name))
 
         agent = Agent(
             llm=self.metadata.llm,
@@ -301,6 +426,13 @@ class SWEBenchEvaluation(Evaluation):
         )
         assert cp_testebed_repo.exit_code == 0, (
             f"cp_testebed_repo failed: {cp_testebed_repo.stderr}"
+        )
+
+        # Start LSP daemon now that the repo is at /workspace/{repo_name}/
+        start_lsp_daemon(
+            workspace,
+            pyright_path=self._lsp_pyright_path,
+            project_root=self._lsp_project_root,
         )
 
         # git reset
@@ -340,21 +472,21 @@ class SWEBenchEvaluation(Evaluation):
         # Dump conversation history
         messages = []
         tools_list = []
-        
+
         # Convert events to messages
         convertible_events = [e for e in conversation.state.events if isinstance(e, LLMConvertibleEvent)]
         msgs = LLMConvertibleEvent.events_to_messages(convertible_events)
-        
+
         for msg in msgs:
             msg_copy = msg.model_copy(update={"send_reasoning_content": True})
             messages.append(msg_copy.to_chat_dict())
-            
+
         for event in conversation.state.events:
             if isinstance(event, SystemPromptEvent):
                 for tool in event.tools:
                     if isinstance(tool, ToolDefinition):
                         tools_list.append(tool.to_openai_tool())
-        
+
         if not tools_list and tools:
             # Fallback to initial tools if not found in events
             for tool in tools:
@@ -394,7 +526,11 @@ class SWEBenchEvaluation(Evaluation):
 def main() -> None:
     prompt_dir = (Path(__file__).parent / "prompts").resolve()
     choices = [str(p.relative_to(Path.cwd())) for p in prompt_dir.glob("*.j2")]
-    default_prompt_path = prompt_dir / "default.j2"
+
+    # Default to the LSP-aware prompt
+    default_prompt_path = prompt_dir / "default_lsp.j2"
+    if not default_prompt_path.exists():
+        default_prompt_path = prompt_dir / "default.j2"
     assert default_prompt_path.exists(), (
         f"Default prompt {default_prompt_path} not found"
     )

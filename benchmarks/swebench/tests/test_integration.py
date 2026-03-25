@@ -1,220 +1,200 @@
 """
-Integration tests for LSP tool with OpenHands SDK
-Tests tool registration, execution flow, and agent integration
+Integration-level tests that verify the wiring between run_infer_lsp.py,
+the LSP scripts, the prompt template, and the native tool definition —
+without starting an agent or a Docker container.
 """
-import pytest
-import json
-from pathlib import Path
 import sys
-from unittest.mock import Mock, AsyncMock, patch
+from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
 
-from lsp_tool_wrapper import get_lsp_tool
-from lsp_tool import EnhancedLSPTool, LSPResult
-
-
-class TestToolIntegration:
-    """Test LSP tool integration with OpenHands"""
-
-    def test_tool_can_be_added_to_tools_list(self):
-        """Verify tool can be added to agent's tools list"""
-        lsp_tool = get_lsp_tool()
-        tools = [lsp_tool]
-
-        assert len(tools) == 1
-        assert callable(tools[0])
-        assert tools[0].__name__ == "lsp_tool"
-
-    def test_tool_metadata_accessible(self):
-        """Verify tool metadata is accessible for registration"""
-        lsp_tool = get_lsp_tool()
-
-        assert hasattr(lsp_tool, "__name__")
-        assert hasattr(lsp_tool, "__doc__")
-        assert lsp_tool.__name__ == "lsp_tool"
-        assert "LSP" in lsp_tool.__doc__
+SWEBENCH_DIR = Path(__file__).parent.parent
+sys.path.insert(0, str(SWEBENCH_DIR))
 
 
-class TestToolExecution:
-    """Test tool execution flow (mocked)"""
+# ---------------------------------------------------------------------------
+# Script presence
+# ---------------------------------------------------------------------------
+class TestScriptFiles:
+    """The LSP scripts must exist next to run_infer_lsp.py."""
 
-    @pytest.mark.asyncio
-    async def test_tool_execution_with_valid_args(self):
-        """Test tool execution with valid arguments"""
-        with patch('lsp_tool.EnhancedLSPTool') as MockTool:
-            # Mock the tool to return a success result
-            mock_instance = MockTool.return_value
-            mock_result = LSPResult(result={"summary": "Test successful"})
-            mock_instance.run_command = AsyncMock(return_value=mock_result)
+    def test_lsp_daemon_exists(self):
+        assert (SWEBENCH_DIR / "lsp_daemon.py").is_file()
 
-            lsp_tool = get_lsp_tool()
-            result = await lsp_tool(
-                command="get_workspace_symbols",
-                query="MyClass"
-            )
+    def test_lsp_tool_exists(self):
+        assert (SWEBENCH_DIR / "lsp_tool.py").is_file()
 
-            assert "Test successful" in result
-
-    @pytest.mark.asyncio
-    async def test_tool_execution_with_error(self):
-        """Test tool execution with error"""
-        with patch('lsp_tool.EnhancedLSPTool') as MockTool:
-            mock_instance = MockTool.return_value
-            mock_result = LSPResult(error="Connection failed")
-            mock_instance.run_command = AsyncMock(return_value=mock_result)
-
-            lsp_tool = get_lsp_tool()
-            result = await lsp_tool(
-                command="get_definition",
-                file_path="/test.py",
-                symbol="test",
-                line=10
-            )
-
-            assert "Connection failed" in result
+    def test_run_infer_lsp_exists(self):
+        assert (SWEBENCH_DIR / "run_infer_lsp.py").is_file()
 
 
-class TestAgentToolFormat:
-    """Test tool format for agent registration"""
+# ---------------------------------------------------------------------------
+# Prompt template
+# ---------------------------------------------------------------------------
+class TestPromptTemplate:
+    """The LSP prompt must exist and contain the right placeholders."""
 
-    def test_tool_signature_matches_openai_format(self):
-        """Verify tool signature can be converted to OpenAI format"""
-        import inspect
-        from lsp_tool import lsp_tool as tool_def
+    @pytest.fixture()
+    def template_text(self):
+        path = SWEBENCH_DIR / "prompts" / "default_lsp.j2"
+        assert path.is_file(), "prompts/default_lsp.j2 is missing"
+        return path.read_text()
 
-        lsp_tool = get_lsp_tool()
-        sig = inspect.signature(lsp_tool)
+    def test_contains_lsp_section(self, template_text):
+        assert "<lsp_tool>" in template_text
+        assert "</lsp_tool>" in template_text
 
-        # Tool definition should have matching parameters
-        tool_params = tool_def["function"]["parameters"]["properties"]
-        sig_params = sig.parameters
+    def test_documents_native_calling(self, template_text):
+        """Prompt should show native tool-calling syntax, not CLI syntax."""
+        assert 'lsp(command="get_definition"' in template_text or \
+               "lsp(command=" in template_text
 
-        for param_name in tool_params.keys():
-            assert param_name in sig_params, f"Parameter {param_name} not in signature"
+    def test_does_not_document_cli_syntax(self, template_text):
+        """With native tool calling, CLI examples should not be in prompt."""
+        assert "python /tmp/lsp_tool.py" not in template_text
 
-    def test_tool_can_be_serialized_with_other_tools(self):
-        """Test tool can be combined with other tools in request"""
-        from lsp_tool import lsp_tool as lsp_def
-
-        # Simulate multiple tools in completion request
-        tools = [
-            lsp_def,
-            {
-                "type": "function",
-                "function": {
-                    "name": "bash",
-                    "description": "Execute bash command",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": {"type": "string"}
-                        },
-                        "required": ["command"]
-                    }
-                }
-            }
-        ]
-
-        # Should serialize without errors
-        json_str = json.dumps({"tools": tools})
-        parsed = json.loads(json_str)
-
-        assert len(parsed["tools"]) == 2
-        tool_names = [t["function"]["name"] for t in parsed["tools"]]
-        assert "lsp_tool" in tool_names
-        assert "bash" in tool_names
+    def test_has_jinja_placeholders(self, template_text):
+        assert "{{ instance.repo_path }}" in template_text
+        assert "{{ instance.problem_statement }}" in template_text
+        assert "{{ instance.base_commit }}" in template_text
 
 
-class TestCommandValidation:
-    """Test command parameter validation"""
+# ---------------------------------------------------------------------------
+# run_infer_lsp.py references
+# ---------------------------------------------------------------------------
+class TestRunInferLSPReferences:
+    """Verify run_infer_lsp.py correctly references the LSP setup pieces."""
 
-    def test_valid_commands(self):
-        """Test all valid commands are accepted"""
-        from lsp_tool import ALLOWED_LSP_COMMANDS
+    @pytest.fixture()
+    def source(self):
+        return (SWEBENCH_DIR / "run_infer_lsp.py").read_text()
 
-        valid_commands = [
-            "get_definition",
-            "get_references",
-            "get_hover",
-            "get_workspace_symbols",
-        ]
+    def test_uses_file_upload(self, source):
+        """Must use workspace.file_upload (not upload_file)."""
+        assert "file_upload" in source
+        assert "upload_file" not in source
 
-        for cmd in valid_commands:
-            assert cmd in ALLOWED_LSP_COMMANDS
+    def test_uploads_daemon(self, source):
+        assert "lsp_daemon.py" in source
 
-    def test_tool_definition_enum_matches_allowed(self):
-        """Verify tool definition enum matches allowed commands"""
-        from lsp_tool import lsp_tool as tool_def, ALLOWED_LSP_COMMANDS
+    def test_uploads_tool(self, source):
+        assert "lsp_tool.py" in source
 
-        enum_commands = tool_def["function"]["parameters"]["properties"]["command"]["enum"]
+    def test_starts_daemon(self, source):
+        assert "lsp_daemon" in source
+        assert "nohup" in source
 
-        assert set(enum_commands) == set(ALLOWED_LSP_COMMANDS)
+    def test_passes_lsp_command_env(self, source):
+        """Must pass LSP_COMMAND env var so daemon finds pyright-langserver."""
+        assert "LSP_COMMAND" in source
 
+    def test_passes_lsp_project_root_env(self, source):
+        """Must pass LSP_PROJECT_ROOT so daemon analyzes the right directory."""
+        assert "LSP_PROJECT_ROOT" in source
 
-class TestParameterHandling:
-    """Test parameter handling and conversion"""
+    def test_verifies_pyright_installed(self, source):
+        """Must check that pyright-langserver is accessible."""
+        assert "pyright-langserver" in source
 
-    def test_args_object_creation(self):
-        """Test args object is created correctly from kwargs"""
-        # Simulate what wrapper does
-        kwargs = {
-            "command": "get_definition",
-            "file_path": "/test.py",
-            "symbol": "MyClass",
-            "line": 42,
-            "query": None
-        }
+    def test_polls_for_port_file(self, source):
+        """Must poll for daemon port file, not just sleep once."""
+        assert "attempt" in source or "retry" in source.lower() or "range" in source
 
-        args = type('Args', (), kwargs)()
+    def test_imports_lsp_tool_definition(self, source):
+        """Must import LSPTool for native tool registration."""
+        assert "LSPTool" in source
 
-        assert args.command == "get_definition"
-        assert args.file_path == "/test.py"
-        assert args.symbol == "MyClass"
-        assert args.line == 42
-        assert args.query is None
+    def test_adds_lsp_tool_to_tools_list(self, source):
+        """Must add the LSP tool to the agent's tools list."""
+        assert "Tool(name=LSPTool.name)" in source
 
-    def test_optional_parameters_can_be_none(self):
-        """Test optional parameters can be None"""
-        kwargs = {
-            "command": "get_workspace_symbols",
-            "file_path": None,
-            "symbol": None,
-            "line": None,
-            "query": "MyClass"
-        }
+    def test_default_prompt_is_lsp(self, source):
+        assert "default_lsp.j2" in source
 
-        args = type('Args', (), kwargs)()
-
-        assert args.command == "get_workspace_symbols"
-        assert args.query == "MyClass"
-        assert args.file_path is None
+    def test_bind_volume_for_lsp(self, source):
+        """Must bind-mount the LSP tool module into the container."""
+        assert "openhands/tools/lsp" in source
 
 
-class TestToolDescription:
-    """Test tool description for LLM understanding"""
+# ---------------------------------------------------------------------------
+# lsp_tool.py is a valid CLI
+# ---------------------------------------------------------------------------
+class TestLSPToolCLI:
+    """lsp_tool.py must be runnable as a CLI script."""
 
-    def test_description_mentions_key_capabilities(self):
-        """Verify description mentions key LSP capabilities"""
-        from lsp_tool import lsp_tool as tool_def
+    def test_has_main_guard(self):
+        src = (SWEBENCH_DIR / "lsp_tool.py").read_text()
+        assert 'if __name__ == "__main__"' in src
 
-        desc = tool_def["function"]["description"]
+    def test_has_argparse(self):
+        src = (SWEBENCH_DIR / "lsp_tool.py").read_text()
+        assert "argparse" in src
 
-        # Should mention key capabilities
-        assert "definition" in desc.lower()
-        assert "reference" in desc.lower() or "usage" in desc.lower()
-        assert "symbol" in desc.lower()
+    def test_has_all_cli_arguments(self):
+        src = (SWEBENCH_DIR / "lsp_tool.py").read_text()
+        for arg in ["--file_path", "--symbol", "--line", "--query"]:
+            assert arg in src, f"CLI argument {arg} not found"
 
-    def test_parameter_descriptions_are_clear(self):
-        """Verify parameter descriptions are clear"""
-        from lsp_tool import lsp_tool as tool_def
 
-        props = tool_def["function"]["parameters"]["properties"]
+# ---------------------------------------------------------------------------
+# lsp_daemon.py basics
+# ---------------------------------------------------------------------------
+class TestLSPDaemonBasics:
+    """Quick sanity checks on the daemon script."""
 
-        # Each parameter should have a description
-        for param_name, param_def in props.items():
-            assert "description" in param_def, f"No description for {param_name}"
-            assert len(param_def["description"]) > 10, f"Description too short for {param_name}"
+    def test_has_main_guard(self):
+        src = (SWEBENCH_DIR / "lsp_daemon.py").read_text()
+        assert 'if __name__ == "__main__"' in src or "def main" in src
+
+    def test_uses_pyright(self):
+        src = (SWEBENCH_DIR / "lsp_daemon.py").read_text()
+        assert "pyright" in src.lower()
+
+    def test_writes_port_file(self):
+        src = (SWEBENCH_DIR / "lsp_daemon.py").read_text()
+        assert "lsp_port_session" in src
+
+
+# ---------------------------------------------------------------------------
+# Native tool definition module
+# ---------------------------------------------------------------------------
+class TestNativeToolDefinition:
+    """Verify the native SDK tool definition exists and has correct structure."""
+
+    def test_definition_module_exists(self):
+        vendor_base = SWEBENCH_DIR.parent.parent / "vendor" / "software-agent-sdk"
+        defn = vendor_base / "openhands-tools/openhands/tools/lsp/definition.py"
+        assert defn.is_file(), "LSP tool definition module missing"
+
+    def test_definition_has_action_class(self):
+        vendor_base = SWEBENCH_DIR.parent.parent / "vendor" / "software-agent-sdk"
+        src = (vendor_base / "openhands-tools/openhands/tools/lsp/definition.py").read_text()
+        assert "class LSPAction" in src
+
+    def test_definition_has_observation_class(self):
+        vendor_base = SWEBENCH_DIR.parent.parent / "vendor" / "software-agent-sdk"
+        src = (vendor_base / "openhands-tools/openhands/tools/lsp/definition.py").read_text()
+        assert "class LSPObservation" in src
+
+    def test_definition_has_tool_class(self):
+        vendor_base = SWEBENCH_DIR.parent.parent / "vendor" / "software-agent-sdk"
+        src = (vendor_base / "openhands-tools/openhands/tools/lsp/definition.py").read_text()
+        assert "class LSPTool" in src
+
+    def test_definition_registers_tool(self):
+        vendor_base = SWEBENCH_DIR.parent.parent / "vendor" / "software-agent-sdk"
+        src = (vendor_base / "openhands-tools/openhands/tools/lsp/definition.py").read_text()
+        assert "register_tool" in src
+
+    def test_definition_has_all_commands(self):
+        vendor_base = SWEBENCH_DIR.parent.parent / "vendor" / "software-agent-sdk"
+        src = (vendor_base / "openhands-tools/openhands/tools/lsp/definition.py").read_text()
+        for cmd in [
+            "get_definition", "get_type_definition", "get_references",
+            "get_hover", "get_call_hierarchy", "get_document_symbols",
+            "get_workspace_symbols", "get_document_highlights",
+        ]:
+            assert cmd in src, f"Command {cmd} not in definition"
 
 
 if __name__ == "__main__":

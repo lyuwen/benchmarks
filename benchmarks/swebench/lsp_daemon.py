@@ -29,7 +29,7 @@ PORT_FILE_ENV_VAR = "/var/tmp/lsp_port_session_abc.pid"
 HOST = '127.0.0.1'
 PORT = 0
 LSP_HISTORY_FILE = "/tmp/lsp_history.json"
-DEFAULT_PROJECT_ROOT = "/testbed"
+DEFAULT_PROJECT_ROOT = os.environ.get("LSP_PROJECT_ROOT", "/testbed")
 DEFAULT_LSP_COMMAND = os.environ.get("LSP_COMMAND", "pyright-langserver --stdio")
 
 # Global variables for signal handling

@@ -1,230 +1,179 @@
 """
-Tests for OpenAI completion request format
-Validates that LSP tool definition works with actual OpenAI API format
+Tests for the OpenAI-format tool definition dict in lsp_tool.py.
+
+This is the JSON blob the LLM sees in the ``tools`` array of an OpenAI
+chat-completion request.
 """
-import pytest
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from lsp_tool import lsp_tool as lsp_tool_definition
+import lsp_tool as _mod
+
+# The OpenAI-format tool dict
+TOOL_DEF: dict = _mod.lsp_tool  # type: ignore[attr-defined]
+
+# The commands exposed to the LLM (from the tool definition enum)
+LLM_COMMANDS = TOOL_DEF["function"]["parameters"]["properties"]["command"]["enum"]
 
 
-class TestOpenAICompletionFormat:
-    """Test LSP tool in OpenAI completion request format"""
+# ---------------------------------------------------------------------------
+# Structure
+# ---------------------------------------------------------------------------
+class TestToolDefinitionStructure:
+    """Verify the dict matches OpenAI function-calling spec."""
 
-    def test_minimal_completion_request(self):
-        """Test tool in minimal completion request"""
-        request = {
-            "model": "gpt-4",
-            "messages": [
-                {"role": "user", "content": "Find the definition of MyClass"}
-            ],
-            "tools": [lsp_tool_definition]
+    def test_top_level_keys(self):
+        assert TOOL_DEF["type"] == "function"
+        assert "function" in TOOL_DEF
+
+    def test_function_keys(self):
+        func = TOOL_DEF["function"]
+        assert func["name"] == "lsp_tool"
+        assert isinstance(func["description"], str)
+        assert len(func["description"]) > 50
+        assert "parameters" in func
+
+    def test_parameters_is_json_schema(self):
+        params = TOOL_DEF["function"]["parameters"]
+        assert params["type"] == "object"
+        assert "properties" in params
+        assert "required" in params
+
+    def test_command_is_required(self):
+        assert "command" in TOOL_DEF["function"]["parameters"]["required"]
+
+
+# ---------------------------------------------------------------------------
+# Parameter definitions
+# ---------------------------------------------------------------------------
+class TestParameterDefinitions:
+    @pytest.fixture()
+    def props(self):
+        return TOOL_DEF["function"]["parameters"]["properties"]
+
+    def test_command_enum(self, props):
+        cmd = props["command"]
+        assert cmd["type"] == "string"
+        assert "enum" in cmd
+        # The enum should contain all the user-facing LSP commands
+        expected = {
+            "get_definition", "get_type_definition", "get_references",
+            "get_hover", "get_call_hierarchy", "get_document_symbols",
+            "get_workspace_symbols", "get_document_highlights",
         }
+        assert set(cmd["enum"]) == expected
 
-        # Should serialize cleanly
-        json_str = json.dumps(request, indent=2)
-        parsed = json.loads(json_str)
+    def test_file_path(self, props):
+        assert props["file_path"]["type"] == "string"
 
-        assert parsed["tools"][0]["type"] == "function"
-        assert parsed["tools"][0]["function"]["name"] == "lsp_tool"
+    def test_symbol(self, props):
+        assert props["symbol"]["type"] == "string"
 
-    def test_completion_request_with_tool_choice(self):
-        """Test tool with tool_choice parameter"""
+    def test_line(self, props):
+        assert props["line"]["type"] == "integer"
+
+    def test_query(self, props):
+        assert props["query"]["type"] == "string"
+
+    def test_all_have_descriptions(self, props):
+        for name, schema in props.items():
+            assert "description" in schema, f"{name} lacks description"
+            assert len(schema["description"]) > 10
+
+    def test_optional_params_not_required(self):
+        required = TOOL_DEF["function"]["parameters"]["required"]
+        for name in ("file_path", "symbol", "line", "query"):
+            assert name not in required
+
+
+# ---------------------------------------------------------------------------
+# Serialisation round-trip
+# ---------------------------------------------------------------------------
+class TestSerialisation:
+    def test_json_round_trip(self):
+        s = json.dumps(TOOL_DEF)
+        parsed = json.loads(s)
+        assert parsed["function"]["name"] == "lsp_tool"
+
+    def test_in_completion_request(self):
+        """Tool def can sit in a realistic completion request."""
         request = {
-            "model": "gpt-4",
-            "messages": [{"role": "user", "content": "Test"}],
-            "tools": [lsp_tool_definition],
-            "tool_choice": {"type": "function", "function": {"name": "lsp_tool"}}
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [TOOL_DEF],
+            "tool_choice": "auto",
         }
+        s = json.dumps(request)
+        parsed = json.loads(s)
+        assert len(parsed["tools"]) == 1
 
-        json_str = json.dumps(request)
-        parsed = json.loads(json_str)
-
-        assert parsed["tool_choice"]["function"]["name"] == "lsp_tool"
-
-    def test_completion_request_with_multiple_tools(self):
-        """Test LSP tool alongside other tools"""
-        bash_tool = {
+    def test_alongside_bash_tool(self):
+        bash = {
             "type": "function",
             "function": {
-                "name": "bash",
-                "description": "Execute bash command",
+                "name": "execute_bash",
+                "description": "Run a bash command",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "command": {"type": "string", "description": "Command to execute"}
-                    },
-                    "required": ["command"]
-                }
-            }
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
         }
-
-        request = {
-            "model": "gpt-4",
-            "messages": [{"role": "user", "content": "Test"}],
-            "tools": [lsp_tool_definition, bash_tool],
-            "tool_choice": "auto"
-        }
-
-        json_str = json.dumps(request)
-        parsed = json.loads(json_str)
-
-        assert len(parsed["tools"]) == 2
+        request = {"tools": [TOOL_DEF, bash]}
+        parsed = json.loads(json.dumps(request))
         names = [t["function"]["name"] for t in parsed["tools"]]
         assert "lsp_tool" in names
-        assert "bash" in names
+        assert "execute_bash" in names
 
-    def test_tool_call_response_format(self):
-        """Test simulated tool call in response"""
-        # Simulate OpenAI response with tool call
-        response = {
-            "id": "chatcmpl-123",
-            "object": "chat.completion",
-            "model": "gpt-4",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": "call_abc123",
-                        "type": "function",
-                        "function": {
-                            "name": "lsp_tool",
-                            "arguments": json.dumps({
-                                "command": "get_definition",
-                                "file_path": "/workspace/test.py",
-                                "symbol": "MyClass",
-                                "line": 42
-                            })
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }]
-        }
 
-        # Should parse cleanly
-        json_str = json.dumps(response)
-        parsed = json.loads(json_str)
-
-        tool_call = parsed["choices"][0]["message"]["tool_calls"][0]
-        assert tool_call["function"]["name"] == "lsp_tool"
-
-        args = json.loads(tool_call["function"]["arguments"])
-        assert args["command"] == "get_definition"
-        assert args["symbol"] == "MyClass"
-
-    def test_tool_result_in_messages(self):
-        """Test tool result can be added to messages"""
-        messages = [
-            {"role": "user", "content": "Find MyClass definition"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": "call_123",
+# ---------------------------------------------------------------------------
+# Simulated tool-call / tool-result round-trip
+# ---------------------------------------------------------------------------
+class TestToolCallFormat:
+    def test_tool_call_response(self):
+        """Simulated assistant message with a tool_call."""
+        msg = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_abc",
                     "type": "function",
                     "function": {
                         "name": "lsp_tool",
                         "arguments": json.dumps({
                             "command": "get_definition",
-                            "file_path": "/test.py",
-                            "symbol": "MyClass",
-                            "line": 10
-                        })
-                    }
-                }]
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call_123",
-                "content": "Found definition at /test.py line 5:\nclass MyClass:\n    pass"
-            }
-        ]
+                            "file_path": "/workspace/repo/foo.py",
+                            "symbol": "Bar",
+                            "line": 42,
+                        }),
+                    },
+                }
+            ],
+        }
+        s = json.dumps(msg)
+        parsed = json.loads(s)
+        args = json.loads(parsed["tool_calls"][0]["function"]["arguments"])
+        assert args["command"] == "get_definition"
+        assert args["line"] == 42
 
-        # Should serialize cleanly
-        json_str = json.dumps(messages)
-        parsed = json.loads(json_str)
-
-        assert len(parsed) == 3
-        assert parsed[2]["role"] == "tool"
-        assert "MyClass" in parsed[2]["content"]
-
-
-class TestParameterValidation:
-    """Test parameter validation in completion requests"""
-
-    def test_required_parameter_command(self):
-        """Test command is marked as required"""
-        params = lsp_tool_definition["function"]["parameters"]
-
-        assert "required" in params
-        assert "command" in params["required"]
-
-    def test_optional_parameters_not_required(self):
-        """Test optional parameters are not in required list"""
-        params = lsp_tool_definition["function"]["parameters"]
-        required = params["required"]
-
-        assert "file_path" not in required
-        assert "symbol" not in required
-        assert "line" not in required
-        assert "query" not in required
-
-    def test_enum_constraint_on_command(self):
-        """Test command has enum constraint"""
-        props = lsp_tool_definition["function"]["parameters"]["properties"]
-        cmd = props["command"]
-
-        assert "enum" in cmd
-        assert isinstance(cmd["enum"], list)
-        assert len(cmd["enum"]) > 0
-        assert "get_definition" in cmd["enum"]
-
-
-class TestJSONSchemaCompliance:
-    """Test JSON Schema compliance"""
-
-    def test_parameters_are_valid_json_schema(self):
-        """Test parameters follow JSON Schema spec"""
-        params = lsp_tool_definition["function"]["parameters"]
-
-        # Must have type
-        assert "type" in params
-        assert params["type"] == "object"
-
-        # Must have properties
-        assert "properties" in params
-        assert isinstance(params["properties"], dict)
-
-    def test_property_definitions_are_valid(self):
-        """Test each property has valid schema"""
-        props = lsp_tool_definition["function"]["parameters"]["properties"]
-
-        for prop_name, prop_def in props.items():
-            # Each property must have type
-            assert "type" in prop_def, f"Property {prop_name} missing type"
-
-            # Type must be valid
-            valid_types = ["string", "integer", "number", "boolean", "object", "array", "null"]
-            assert prop_def["type"] in valid_types, f"Invalid type for {prop_name}"
-
-            # Should have description
-            assert "description" in prop_def, f"Property {prop_name} missing description"
-
-    def test_no_additional_properties_restriction(self):
-        """Test additionalProperties is not overly restrictive"""
-        params = lsp_tool_definition["function"]["parameters"]
-
-        # Should either not have additionalProperties or it should be flexible
-        if "additionalProperties" in params:
-            # If present, should not be false (too restrictive)
-            assert params["additionalProperties"] != False
+    def test_tool_result_message(self):
+        """Tool result fed back into the conversation."""
+        msg = {
+            "role": "tool",
+            "tool_call_id": "call_abc",
+            "content": "[status_code]: success\n[Result]: Found definition ...",
+        }
+        s = json.dumps(msg)
+        parsed = json.loads(s)
+        assert parsed["role"] == "tool"
+        assert "success" in parsed["content"]
 
 
 if __name__ == "__main__":
