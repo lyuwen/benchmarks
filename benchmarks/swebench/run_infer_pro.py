@@ -150,6 +150,10 @@ class OrchestratorConfig(BaseModel):
         default="",
         description="PyPI mirror URL passed to pip install -i (e.g. https://mirrors.ustc.edu.cn/pypi/simple).",
     )
+    claude_settings_path: str = Field(
+        default="",
+        description="Host-side path to Claude settings.json to mount into container at ~/.claude/settings.json.",
+    )
 
     def to_container_env(self) -> dict[str, str]:
         """
@@ -283,6 +287,17 @@ class _ProContainer:
             else:
                 logger.warning(
                     "nodejs_path %s does not exist or is not a directory, skipping bind",
+                    host_path,
+                )
+
+        # --- Bind-mount Claude settings.json ---------------------------------
+        if cfg.claude_settings_path:
+            host_path = Path(cfg.claude_settings_path).resolve()
+            if host_path.is_file():
+                flags += ["-v", f"{host_path}:/root/.claude/settings.json:ro"]
+            else:
+                logger.warning(
+                    "claude_settings_path %s does not exist or is not a file, skipping bind",
                     host_path,
                 )
 
