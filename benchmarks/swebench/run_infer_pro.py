@@ -152,7 +152,11 @@ class OrchestratorConfig(BaseModel):
     )
     claude_settings_path: str = Field(
         default="",
-        description="Host-side path to Claude settings.json to mount into container at ~/.claude/settings.json.",
+        description="Host-side path to Claude settings.json to mount into container.",
+    )
+    claude_settings_container_path: str = Field(
+        default="/home/openhands/.claude/settings.json",
+        description="Container-side path where settings.json is mounted.",
     )
 
     def to_container_env(self) -> dict[str, str]:
@@ -294,7 +298,7 @@ class _ProContainer:
         if cfg.claude_settings_path:
             host_path = Path(cfg.claude_settings_path).resolve()
             if host_path.is_file():
-                flags += ["-v", f"{host_path}:/root/.claude/settings.json:ro"]
+                flags += ["-v", f"{host_path}:{cfg.claude_settings_container_path}:ro"]
             else:
                 logger.warning(
                     "claude_settings_path %s does not exist or is not a file, skipping bind",
