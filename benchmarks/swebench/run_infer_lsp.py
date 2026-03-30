@@ -38,7 +38,14 @@ from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
 from openhands.sdk.llm.message import Message
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
-from openhands.tools.lsp import LSPTool  # registers the tool
+from openhands.tools.lsp import (
+    LSPTool,
+    setup_lsp_in_workspace,
+    start_lsp_daemon,
+    add_lsp_args,
+    apply_lsp_naming,
+    get_lsp_command_names,
+)
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.legacy import get_legacy_tools
 from openhands.sdk.tool import Tool
@@ -47,135 +54,12 @@ from openhands.workspace import APIRemoteWorkspace, DockerWorkspace
 
 logger = get_logger(__name__)
 
-# Paths to LSP scripts that get uploaded into the container
-LSP_DIR = Path(__file__).parent
-LSP_DAEMON_SCRIPT = LSP_DIR / "lsp_daemon.py"
-LSP_TOOL_SCRIPT = LSP_DIR / "lsp_tool.py"
-
-
-def setup_lsp_in_workspace(workspace: RemoteWorkspace) -> str:
-    """Upload LSP scripts and install dependencies. Returns the pyright-langserver path.
-
-    Call start_lsp_daemon() separately after the repo is copied to /workspace/.
-    """
-    logger.info("Setting up LSP tool in workspace...")
-
-    # Upload daemon and tool scripts
-    workspace.file_upload(str(LSP_DAEMON_SCRIPT), "/tmp/lsp_daemon.py")
-    workspace.file_upload(str(LSP_TOOL_SCRIPT), "/tmp/lsp_tool.py")
-
-    # Install dependencies.  The [nodejs] extra bundles Node.js via
-    # nodejs-wheel so pyright doesn't need to download it at runtime.
-    res = workspace.execute_command(
-        "pip install orjson 'pyright[nodejs]'",
-        timeout=120.0,
-    )
-    if res.exit_code != 0:
-        logger.warning(f"pip install failed (exit {res.exit_code}): {res.stderr}")
-    else:
-        logger.info("pip install orjson pyright succeeded")
-
-    # Find pyright-langserver binary — pip may install it to a scripts dir
-    # that isn't on PATH (e.g. /agent-server/.venv/bin/).
-    res = workspace.execute_command(
-        "python -c \""
-        "import sysconfig, os; "
-        "scripts = sysconfig.get_path('scripts'); "
-        "p = os.path.join(scripts, 'pyright-langserver'); "
-        "print(p if os.path.isfile(p) else 'NOT_FOUND')\"",
-        timeout=10.0,
-    )
-    pyright_path = res.stdout.strip()
-    if pyright_path == "NOT_FOUND":
-        # Fallback: broader search
-        res = workspace.execute_command(
-            "find / -name pyright-langserver -type f 2>/dev/null | head -1 || echo 'NOT_FOUND'",
-            timeout=15.0,
-        )
-        pyright_path = res.stdout.strip()
-    if not pyright_path or pyright_path == "NOT_FOUND":
-        logger.error(
-            "pyright-langserver not found anywhere after pip install. "
-            "LSP daemon will fail to start."
-        )
-        pyright_path = "pyright-langserver"  # fallback; will likely fail
-    else:
-        logger.info(f"pyright-langserver found at: {pyright_path}")
-
-    # Pre-warm: run pyright --version to ensure Node.js is ready.
-    # With pyright[nodejs] this should be instant; without it, this triggers
-    # the Node.js download so the daemon doesn't have to wait.
-    pyright_bin = pyright_path.replace("pyright-langserver", "pyright")
-    res = workspace.execute_command(
-        f"{pyright_bin} --version",
-        timeout=120.0,
-    )
-    if res.exit_code == 0:
-        logger.info(f"pyright pre-warm succeeded: {res.stdout.strip()}")
-    else:
-        logger.warning(f"pyright pre-warm failed (exit {res.exit_code}): {res.stderr}")
-
-    return pyright_path
-
-
-def start_lsp_daemon(
-    workspace: RemoteWorkspace,
-    pyright_path: str,
-    project_root: str,
-) -> None:
-    """Start the LSP daemon pointing at the given project root.
-
-    Must be called after the repo is copied to project_root.
-    """
-    # Start LSP daemon in background with explicit path to pyright-langserver.
-    # The daemon reads LSP_COMMAND and LSP_PROJECT_ROOT env vars.
-    lsp_command = f"{pyright_path} --stdio"
-    res = workspace.execute_command(
-        f"cd {project_root} && "
-        f"LSP_COMMAND='{lsp_command}' "
-        f"LSP_PROJECT_ROOT='{project_root}' "
-        "nohup python /tmp/lsp_daemon.py "
-        "> /tmp/lsp_daemon_stdout.log 2> /tmp/lsp_daemon.log &",
-        timeout=30.0,
-    )
-    logger.info(f"LSP daemon start result: exit_code={res.exit_code}")
-
-    # Poll for the port file — Pyright initialization on large codebases
-    # can take 60+ seconds.  The daemon writes the port file only after
-    # Pyright is fully initialized and the TCP server is listening.
-    PORT_FILE = "/var/tmp/lsp_port_session_abc.pid"
-    port_info = None
-    for attempt in range(1, 19):  # up to 90 seconds total
-        res = workspace.execute_command(
-            f"cat {PORT_FILE} 2>/dev/null || echo 'NO_PORT'",
-            timeout=10.0,
-        )
-        content = res.stdout.strip()
-        if content != "NO_PORT" and content.isdigit():
-            port_info = content
-            break
-        logger.info(f"Waiting for LSP daemon (attempt {attempt}/18)...")
-        workspace.execute_command("sleep 5", timeout=10.0)
-
-    if port_info:
-        logger.info(f"LSP daemon listening on port {port_info}")
-    else:
-        # Dump logs so we can diagnose
-        log_res = workspace.execute_command(
-            "echo '=== DAEMON LOG ===' && cat /tmp/lsp_daemon.log 2>/dev/null; "
-            "echo '=== DAEMON STDOUT ===' && cat /tmp/lsp_daemon_stdout.log 2>/dev/null",
-            timeout=10.0,
-        )
-        logger.error(
-            f"LSP daemon failed to start after 90s. Logs:\n{log_res.stdout}"
-        )
-
 
 def get_instruction(
     instance: dict,
     metadata: EvalMetadata,
     workspace_path: str,
-    lsp_naming: str = "snake_case",
+    lsp_naming: str = "camelCase",
 ) -> str:
     """Generate instruction for the agent."""
     workspace_dir_name = instance["repo"].split("/")[-1]
@@ -189,11 +73,7 @@ def get_instruction(
     template = env.get_template(template_name)
 
     # Build command name lookup for the chosen naming convention
-    from benchmarks.swebench.lsp_tool import COMMAND_NAMES
-    if lsp_naming == "camelCase":
-        cmd_names = {k: v for k, v in COMMAND_NAMES.items()}
-    else:
-        cmd_names = {k: k for k in COMMAND_NAMES}
+    cmd_names = get_lsp_command_names(lsp_naming)
 
     # Prepare context for rendering
     context = {
@@ -268,10 +148,7 @@ class SWEBenchEvaluation(Evaluation):
         """
         # Set LSP_NAMING so it gets forwarded into the container for the
         # SDK tool definition module (definition.py reads it at import time).
-        os.environ["LSP_NAMING"] = self.lsp_naming
-        forward_env = list(forward_env or [])
-        if "LSP_NAMING" not in forward_env:
-            forward_env.append("LSP_NAMING")
+        forward_env = apply_lsp_naming(self.lsp_naming, forward_env)
         official_docker_image = get_official_docker_image(instance.id)
         build_target = "source-minimal"
         custom_tag = extract_custom_tag(official_docker_image)
@@ -414,7 +291,7 @@ class SWEBenchEvaluation(Evaluation):
             )
 
         # Add the LSP tool as a native function-calling tool
-        tools.append(Tool(name=LSPTool.name))
+        tools.append(Tool(name=LSPTool.name, params={"lsp_naming": self.lsp_naming}))
 
         agent = Agent(
             llm=self.metadata.llm,
@@ -574,13 +451,7 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
-    parser.add_argument(
-        "--lsp-naming",
-        type=str,
-        default="snake_case",
-        choices=["snake_case", "camelCase"],
-        help="Naming convention for LSP tool commands (default: snake_case)",
-    )
+    add_lsp_args(parser)
     args = parser.parse_args()
 
     # Validate max_attempts
