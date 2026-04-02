@@ -308,10 +308,14 @@ class _ProContainer:
                 )
 
         # --- Bind-mount Claude settings.json ---------------------------------
+        # Mount settings file to a staging path; it gets copied into the
+        # target directory by the entrypoint so the directory stays writable.
+        claude_settings_stage = ""
         if cfg.claude_settings_path:
             host_path = Path(cfg.claude_settings_path).resolve()
             if host_path.is_file():
-                flags += ["-v", f"{host_path}:{cfg.claude_settings_container_path}:ro"]
+                claude_settings_stage = "/tmp/claude-settings.json"
+                flags += ["-v", f"{host_path}:{claude_settings_stage}:ro"]
             else:
                 logger.warning(
                     "claude_settings_path %s does not exist or is not a file, skipping bind",
@@ -343,8 +347,17 @@ class _ProContainer:
         pip_index = ""
         if cfg.pip_index_url:
             pip_index = f" -i {cfg.pip_index_url}"
+        # Ensure the .claude directory exists and copy settings if staged.
+        claude_dir_setup = ""
+        if claude_settings_stage:
+            claude_dir = str(Path(cfg.claude_settings_container_path).parent)
+            claude_dir_setup = (
+                f"mkdir -p {claude_dir} && "
+                f"cp {claude_settings_stage} {cfg.claude_settings_container_path} && "
+            )
         entrypoint_cmd = (
             f"{path_export}"
+            f"{claude_dir_setup}"
             f"cp -r {self.AGENT_SERVER_PRO_MOUNT} {self.WRITABLE_DIR} && "
             f"cd {self.WRITABLE_DIR} && "
             f"pip install -q{pip_index} -r requirements.txt && "
