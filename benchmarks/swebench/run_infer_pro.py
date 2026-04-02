@@ -655,11 +655,11 @@ class ProSWEBenchEvaluation(Evaluation):
                 # Retry on anything other than success
                 if run_status != "completed":
                     if attempt < max_attempts:
-                        stderr_snippet = (claude_stderr or "")[:500]
-                        stdout_snippet = (claude_stdout or "")[:500]
+                        stderr_snippet = (claude_stderr or "")[-1000:]
+                        stdout_snippet = (claude_stdout or "")[-1000:]
                         logger.warning(
                             "Failure %s for %s (attempt %d/%d), will retry. "
-                            "exit_code=%s stderr: %s stdout: %s",
+                            "exit_code=%s stderr: %s stdout(tail): %s",
                             run_status, instance.id, attempt, max_attempts,
                             claude_exit_code, stderr_snippet, stdout_snippet,
                         )
