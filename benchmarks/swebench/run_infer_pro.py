@@ -617,6 +617,9 @@ class ProSWEBenchEvaluation(Evaluation):
                     )
                     resp.raise_for_status()
                     result = resp.json()
+                    # Guard against double-encoded JSON (string instead of dict)
+                    if isinstance(result, str):
+                        result = json.loads(result)
 
                 run_status = result.get("status", "unknown")
                 claude_stdout = result.get("claude_stdout")
