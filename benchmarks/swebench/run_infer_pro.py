@@ -146,6 +146,10 @@ class OrchestratorConfig(BaseModel):
         default=True,
         description="Keep per-job JSONL trace files after the job completes (KEEP_LOGS).",
     )
+    verbose_proxy: bool = Field(
+        default=False,
+        description="Enable real-time logging of proxy request/response traffic (VERBOSE_PROXY).",
+    )
     pip_index_url: str = Field(
         default="",
         description="PyPI mirror URL passed to pip install -i (e.g. https://mirrors.ustc.edu.cn/pypi/simple).",
@@ -179,6 +183,8 @@ class OrchestratorConfig(BaseModel):
         }
         if self.anthropic_model:
             env["ANTHROPIC_MODEL"] = self.anthropic_model
+        if self.verbose_proxy:
+            env["VERBOSE_PROXY"] = "true"
         return env
 
 
