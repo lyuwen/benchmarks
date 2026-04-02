@@ -150,6 +150,13 @@ class OrchestratorConfig(BaseModel):
         default=False,
         description="Enable real-time logging of proxy request/response traffic (VERBOSE_PROXY).",
     )
+    run_retries: int = Field(
+        default=0,
+        description=(
+            "Number of retries for the orchestrator /run call on transient failures "
+            "(HTTP errors, proxy_start_failed, proxy_crashed). 0 means no retries."
+        ),
+    )
     pip_index_url: str = Field(
         default="",
         description="PyPI mirror URL passed to pip install -i (e.g. https://mirrors.ustc.edu.cn/pypi/simple).",
@@ -582,7 +589,7 @@ class ProSWEBenchEvaluation(Evaluation):
             workspace_path="/workspace",
         )
 
-        # ---- 3. POST to /run ------------------------------------------------
+        # ---- 3. POST to /run with retries -----------------------------------
         logger.info("Posting to orchestrator /run for instance %s", instance.id)
 
         trace: list[dict[str, Any]] = []
@@ -591,36 +598,57 @@ class ProSWEBenchEvaluation(Evaluation):
         claude_exit_code: int | None = None
         run_status = "error"
 
-        try:
-            # HTTP timeout must exceed claude_timeout to allow orchestrator to respond
-            http_timeout = self.orchestrator_config.claude_timeout + 60
-            with httpx.Client(timeout=httpx.Timeout(http_timeout)) as client:
-                resp = client.post(
-                    f"{container.orchestrator_url}/run",
-                    json={"prompt": instruction, "work_dir": repo_path},
+        max_attempts = 1 + self.orchestrator_config.run_retries
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                logger.info("Retry attempt %d/%d for %s", attempt, max_attempts, instance.id)
+                # Reset workspace before retry
+                r = container.exec(f"cd {repo_path} && git reset --hard && git clean -fdx")
+                if r.returncode != 0:
+                    logger.warning("git reset failed on retry: %s", r.stderr)
+
+            try:
+                # HTTP timeout must exceed claude_timeout to allow orchestrator to respond
+                http_timeout = self.orchestrator_config.claude_timeout + 60
+                with httpx.Client(timeout=httpx.Timeout(http_timeout)) as client:
+                    resp = client.post(
+                        f"{container.orchestrator_url}/run",
+                        json={"prompt": instruction, "work_dir": repo_path},
+                    )
+                    resp.raise_for_status()
+                    result = resp.json()
+
+                run_status = result.get("status", "unknown")
+                claude_stdout = result.get("claude_stdout")
+                claude_stderr = result.get("claude_stderr")
+                claude_exit_code = result.get("claude_exit_code")
+                trace = result.get("trace") or []
+
+                logger.info(
+                    "Orchestrator returned status=%s exit_code=%s trace_entries=%d",
+                    run_status, claude_exit_code, len(trace),
                 )
-                resp.raise_for_status()
-                result = resp.json()
+                if claude_stderr:
+                    logger.info("Claude stderr:\n%s", claude_stderr[:2000])
 
-            run_status = result.get("status", "unknown")
-            claude_stdout = result.get("claude_stdout")
-            claude_stderr = result.get("claude_stderr")
-            claude_exit_code = result.get("claude_exit_code")
-            trace = result.get("trace") or []
+                # Retry only on transient failures
+                if run_status in ("proxy_start_failed", "proxy_crashed"):
+                    if attempt < max_attempts:
+                        logger.warning("Transient failure %s, will retry", run_status)
+                        continue
+                # Success or non-retryable failure — break
+                break
 
-            logger.info(
-                "Orchestrator returned status=%s exit_code=%s trace_entries=%d",
-                run_status, claude_exit_code, len(trace),
-            )
-            if claude_stderr:
-                logger.info("Claude stderr:\n%s", claude_stderr[:2000])
-
-        except httpx.TimeoutException:
-            logger.error("Orchestrator /run timed out for %s", instance.id)
-            run_status = "timed_out"
-        except Exception as e:
-            logger.error("Orchestrator /run failed for %s: %s", instance.id, e)
-            run_status = "error"
+            except httpx.TimeoutException:
+                logger.error("Orchestrator /run timed out for %s", instance.id)
+                run_status = "timed_out"
+                if attempt < max_attempts:
+                    continue
+            except Exception as e:
+                logger.error("Orchestrator /run failed for %s: %s", instance.id, e)
+                run_status = "error"
+                if attempt < max_attempts:
+                    continue
 
         # ---- 4. Generate git patch ------------------------------------------
         container.exec(f"cd {repo_path} && git add -A")
