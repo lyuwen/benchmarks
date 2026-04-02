@@ -348,11 +348,16 @@ class _ProContainer:
         if cfg.pip_index_url:
             pip_index = f" -i {cfg.pip_index_url}"
         # Ensure the .claude directory exists and copy settings if staged.
-        claude_dir_setup = ""
+        # Also create a minimal ~/.claude.json so Claude Code behaves as if
+        # onboarding is already complete.
+        claude_dir = str(Path(cfg.claude_settings_container_path).parent)
+        claude_home = str(Path(claude_dir).parent)
+        claude_dir_setup = (
+            f"mkdir -p {claude_dir} && "
+            f"""echo '{{"numStartups":1,"autoUpdates":false,"hasCompletedOnboarding":true}}' > {claude_home}/.claude.json && """
+        )
         if claude_settings_stage:
-            claude_dir = str(Path(cfg.claude_settings_container_path).parent)
-            claude_dir_setup = (
-                f"mkdir -p {claude_dir} && "
+            claude_dir_setup += (
                 f"cp {claude_settings_stage} {cfg.claude_settings_container_path} && "
             )
         entrypoint_cmd = (
