@@ -634,8 +634,8 @@ class ProSWEBenchEvaluation(Evaluation):
                 if claude_stderr:
                     logger.info("Claude stderr:\n%s", claude_stderr[:2000])
 
-                # Retry only on transient failures
-                if run_status in ("failed", "proxy_start_failed", "proxy_crashed"):
+                # Retry on anything other than success
+                if run_status != "completed":
                     if attempt < max_attempts:
                         logger.warning("Transient failure %s, will retry", run_status)
                         continue
