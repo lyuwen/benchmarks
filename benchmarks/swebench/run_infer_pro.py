@@ -655,7 +655,11 @@ class ProSWEBenchEvaluation(Evaluation):
                 # Retry on anything other than success
                 if run_status != "completed":
                     if attempt < max_attempts:
-                        logger.warning("Transient failure %s for %s, will retry", run_status, instance.id)
+                        stderr_snippet = (claude_stderr or "")[:500]
+                        logger.warning(
+                            "Failure %s for %s (attempt %d/%d), will retry. stderr: %s",
+                            run_status, instance.id, attempt, max_attempts, stderr_snippet,
+                        )
                         continue
                 # Success or non-retryable failure — break
                 break
