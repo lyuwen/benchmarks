@@ -128,7 +128,10 @@ class SWEBenchEvaluation(Evaluation):
                            Higher values allocate more CPU/memory resources.
                            Used by APIRemoteWorkspace for remote runtime allocation.
         """
-        official_docker_image = get_official_docker_image(instance.id)
+        if "image_name" in instance.data:
+            official_docker_image = instance.data["image_name"]
+        else:
+            official_docker_image = get_official_docker_image(instance.id)
         build_target = "source-minimal"
         custom_tag = extract_custom_tag(official_docker_image)
         # For non-binary targets, append target suffix
