@@ -40,7 +40,7 @@ from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.legacy import get_legacy_tools
-from openhands.workspace import APIRemoteWorkspace, DockerWorkspace
+from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
 
 
 logger = get_logger(__name__)
@@ -183,6 +183,27 @@ class SWEBenchEvaluation(Evaluation):
                         )
             workspace = DockerWorkspace(
                 server_image=agent_server_image,
+                working_dir="/workspace",
+                forward_env=forward_env or [],
+                bind_volumes=bind_volumes,
+            )
+        elif self.metadata.workspace_type == "flex":
+            agent_plugin_image = os.getenv(
+                "AGENT_PLUGIN_IMAGE", "openhands/agent-plugin"
+            )
+            bind_volumes = []
+            if self.bind_dev_sdk:
+                sdk_base = (
+                    Path(__file__).parent.parent.parent / "vendor/software-agent-sdk"
+                )
+                for module in ["tools", "sdk", "agent-server", "workspace"]:
+                    bind_volumes.append(
+                        f"{sdk_base}/openhands-{module}/openhands/{module}:"
+                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                    )
+            workspace = FlexWorkspace(
+                base_image=official_docker_image,
+                agent_plugin_image=agent_plugin_image,
                 working_dir="/workspace",
                 forward_env=forward_env or [],
                 bind_volumes=bind_volumes,
