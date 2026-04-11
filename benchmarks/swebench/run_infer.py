@@ -203,6 +203,7 @@ class SWEBenchEvaluation(Evaluation):
                     bind_volumes.append(
                         f"{sdk_base}/openhands-{module}/openhands/{module}:"
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                        ":ro"
                     )
             workspace = FlexWorkspace(
                 base_image=official_docker_image,
