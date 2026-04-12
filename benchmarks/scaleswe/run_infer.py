@@ -163,6 +163,7 @@ class ScaleSWEEvaluation(Evaluation):
                     bind_volumes.append(
                         f"{sdk_base}/openhands-{module}/openhands/{module}:"
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                        ":ro"
                     )
             workspace = FlexWorkspace(
                 base_image=base_image,
@@ -204,6 +205,7 @@ class ScaleSWEEvaluation(Evaluation):
                     bind_volumes.append(
                         f"{sdk_base}/openhands-{module}/openhands/{module}:"
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                        ":ro"
                     )
             workspace = DockerWorkspace(
                 server_image=agent_server_image,
@@ -277,6 +279,22 @@ class ScaleSWEEvaluation(Evaluation):
 
         assert isinstance(workspace, RemoteWorkspace)
 
+        # For some reason we need to instantiate the Conversation object early and leave a few steps
+        # before sending the instruction. Otherwise, there is a random chance that the user message is
+        # not recorded in the events.
+        persist_callback = build_event_persistence_callback(
+            run_id=self.metadata.eval_output_dir,
+            instance_id=instance.id,
+            attempt=self.current_attempt,
+        )
+
+        conversation = Conversation(
+            agent=agent,
+            workspace=workspace,
+            callbacks=[persist_callback],
+            max_iteration_per_run=self.metadata.max_iterations,
+        )
+
         # Scale-SWE: repo is already at workdir (no /testbed copy needed)
         repo_path = instance.data.get("workdir", "/workspace")
         if not repo_path.endswith("/"):
@@ -307,18 +325,10 @@ class ScaleSWEEvaluation(Evaluation):
                     pre_result.stderr,
                 )
 
-        persist_callback = build_event_persistence_callback(
-            run_id=self.metadata.eval_output_dir,
-            instance_id=instance.id,
-            attempt=self.current_attempt,
+        breif_history = workspace.execute_command(
+            (f"cd {repo_path} ; git --no-pager log --oneline -10")
         )
-
-        conversation = Conversation(
-            agent=agent,
-            workspace=workspace,
-            callbacks=[persist_callback],
-            max_iteration_per_run=self.metadata.max_iterations,
-        )
+        logger.info(f"Repo status:\n* Current commit: {instance.data['base_commit']}\n* Top 10 history:\n{breif_history.stdout.strip()}")
 
         instruction = get_instruction(
             instance=instance.data,
