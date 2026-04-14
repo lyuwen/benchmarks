@@ -7,14 +7,7 @@ from jinja2 import Environment, FileSystemLoader
 from pydantic import Field
 from omegaconf import OmegaConf
 
-from benchmarks.swebench.build_images import (
-    extract_custom_tag,
-    get_official_docker_image,
-    should_wrap_instance_id,
-    wrap_image,
-)
 from benchmarks.utils.args_parser import get_parser
-from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
@@ -35,7 +28,6 @@ from benchmarks.utils.version import SDK_SHORT_SHA
 from openhands.sdk import LLM, Agent, Conversation, get_logger
 from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
-from openhands.sdk.llm.message import Message
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
@@ -46,40 +38,63 @@ from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspa
 logger = get_logger(__name__)
 
 
+def resolve_image_url(image_url: str, prefix: str | None = None) -> str:
+    """Resolve Docker image URL with optional namespace/registry override.
+
+    If prefix is provided, replaces everything before the last '/' in image_url.
+
+    Examples:
+        resolve_image_url("aweaiteam/scaleswe:tag", None)
+            -> "aweaiteam/scaleswe:tag"
+        resolve_image_url("aweaiteam/scaleswe:tag", "myregistry.com/myorg")
+            -> "myregistry.com/myorg/scaleswe:tag"
+    """
+    if not prefix:
+        return image_url
+    _, _, image_name = image_url.rpartition("/")
+    return f"{prefix.rstrip('/')}/{image_name}"
+
+
+def extract_custom_tag(image_url: str) -> str:
+    """Extract image name (without registry and tag) for use as a custom tag."""
+    name_tag = image_url.split("/")[-1]
+    name = name_tag.split(":")[0]
+    return name
+
+
 def get_instruction(
     instance: dict,
     metadata: EvalMetadata,
     workspace_path: str,
 ) -> str:
     """Generate instruction for the agent."""
-    workspace_dir_name = instance["repo"].split("/")[-1]
     assert metadata.details is not None
-
-    # Set up Jinja2 environment
     assert metadata.prompt_path is not None
+
     prompts_dir = os.path.dirname(metadata.prompt_path)
     template_name = os.path.basename(metadata.prompt_path)
     env = Environment(loader=FileSystemLoader(prompts_dir))
     template = env.get_template(template_name)
 
-    # Prepare context for rendering
     context = {
         "instance": instance,
-        "workspace_dir_name": workspace_dir_name,
+        "workspace_dir_name": instance.get("repo", "").split("/")[-1],
         "actual_workspace_path": workspace_path,
         "metadata": metadata,
+        "test_instructions": "",
     }
-    context["test_instructions"] = ""
-
-    # Render the instruction
-    instruction = template.render(context)
-    return instruction
+    return template.render(context)
 
 
-class SWEBenchEvaluation(Evaluation):
+class ScaleSWEEvaluation(Evaluation):
     """
-    Process-based SWE-bench evaluation implemented as a child of the
-    abstract Evaluation orchestrator.
+    Scale-SWE evaluation adapted from the SWE-bench pipeline.
+
+    Key differences from SWEBenchEvaluation:
+    - Docker images come from dataset's ``image_url`` field (pre-built).
+    - Repo is already at ``workdir`` (no /testbed copy needed).
+    - Per-instance ``pre_commands`` handle git checkout and branch setup.
+    - Uses ``parent_commit`` instead of ``base_commit`` for git diff.
 
     Implements:
       - prepare_instances()
@@ -93,9 +108,13 @@ class SWEBenchEvaluation(Evaluation):
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
     )
+    docker_image_prefix: str | None = Field(
+        default=None,
+        description="Override image namespace/registry (e.g., 'myregistry.com/myorg')",
+    )
 
     def prepare_instances(self) -> List[EvalInstance]:
-        logger.info("Setting up SWE-bench evaluation data")
+        logger.info("Setting up Scale-SWE evaluation data")
 
         df = get_dataset(
             dataset_name=self.metadata.dataset,
@@ -119,79 +138,19 @@ class SWEBenchEvaluation(Evaluation):
         resource_factor: int = 1,
         forward_env: list[str] | None = None,
     ) -> RemoteWorkspace:
-        """
-        Use DockerWorkspace by default.
-
-        Args:
-            instance: The evaluation instance to prepare workspace for.
-            resource_factor: Resource factor for runtime allocation (default: 1).
-                           Higher values allocate more CPU/memory resources.
-                           Used by APIRemoteWorkspace for remote runtime allocation.
-        """
-        if "image_name" in instance.data:
-            official_docker_image = instance.data["image_name"]
-        else:
-            official_docker_image = get_official_docker_image(instance.id)
-        build_target = "source-minimal"
-        custom_tag = extract_custom_tag(official_docker_image)
-        # For non-binary targets, append target suffix
-        suffix = f"-{build_target}" if build_target != "binary" else ""
-        base_agent_image = (
-            f"{EVAL_AGENT_SERVER_IMAGE}:{SDK_SHORT_SHA}-{custom_tag}{suffix}"
-        )
-        wrap_needed = should_wrap_instance_id(instance.id)
-        agent_server_image = base_agent_image
-
-        if self.metadata.workspace_type == "docker":
-            SKIP_BUILD = os.getenv("SKIP_BUILD", "1").lower() in ("1", "true", "yes")
-            logger.info(f"SKIP_BUILD={SKIP_BUILD}")
-            if not SKIP_BUILD:
-                logger.info(
-                    f"Building workspace from {official_docker_image} "
-                    f"for instance {instance.id}. "
-                    "This may take a while...\n"
-                    "You can run benchmarks/swebench/build_images.py and set "
-                    "SWE_BENCH_SKIP_BUILD=1 to skip building and use pre-built "
-                    "agent-server image."
-                )
-                output = build_image(
-                    base_image=official_docker_image,
-                    target_image=EVAL_AGENT_SERVER_IMAGE,
-                    custom_tag=custom_tag,
-                    target=build_target,
-                    push=False,
-                )
-                logger.info(f"Image build output: {output}")
-                assert output.error is None, f"Image build failed: {output.error}"
-                if base_agent_image not in output.tags:
-                    raise RuntimeError(
-                        f"Built image tags {output.tags} do not include expected tag "
-                        f"{base_agent_image}"
-                    )
-                if wrap_needed:
-                    wrapped_result = wrap_image(base_agent_image, push=False)
-                    if wrapped_result.error:
-                        raise RuntimeError(
-                            "Wrapped image build failed: "
-                            f"{wrapped_result.error}; log={wrapped_result.log_path}"
-                        )
-
-            bind_volumes = []
-            if self.bind_dev_sdk:
-                sdk_base = Path(__file__).parent.parent.parent / "vendor/software-agent-sdk"
-                for module in ["tools", "sdk", "agent-server", "workspace"]:
-                    bind_volumes.append(
-                        f"{sdk_base}/openhands-{module}/openhands/{module.replace('-', '_')}:"
-                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
-                        ":ro"
-                        )
-            workspace = DockerWorkspace(
-                server_image=agent_server_image,
-                working_dir="/workspace",
-                forward_env=forward_env or [],
-                bind_volumes=bind_volumes,
+        """Prepare workspace from the dataset's image_url field."""
+        image_url = instance.data.get("image_url", "")
+        if not image_url:
+            raise ValueError(
+                f"Instance {instance.id} has no 'image_url' field in dataset"
             )
-        elif self.metadata.workspace_type == "flex":
+
+        base_image = resolve_image_url(image_url, self.docker_image_prefix)
+        custom_tag = extract_custom_tag(base_image)
+        build_target = "source-minimal"
+        suffix = f"-{build_target}" if build_target != "binary" else ""
+
+        if self.metadata.workspace_type == "flex":
             agent_plugin_image = os.getenv(
                 "AGENT_PLUGIN_IMAGE", "openhands/agent-plugin"
             )
@@ -202,13 +161,54 @@ class SWEBenchEvaluation(Evaluation):
                 )
                 for module in ["tools", "sdk", "agent-server", "workspace"]:
                     bind_volumes.append(
-                        f"{sdk_base}/openhands-{module}/openhands/{module.replace('-', '_')}:"
-                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
+                        f"{sdk_base}/openhands-{module}/openhands/{module}:"
+                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
                         ":ro"
                     )
             workspace = FlexWorkspace(
-                base_image=official_docker_image,
+                base_image=base_image,
                 agent_plugin_image=agent_plugin_image,
+                working_dir="/workspace",
+                forward_env=forward_env or [],
+                bind_volumes=bind_volumes,
+            )
+        elif self.metadata.workspace_type == "docker":
+            agent_server_image = (
+                f"{EVAL_AGENT_SERVER_IMAGE}:{SDK_SHORT_SHA}-{custom_tag}{suffix}"
+            )
+            SKIP_BUILD = os.getenv("SKIP_BUILD", "1").lower() in ("1", "true", "yes")
+            logger.info(f"SKIP_BUILD={SKIP_BUILD}")
+            if not SKIP_BUILD:
+                from benchmarks.utils.build_utils import build_image
+
+                logger.info(
+                    f"Building workspace from {base_image} "
+                    f"for instance {instance.id}. "
+                    "This may take a while..."
+                )
+                output = build_image(
+                    base_image=base_image,
+                    target_image=EVAL_AGENT_SERVER_IMAGE,
+                    custom_tag=custom_tag,
+                    target=build_target,
+                    push=False,
+                )
+                logger.info(f"Image build output: {output}")
+                assert output.error is None, f"Image build failed: {output.error}"
+
+            bind_volumes = []
+            if self.bind_dev_sdk:
+                sdk_base = (
+                    Path(__file__).parent.parent.parent / "vendor/software-agent-sdk"
+                )
+                for module in ["tools", "sdk", "agent-server", "workspace"]:
+                    bind_volumes.append(
+                        f"{sdk_base}/openhands-{module}/openhands/{module}:"
+                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                        ":ro"
+                    )
+            workspace = DockerWorkspace(
+                server_image=agent_server_image,
                 working_dir="/workspace",
                 forward_env=forward_env or [],
                 bind_volumes=bind_volumes,
@@ -220,7 +220,6 @@ class SWEBenchEvaluation(Evaluation):
                 raise ValueError(
                     "RUNTIME_API_KEY environment variable is not set for remote workspace"
                 )
-
             agent_server_image = (
                 f"{EVAL_AGENT_SERVER_IMAGE}:{sdk_short_sha}-{custom_tag}{suffix}"
             )
@@ -266,35 +265,23 @@ class SWEBenchEvaluation(Evaluation):
     ) -> EvalOutput:
         """
         Create conversation, run agent, collect history and git patch.
-        Do not write files here; just return EvalOutput.
         """
         if self.use_legacy_tools:
-            tools = get_legacy_tools(
-                # Disable browser tools in CLI mode
-                enable_browser=False,
-            )
+            tools = get_legacy_tools(enable_browser=False)
         else:
-            tools = get_default_tools(
-                # Disable browser tools in CLI mode
-                enable_browser=False,
-            )
+            tools = get_default_tools(enable_browser=False)
+
         agent = Agent(
             llm=self.metadata.llm,
             tools=tools,
             system_prompt_kwargs={"cli_mode": True},
-            # TODO: we can enable condenser and security analyzer later
-            # and have them configurable via EvalMetadata
-            # condenser=get_default_condenser(
-            #     llm=self.metadata.llm.model_copy(update={"service_id": "condenser"})
-            # ),
-            # security_analyzer=LLMSecurityAnalyzer(),
         )
 
         assert isinstance(workspace, RemoteWorkspace)
 
-        repo_path = f"/workspace/{instance.data['repo'].split('/')[-1]}/"
-        instance.data["repo_path"] = repo_path
-
+        # For some reason we need to instantiate the Conversation object early and leave a few steps
+        # before sending the instruction. Otherwise, there is a random chance that the user message is
+        # not recorded in the events.
         persist_callback = build_event_persistence_callback(
             run_id=self.metadata.eval_output_dir,
             instance_id=instance.id,
@@ -308,17 +295,40 @@ class SWEBenchEvaluation(Evaluation):
             max_iteration_per_run=self.metadata.max_iterations,
         )
 
-        logger.info("repo_path: %s", repo_path)
-        cp_testebed_repo = workspace.execute_command(
-            (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}")
-        )
-        assert cp_testebed_repo.exit_code == 0, (
-            f"cp_testebed_repo failed: {cp_testebed_repo.stderr}"
-        )
+        # Scale-SWE: repo is already at workdir (no /testbed copy needed)
+        repo_path = instance.data.get("workdir", "/workspace")
+        if not repo_path.endswith("/"):
+            repo_path += "/"
 
-        # git reset
-        git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
-        assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
+        # Normalize fields for prompt template compatibility
+        instance.data["repo_path"] = repo_path
+        instance.data["base_commit"] = instance.data.get(
+            "parent_commit", instance.data.get("base_commit", "")
+        )
+        # Combine user/repo into full repo name if not already present
+        if "repo" not in instance.data or "/" not in instance.data.get("repo", ""):
+            user = instance.data.get("user", "")
+            repo = instance.data.get("repo", "")
+            if user and repo:
+                instance.data["repo"] = f"{user}/{repo}"
+
+        # Run pre_commands from dataset (git checkout, branch setup, etc.)
+        pre_commands = instance.data.get("pre_commands", "")
+        if pre_commands and pre_commands.strip():
+            pre_cmd = pre_commands.strip().removesuffix("\\n")
+            logger.info("Running pre_commands for %s", instance.id)
+            pre_result = workspace.execute_command(f"cd {repo_path} && {pre_cmd}")
+            if pre_result.exit_code != 0:
+                logger.warning(
+                    "pre_commands returned non-zero exit code %d: %s",
+                    pre_result.exit_code,
+                    pre_result.stderr,
+                )
+
+        breif_history = workspace.execute_command(
+            (f"cd {repo_path} ; git --no-pager log --oneline -10")
+        )
+        logger.info(f"Repo status:\n* Current commit: {instance.data['base_commit']}\n* Top 10 history:\n{breif_history.stdout.strip()}")
 
         instruction = get_instruction(
             instance=instance.data,
@@ -326,7 +336,6 @@ class SWEBenchEvaluation(Evaluation):
             workspace_path=workspace.working_dir,
         )
         conversation.send_message(instruction)
-        # Run conversation with fake user responses to handle agent messages
         run_conversation_with_fake_user_response(conversation)
 
         # git add
@@ -343,7 +352,7 @@ class SWEBenchEvaluation(Evaluation):
         # Get git patch
         base_commit = instance.data["base_commit"]
         git_patch_result = workspace.execute_command(
-            (f"cd {repo_path} ; git --no-pager diff --no-color {base_commit} HEAD")
+            f"cd {repo_path} ; git --no-pager diff --no-color {base_commit} HEAD"
         )
         assert git_patch_result.exit_code == 0, (
             f"git diff failed: {git_patch_result.stderr}"
@@ -353,26 +362,26 @@ class SWEBenchEvaluation(Evaluation):
         # Dump conversation history
         messages = []
         tools_list = []
-        
-        # Convert events to messages
-        convertible_events = [e for e in conversation.state.events if isinstance(e, LLMConvertibleEvent)]
+
+        convertible_events = [
+            e for e in conversation.state.events if isinstance(e, LLMConvertibleEvent)
+        ]
         msgs = LLMConvertibleEvent.events_to_messages(convertible_events)
-        
+
         for msg in msgs:
             msg_copy = msg.model_copy(update={"send_reasoning_content": True})
             messages.append(msg_copy.to_chat_dict())
-            
+
         for event in conversation.state.events:
             if isinstance(event, SystemPromptEvent):
                 for tool in event.tools:
                     if isinstance(tool, ToolDefinition):
                         tools_list.append(tool.to_openai_tool())
-        
+
         if not tools_list and tools:
-            # Fallback to initial tools if not found in events
             for tool in tools:
-                 if isinstance(tool, ToolDefinition):
-                     tools_list.append(tool.to_openai_tool())
+                if isinstance(tool, ToolDefinition):
+                    tools_list.append(tool.to_openai_tool())
 
         dump_data = {
             "instance_id": instance.id,
@@ -384,18 +393,17 @@ class SWEBenchEvaluation(Evaluation):
             "test_result": {"git_patch": git_patch},
         }
 
-        history_file = os.path.join(self.metadata.eval_output_dir, f"{instance.id}.history.json")
+        history_file = os.path.join(
+            self.metadata.eval_output_dir, f"{instance.id}.history.json"
+        )
         with open(history_file, "w") as f:
             json.dump(dump_data, f, indent=2)
         logger.info(f"Dumped conversation history to {history_file}")
 
-        # EvalOutput is your model; keep fields consistent with prior JSONL
         out = EvalOutput(
             instance_id=instance.id,
             attempt=self.current_attempt,
-            test_result={
-                "git_patch": git_patch,
-            },
+            test_result={"git_patch": git_patch},
             instruction=instruction,
             error=None,
             history=list(conversation.state.events),
@@ -413,6 +421,10 @@ def main() -> None:
     )
 
     parser = get_parser()
+    parser.set_defaults(
+        dataset="thirdparty/Scale-SWE/scale-swe-batch1.jsonl",
+        workspace="flex",
+    )
     parser.add_argument(
         "--prompt-path",
         type=str,
@@ -430,19 +442,28 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
+    parser.add_argument(
+        "--docker-image-prefix",
+        type=str,
+        default=None,
+        help=(
+            "Override image namespace/registry. Replaces everything before "
+            "the last '/' in image_url. "
+            "E.g., 'myregistry.com/myorg' turns 'aweaiteam/scaleswe:tag' "
+            "into 'myregistry.com/myorg/scaleswe:tag'."
+        ),
+    )
     args = parser.parse_args()
 
-    # Validate max_attempts
     if args.max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {args.max_attempts}")
 
     llm_config_path = args.llm_config_path
     if not os.path.isfile(llm_config_path):
         raise ValueError(f"LLM config file {llm_config_path} does not exist")
-    with open(llm_config_path, "r") as f:
-        llm_config = f.read()
-    # use omegaconf to resolve environment variables, and then serialize back to JSON
-    llm_config = json.dumps(OmegaConf.to_container(OmegaConf.load(llm_config_path), resolve=True))
+    llm_config = json.dumps(
+        OmegaConf.to_container(OmegaConf.load(llm_config_path), resolve=True)
+    )
     llm = LLM.model_validate_json(llm_config)
     logger.info("Using LLM config: %s", llm.model_dump_json(indent=2))
 
@@ -458,7 +479,6 @@ def main() -> None:
         eval_note=args.note,
     )
 
-    # Create critic instance from parsed arguments
     critic = create_critic(args)
     logger.info(f"Using critic: {type(critic).__name__}")
 
@@ -479,12 +499,12 @@ def main() -> None:
         workspace_type=args.workspace,
     )
 
-    # Run orchestrator with a simple JSONL writer
-    evaluator = SWEBenchEvaluation(
+    evaluator = ScaleSWEEvaluation(
         metadata=metadata,
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
+        docker_image_prefix=args.docker_image_prefix,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))
