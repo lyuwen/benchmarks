@@ -81,4 +81,15 @@ def get_parser(add_llm_config: bool = True) -> argparse.ArgumentParser:
         default=None,
         help="Timeout in seconds for each conversation.run() call (default: None, no timeout)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume interrupted evaluation runs",
+    )
+    parser.add_argument(
+        "--resume-instance",
+        type=str,
+        default=None,
+        help="Specific instance ID to resume from history",
+    )
     return parser

@@ -313,10 +313,16 @@ class SWEBenchEvaluation(Evaluation):
             attempt=self.current_attempt,
         )
 
+        persistence_dir = instance.data.get("persistence_dir")
+        if persistence_dir:
+            os.makedirs(persistence_dir, exist_ok=True)
+            logger.info("Using persistence_dir: %s", persistence_dir)
+
         conversation = Conversation(
             agent=agent,
             workspace=workspace,
             callbacks=[persist_callback],
+            persistence_dir=persistence_dir,
             max_iteration_per_run=self.metadata.max_iterations,
         )
 
@@ -505,7 +511,10 @@ def main() -> None:
         dataset_split=args.split,
         max_iterations=args.max_iterations,
         eval_output_dir=structured_output_dir,
-        details={},
+        details={
+            "resume": args.resume,
+            "resume_instance": args.resume_instance,
+        },
         prompt_path=args.prompt_path,
         eval_limit=args.n_limit,
         env_setup_commands=["export PIP_CACHE_DIR=~/.cache/pip"],
