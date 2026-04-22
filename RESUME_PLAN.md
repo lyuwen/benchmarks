@@ -1,45 +1,89 @@
-# Resume & Replay Mechanism Plan
+# Resume & Replay Mechanism
 
-This document outlines the strategy for implementing a robust resume and replay mechanism for interrupted agentic trajectories in evaluation benchmarks.
+## Overview
 
-## 1. Goal
-When an evaluation run is interrupted (e.g., due to a crash, network failure, or manual stop), we want to be able to resume the inference for a specific instance, restore its filesystem state, and continue the conversation with the **exact** history.
+When an evaluation run is interrupted (crash, OOM, network failure, manual stop), partially-completed instances can be resumed mid-conversation without restarting from scratch.
 
-## 2. Architecture
+## Architecture
 
-### 2.1 Structured Event Persistence
-- **Change:** Modify `benchmarks/utils/evaluation.py` to use a per-instance `persistence_dir` within the evaluation output folder.
-- **SDK Integration:** By passing `persistence_dir` to `Conversation`, the `LocalConversation` will automatically save `base_state.json` and individual `events/*.json` files.
-- **Location:** `{eval_output_dir}/persist/{instance_id}/`.
+Three independent, composable layers:
 
-### 2.2 Workspace State Restoration (Replay)
-Since workspaces (Docker or Remote) are ephemeral, we must restore the filesystem and environment state upon resumption.
-- **Utility:** `benchmarks/utils/replayer.py`.
-- **Logic:**
-    - Iterate through the `EventLog` from the persistence directory.
-    - Filter for "side-effecting" actions: `TerminalAction` and `FileEditorAction`.
-    - Sequentially re-execute these against the fresh `RemoteWorkspace`.
-    - Skip non-side-effecting actions (e.g., `view`, `ls`) to optimize restoration time.
+### Layer 1: Event Persistence (`benchmarks/utils/event_persistence.py`)
 
-### 2.3 Context Resumption
-By using the SDK's native `ConversationState.create(persistence_dir=...)`:
-- The `Conversation` object is reconstructed with all previous messages and observations.
-- When `conversation.run()` is called, the `Agent` sees the entire history in its context window and continues from the last turn.
+The orchestrator writes each event to local disk incrementally via a `Conversation` callback.
 
-## 3. Implementation Steps
+- `EventFilePersistence` registers as a callback on the Conversation
+- Events are written to `{eval_output_dir}/persist/{instance_id}/events/event-{idx:05d}-{uuid}.json`
+- A `resume_meta.json` sidecar tracks `conversation_id`, `event_count`, `tools_used`, `last_timestamp`
+- Writes are atomic (tmp + rename) and exception-safe
+- Events persist on the orchestrator side, surviving container crashes
 
-1.  **Modify `benchmarks/utils/args_parser.py`**:
-    - Add `--resume` (bool) and `--resume-instance` (str) flags.
-2.  **Create `benchmarks/utils/replayer.py`**:
-    - Implement `ReplayManager` to handle workspace restoration.
-3.  **Update `benchmarks/utils/evaluation.py`**:
-    - Integrate `persistence_dir` into the `evaluate_instance` flow.
-    - Implement logic to detect existing persistence data.
-    - Call the `ReplayManager` if resumption is requested.
-4.  **Verification**:
-    - Add a test case that simulates an interruption and verifies exact state restoration.
+### Layer 2: Workspace Restoration (`benchmarks/utils/replayer.py`)
 
-## 4. Key Advantages
-- **Exact History:** No summaries or approximations. The agent's prompt context is identical to the moment before interruption.
-- **Filesystem Integrity:** Every successful command and file edit is re-applied, ensuring the environment is perfectly synced.
-- **Native SDK Support:** Leverages existing `ConversationState` persistence features for maximum compatibility.
+Replays side-effecting actions into a fresh container to restore filesystem state.
+
+- `WorkspaceReplayer.replay(events)` pairs ActionEvents with ObservationEvents
+- Terminal commands: re-executed, skipping read-only commands (`cat`, `ls`, `grep`, `git log`, etc.) and failed non-env commands
+- File editor operations: uses `FileEditorObservation.new_content` (the actual file content post-edit) instead of re-implementing str_replace/insert/undo_edit logic
+- ApplyPatch: re-applies patches via `git apply`
+- Non-side-effecting events (Think, Finish, TaskTracker, browser) are skipped
+- Returns a `ReplayReport` with counts of replayed/skipped/errored actions
+
+### Layer 3: State Injection (`benchmarks/utils/resume.py`)
+
+Writes persisted events + `base_state.json` into the container's persistence directory so the SDK's native `ConversationState.create()` resume path kicks in.
+
+- `ResumeManager` orchestrates detection, workspace restore, and state injection
+- Writes to `/workspace/conversations/{conversation_id_hex}/` inside the container
+- `base_state.json` has `execution_status: "IDLE"`, serialized agent, LocalWorkspace pointing to `/workspace`
+- Event files written via base64-encode + python one-liner through `workspace.execute_command()`
+- The original `conversation_id` is reused so the SDK's persistence lookup finds the injected files
+
+## Usage
+
+```bash
+# Resume all instances that have persisted state
+python -m benchmarks.swebench.run_infer --resume ...
+
+# Resume a specific instance
+python -m benchmarks.swebench.run_infer --resume-instance django__django-12345 ...
+```
+
+Works with all three benchmarks: swebench, swesmith, swerebench-leaderboard.
+
+## Flow
+
+### During normal operation
+1. Each event fires the `EventFilePersistence.callback`
+2. Events accumulate in `persist/{instance_id}/events/`
+3. `resume_meta.json` is updated with each event
+
+### On resume
+1. `evaluation.py::_process_one_mp` detects persisted events
+2. Creates a fresh workspace (new container with testbed)
+3. After testbed copy + git reset:
+   - Workspace restoration: replays terminal commands and file edits
+   - State injection: writes events + base_state.json into container
+4. `Conversation(conversation_id=original_uuid)` finds injected state
+5. Instruction is skipped (already in event history)
+6. `run_conversation_with_fake_user_response()` continues where it left off
+
+## Key Design Decisions
+
+1. **Orchestrator-side persistence**: The SDK's LocalConversation persistence only works with LocalWorkspace. Since benchmarks use RemoteWorkspace, events are persisted from the orchestrator's callback.
+
+2. **Server-side injection for resume**: Events + base_state.json are injected INTO the container, then the SDK's native `ConversationState.create()` handles resume -- exact message history, no approximation.
+
+3. **Observation-based file replay**: Uses `FileEditorObservation.new_content` instead of re-implementing edit operations. Deterministic regardless of intermediate states.
+
+4. **Persist always, resume on demand**: Every instance gets event persistence. The `--resume` flag only controls whether existing state is *used* on startup.
+
+## Files
+
+| File | Role |
+|------|------|
+| `benchmarks/utils/event_persistence.py` | Incremental event writer + loader |
+| `benchmarks/utils/replayer.py` | Workspace filesystem restoration |
+| `benchmarks/utils/resume.py` | ResumeManager: detection, restore, inject |
+| `benchmarks/utils/evaluation.py` | Resume detection in worker loop |
+| `benchmarks/{swebench,swesmith,swerebench-leaderboard}/run_infer.py` | Resume flow in evaluate_instance |

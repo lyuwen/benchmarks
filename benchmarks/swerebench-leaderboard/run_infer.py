@@ -26,6 +26,7 @@ from benchmarks.utils.evaluation_utils import (
     construct_eval_output_dir,
     get_default_on_result_writer,
 )
+from benchmarks.utils.event_persistence import EventFilePersistence
 from benchmarks.utils.fake_user_response import run_conversation_with_fake_user_response
 from benchmarks.utils.image_utils import image_exists
 from benchmarks.utils.models import (
@@ -33,6 +34,7 @@ from benchmarks.utils.models import (
     EvalMetadata,
     EvalOutput,
 )
+from benchmarks.utils.resume import ResumeManager
 from benchmarks.utils.version import SDK_SHORT_SHA
 from openhands.sdk import LLM, Agent, Conversation, get_logger
 from openhands.sdk.event.base import LLMConvertibleEvent
@@ -229,19 +231,12 @@ class SWEBenchEvaluation(Evaluation):
         Do not write files here; just return EvalOutput.
         """
         tools = get_default_tools(
-            # Disable browser tools in CLI mode
             enable_browser=False,
         )
         agent = Agent(
             llm=self.metadata.llm,
             tools=tools,
             system_prompt_kwargs={"cli_mode": True},
-            # TODO: we can enable condenser and security analyzer later
-            # and have them configurable via EvalMetadata
-            # condenser=get_default_condenser(
-            #     llm=self.metadata.llm.model_copy(update={"service_id": "condenser"})
-            # ),
-            # security_analyzer=LLMSecurityAnalyzer(),
         )
 
         assert isinstance(workspace, RemoteWorkspace)
@@ -249,19 +244,7 @@ class SWEBenchEvaluation(Evaluation):
         repo_path = f"/workspace/{instance.data['repo'].split('/')[-1]}/"
         instance.data["repo_path"] = repo_path
 
-        persist_callback = build_event_persistence_callback(
-            run_id=self.metadata.eval_output_dir,
-            instance_id=instance.id,
-            attempt=self.current_attempt,
-        )
-
-        conversation = Conversation(
-            agent=agent,
-            workspace=workspace,
-            callbacks=[persist_callback],
-            max_iteration_per_run=self.metadata.max_iterations,
-        )
-
+        # --- Testbed setup (must happen before resume replay) ---
         logger.info("repo_path: %s", repo_path)
         cp_testebed_repo = workspace.execute_command(
             (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}")
@@ -270,7 +253,6 @@ class SWEBenchEvaluation(Evaluation):
             f"cp_testebed_repo failed: {cp_testebed_repo.stderr}"
         )
 
-        # git reset
         git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
         assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
 
@@ -279,12 +261,55 @@ class SWEBenchEvaluation(Evaluation):
         )
         base_commit = base_commit_result.stdout.strip()
 
+        # --- Resume: restore workspace + inject state ---
+        resume_mgr: ResumeManager | None = instance.data.get("resume_manager")
+        conversation_id = None
+
+        if resume_mgr:
+            logger.info(
+                "Resuming instance %s from %d persisted events",
+                instance.id,
+                len(resume_mgr.events),
+            )
+            resume_mgr.restore_workspace_state(workspace)
+            resume_mgr.inject_state_into_workspace(workspace, agent)
+            conversation_id = resume_mgr.conversation_id
+
+        # --- Callbacks ---
+        persist_callback = build_event_persistence_callback(
+            run_id=self.metadata.eval_output_dir,
+            instance_id=instance.id,
+            attempt=self.current_attempt,
+        )
+
+        callbacks = [persist_callback]
+        file_persist = None
+        persistence_dir = instance.data.get("persistence_dir")
+        if persistence_dir:
+            file_persist = EventFilePersistence(persistence_dir, instance.id)
+            callbacks.append(file_persist.callback)
+
+        # --- Create conversation ---
+        conversation = Conversation(
+            agent=agent,
+            workspace=workspace,
+            conversation_id=conversation_id,
+            callbacks=callbacks,
+            max_iteration_per_run=self.metadata.max_iterations,
+        )
+
+        if file_persist:
+            file_persist.set_conversation_id(conversation.id)
+
+        # --- Send instruction (skip if resuming) ---
         instruction = get_instruction(
             instance=instance.data,
             metadata=self.metadata,
             workspace_path=workspace.working_dir,
         )
-        conversation.send_message(instruction)
+        if not resume_mgr:
+            conversation.send_message(instruction)
+
         # Run conversation with fake user responses to handle agent messages
         run_conversation_with_fake_user_response(
             conversation, timeout=self.metadata.conversation_timeout
@@ -302,7 +327,6 @@ class SWEBenchEvaluation(Evaluation):
         )
 
         # Get git patch
-        # base_commit = instance.data["base_commit"]
         git_patch_result = workspace.execute_command(
             (f"cd {repo_path} ; git --no-pager diff --no-color {base_commit} HEAD")
         )
@@ -314,23 +338,21 @@ class SWEBenchEvaluation(Evaluation):
         # Dump conversation history
         messages = []
         tools_list = []
-        
-        # Convert events to messages
+
         convertible_events = [e for e in conversation.state.events if isinstance(e, LLMConvertibleEvent)]
         msgs = LLMConvertibleEvent.events_to_messages(convertible_events)
-        
+
         for msg in msgs:
             msg_copy = msg.model_copy(update={"send_reasoning_content": True})
             messages.append(msg_copy.to_chat_dict())
-            
+
         for event in conversation.state.events:
             if isinstance(event, SystemPromptEvent):
                 for tool in event.tools:
                     if isinstance(tool, ToolDefinition):
                         tools_list.append(tool.to_openai_tool())
-        
+
         if not tools_list and tools:
-            # Fallback to initial tools if not found in events
             for tool in tools:
                  if isinstance(tool, ToolDefinition):
                      tools_list.append(tool.to_openai_tool())
@@ -350,7 +372,6 @@ class SWEBenchEvaluation(Evaluation):
             json.dump(dump_data, f, indent=2)
         logger.info(f"Dumped conversation history to {history_file}")
 
-        # EvalOutput is your model; keep fields consistent with prior JSONL
         out = EvalOutput(
             instance_id=instance.id,
             attempt=self.current_attempt,
@@ -417,7 +438,10 @@ def main() -> None:
         dataset_split=args.split,
         max_iterations=args.max_iterations,
         eval_output_dir=structured_output_dir,
-        details={},
+        details={
+            "resume": args.resume,
+            "resume_instance": args.resume_instance,
+        },
         prompt_path=args.prompt_path,
         eval_limit=args.n_limit,
         env_setup_commands=["export PIP_CACHE_DIR=~/.cache/pip"],

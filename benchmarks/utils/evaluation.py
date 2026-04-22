@@ -29,9 +29,8 @@ from benchmarks.utils.models import (
     EvalOutput,
     RemoteRuntimeAllocation,
 )
-from benchmarks.utils.replayer import ReplayManager
-from openhands.sdk import Conversation, get_logger
-from openhands.sdk.conversation.state import ConversationState
+from benchmarks.utils.resume import ResumeManager
+from openhands.sdk import get_logger
 from openhands.sdk.critic import CriticBase
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.workspace import APIRemoteWorkspace
@@ -538,33 +537,25 @@ class Evaluation(ABC, BaseModel):
                             runtime_run.resource_factor,
                         )
 
-                    # --- Resume & Replay Logic ---
+                    # --- Resume setup ---
                     persistence_dir = os.path.join(
                         self.metadata.eval_output_dir, "persist", instance.id
                     )
-                    
-                    # If resuming, check if we have history to replay
-                    if self.metadata.details.get("resume") or \
-                       self.metadata.details.get("resume_instance") == instance.id:
-                        if os.path.exists(os.path.join(persistence_dir, "base_state.json")):
-                            logger.info("[child] Found existing history, replaying actions for %s", instance.id)
-                            # Create a temporary ConversationState to access events
-                            # We use Agent from metadata to avoid unnecessary resolution here
-                            try:
-                                temp_state = ConversationState.create(
-                                    id=instance.id,
-                                    agent=self.metadata.llm,  # Type hint; Agent is what we need
-                                    workspace=workspace,
-                                    persistence_dir=persistence_dir
-                                )
-                                replayer = ReplayManager(workspace)
-                                replayer.replay_events(list(temp_state.events))
-                                logger.info("[child] Replay completed for %s", instance.id)
-                            except Exception as replay_err:
-                                logger.warning("[child] Replay failed for %s: %s", instance.id, replay_err)
-
-                    # Update metadata details with persistence path
                     instance.data["persistence_dir"] = persistence_dir
+
+                    should_resume = (
+                        self.metadata.details.get("resume")
+                        or self.metadata.details.get("resume_instance") == instance.id
+                    )
+                    resume_mgr = None
+                    if should_resume:
+                        resume_mgr = ResumeManager(persistence_dir)
+                        if not resume_mgr.has_resumable_state():
+                            logger.info("[child] No resumable state for %s, starting fresh", instance.id)
+                            resume_mgr = None
+                        else:
+                            logger.info("[child] Will resume instance %s from persisted events", instance.id)
+                    instance.data["resume_manager"] = resume_mgr
 
                     out = self.evaluate_instance(instance, workspace)
                     if runtime_runs:
