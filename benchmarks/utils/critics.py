@@ -11,6 +11,7 @@ from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from typing import Set
 
+from benchmarks.utils.execution_critic import ExecutionBasedCritic
 from benchmarks.utils.models import EvalInstanceID, EvalOutput
 from openhands.sdk import get_logger
 from openhands.sdk.critic import (
@@ -25,10 +26,23 @@ from openhands.sdk.event import LLMConvertibleEvent
 logger = get_logger(__name__)
 
 
-CRITIC_NAME_TO_CLASS = {
+CRITIC_NAME_TO_CLASS: dict[str, type[CriticBase]] = {
     "pass": PassCritic,
     "finish_with_patch": AgentFinishedCritic,
     "empty_patch_critic": EmptyPatchCritic,
+}
+
+# Lazy-register execution-based critics to avoid hard import dependencies
+# on docker/swebench/awe_agent at module level.
+_EXECUTION_CRITICS: dict[str, tuple[str, str]] = {
+    "swebench_execution": (
+        "benchmarks.swebench.critic",
+        "SWEBenchExecutionCritic",
+    ),
+    "scaleswe_execution": (
+        "benchmarks.scaleswe.critic",
+        "ScaleSWEExecutionCritic",
+    ),
 }
 
 
@@ -45,7 +59,9 @@ def add_critic_args(parser: ArgumentParser) -> None:
             "Available critics: "
             "'pass' - Always accepts the output (no retry logic, suitable for single-attempt runs), "
             "'finish_with_patch' - Requires both AgentFinishAction and non-empty git patch, "
-            "'empty_patch_critic' - Only requires non-empty git patch. "
+            "'empty_patch_critic' - Only requires non-empty git patch, "
+            "'swebench_execution' - Runs SWE-bench test harness in Docker (requires docker + swebench), "
+            "'scaleswe_execution' - Runs Scale-SWE evaluator in Docker (requires docker + awe_agent). "
             "For single-attempt runs (default), 'pass' is recommended as the actual evaluation "
             "is performed by the benchmark's own scoring system."
         ),
@@ -100,10 +116,31 @@ def create_critic(args: Namespace) -> CriticBase:
         critic = critic_class(**kwargs)
         logger.info(f"Created critic: {critic_name} with args: {kwargs}")
         return critic
+    elif critic_name in _EXECUTION_CRITICS:
+        module_path, class_name = _EXECUTION_CRITICS[critic_name]
+        import importlib
+
+        try:
+            module = importlib.import_module(module_path)
+            critic_class = getattr(module, class_name)
+            critic = critic_class(**kwargs)
+        except (ImportError, ModuleNotFoundError) as e:
+            logger.warning(
+                "Could not load execution critic '%s' (%s.%s): %s. "
+                "Falling back to PassCritic.",
+                critic_name,
+                module_path,
+                class_name,
+                e,
+            )
+            critic = PassCritic()
+        logger.info(f"Created execution critic: {critic_name} with args: {kwargs}")
+        return critic
     else:
+        all_names = sorted(set(CRITIC_NAME_TO_CLASS) | set(_EXECUTION_CRITICS))
         raise ValueError(
             f"Unknown critic: {critic_name}. "
-            f"Available: pass, finish_with_patch, empty_patch_critic"
+            f"Available: {', '.join(all_names)}"
         )
 
 
@@ -129,6 +166,9 @@ def evaluate_output(critic: CriticBase, eval_output: EvalOutput) -> bool:
     This is a convenience function that extracts history and git_patch
     from EvalOutput and calls the critic's evaluate method.
 
+    For execution-based critics, uses evaluate_with_context when instance
+    data is available in the EvalOutput.
+
     Args:
         critic: The SDK critic to use
         eval_output: The evaluation output to check
@@ -136,12 +176,22 @@ def evaluate_output(critic: CriticBase, eval_output: EvalOutput) -> bool:
     Returns:
         True if the instance was successfully completed, False otherwise
     """
+    git_patch = extract_git_patch(eval_output)
+
+    # Use evaluate_with_context for execution-based critics
+    if isinstance(critic, ExecutionBasedCritic):
+        result = critic.evaluate_with_context(
+            instance_id=eval_output.instance_id,
+            git_patch=git_patch or "",
+            instance_data=eval_output.instance,
+        )
+        return result.success
+
     events = eval_output.history
     llm_events: list[LLMConvertibleEvent] = [
         e for e in events if isinstance(e, LLMConvertibleEvent)
     ]
 
-    git_patch = extract_git_patch(eval_output)
     result = critic.evaluate(llm_events, git_patch)
 
     return result.success
