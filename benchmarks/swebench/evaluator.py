@@ -13,7 +13,7 @@ import traceback
 from typing import Any
 
 import docker
-from pydantic import Field, PrivateAttr
+from pydantic import Field
 
 from benchmarks.utils.execution_evaluator import ExecutionBasedEvaluator
 
@@ -23,43 +23,18 @@ logger = logging.getLogger(__name__)
 class SWEBenchEvaluator(ExecutionBasedEvaluator):
     """Evaluator that runs the SWE-bench test harness in Docker.
 
-    Loads the SWE-bench dataset, creates a TestSpec for the instance,
-    builds/reuses the Docker image, applies the patch, runs the eval
-    script, and grades the result using SWE-bench's own grading logic.
+    Creates a TestSpec from the instance data already provided by the
+    inference harness, builds/reuses the Docker image, applies the patch,
+    runs the eval script, and grades the result using SWE-bench's grading.
 
     Config example (``--evaluator-config evaluator.json``)::
 
         {
-            "dataset_name": "princeton-nlp/SWE-bench_Lite",
-            "dataset_split": "test",
-            "timeout": 1800
+            "timeout": 1800,
+            "force_rebuild": false
         }
     """
 
-    dataset_name: str = Field(
-        default="princeton-nlp/SWE-bench_Lite",
-        description="HuggingFace dataset name or local path",
-    )
-    dataset_split: str = Field(
-        default="test",
-        description="Dataset split to use",
-    )
-    namespace: str | None = Field(
-        default="swebench",
-        description="Docker image namespace",
-    )
-    instance_image_tag: str = Field(
-        default="latest",
-        description="Tag for instance Docker images",
-    )
-    env_image_tag: str = Field(
-        default="latest",
-        description="Tag for environment Docker images",
-    )
-    run_id: str = Field(
-        default="evaluator",
-        description="Run ID for SWE-bench evaluation logging",
-    )
     force_rebuild: bool = Field(
         default=False,
         description="Force rebuild Docker images",
@@ -68,24 +43,6 @@ class SWEBenchEvaluator(ExecutionBasedEvaluator):
         default=False,
         description="Remove Docker image after evaluation",
     )
-
-    _dataset_cache: dict[str, Any] | None = PrivateAttr(default=None)
-
-    def _load_dataset(self) -> dict[str, Any]:
-        if self._dataset_cache is not None:
-            return self._dataset_cache
-
-        from swebench.harness.utils import load_swebench_dataset
-
-        dataset = load_swebench_dataset(self.dataset_name, self.dataset_split)
-        self._dataset_cache = {inst["instance_id"]: inst for inst in dataset}
-        logger.info(
-            "SWEBenchEvaluator: loaded %d instances from %s/%s",
-            len(self._dataset_cache),
-            self.dataset_name,
-            self.dataset_split,
-        )
-        return self._dataset_cache
 
     def evaluate(
         self,
@@ -112,21 +69,8 @@ class SWEBenchEvaluator(ExecutionBasedEvaluator):
             )
             return False
 
-        swebench_data = instance_data
-        if "FAIL_TO_PASS" not in swebench_data:
-            dataset = self._load_dataset()
-            swebench_data = dataset.get(instance_id)
-            if swebench_data is None:
-                logger.error("Instance %s not found in dataset", instance_id)
-                return False
-
         try:
-            test_spec = make_test_spec(
-                swebench_data,
-                namespace=self.namespace,
-                instance_image_tag=self.instance_image_tag,
-                env_image_tag=self.env_image_tag,
-            )
+            test_spec = make_test_spec(instance_data)
 
             pred = {
                 KEY_INSTANCE_ID: instance_id,
@@ -142,7 +86,7 @@ class SWEBenchEvaluator(ExecutionBasedEvaluator):
                 rm_image=self.rm_image,
                 force_rebuild=self.force_rebuild,
                 client=client,
-                run_id=self.run_id,
+                run_id="evaluator",
                 timeout=self.timeout,
             )
 

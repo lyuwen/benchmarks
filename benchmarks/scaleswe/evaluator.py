@@ -9,13 +9,11 @@ containers.  Mirrors the evaluation logic from
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import traceback
-from pathlib import Path
 from typing import Any
 
-from pydantic import Field, PrivateAttr
+from pydantic import Field
 
 from benchmarks.utils.execution_evaluator import ExecutionBasedEvaluator
 
@@ -38,16 +36,11 @@ class ScaleSWEEvaluator(ExecutionBasedEvaluator):
     Config example (``--evaluator-config evaluator.json``)::
 
         {
-            "data_file": "thirdparty/Scale-SWE/scale-swe-batch1.jsonl",
             "docker_image_prefix": "myregistry.com/myorg",
             "timeout": 3600
         }
     """
 
-    data_file: str = Field(
-        default="thirdparty/Scale-SWE/scale-swe-batch1.jsonl",
-        description="Path to the Scale-SWE dataset JSONL file",
-    )
     docker_image_prefix: str | None = Field(
         default=None,
         description="Override image namespace/registry prefix",
@@ -56,35 +49,6 @@ class ScaleSWEEvaluator(ExecutionBasedEvaluator):
         default=False,
         description="Remove Docker image after each evaluation",
     )
-
-    _dataset_cache: dict[str, dict[str, Any]] | None = PrivateAttr(default=None)
-
-    def _load_dataset(self) -> dict[str, dict[str, Any]]:
-        if self._dataset_cache is not None:
-            return self._dataset_cache
-
-        data_path = Path(self.data_file)
-        if not data_path.exists():
-            raise FileNotFoundError(
-                f"Scale-SWE data file not found: {self.data_file}"
-            )
-
-        instances: dict[str, dict[str, Any]] = {}
-        with open(data_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                instances[record["instance_id"]] = record
-
-        self._dataset_cache = instances
-        logger.info(
-            "ScaleSWEEvaluator: loaded %d instances from %s",
-            len(instances),
-            self.data_file,
-        )
-        return self._dataset_cache
 
     def evaluate(
         self,
