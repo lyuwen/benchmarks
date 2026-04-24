@@ -18,6 +18,11 @@ from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
+from benchmarks.utils.execution_evaluator import (
+    ExecutionBasedEvaluator,
+    add_evaluator_args,
+    create_evaluator,
+)
 from benchmarks.utils.dataset import get_dataset
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
@@ -92,6 +97,9 @@ class SWEBenchEvaluation(Evaluation):
     )
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
+    )
+    evaluator: ExecutionBasedEvaluator | None = Field(
+        default=None, description="Optional execution-based evaluator"
     )
 
     def prepare_instances(self) -> List[EvalInstance]:
@@ -350,6 +358,22 @@ class SWEBenchEvaluation(Evaluation):
         )
         git_patch = git_patch_result.stdout
 
+        # Run execution-based evaluator if configured
+        evaluation_result = None
+        if self.evaluator is not None:
+            try:
+                evaluation_result = self.evaluator.evaluate(
+                    instance_id=instance.id,
+                    git_patch=git_patch,
+                    instance_data=instance.data,
+                )
+                logger.info(
+                    "Evaluator result for %s: %s", instance.id, evaluation_result
+                )
+            except Exception as e:
+                logger.error("Evaluator failed for %s: %s", instance.id, e)
+                evaluation_result = False
+
         # Dump conversation history
         messages = []
         tools_list = []
@@ -382,6 +406,7 @@ class SWEBenchEvaluation(Evaluation):
             "temperature": self.metadata.llm.temperature,
             "top_p": self.metadata.llm.top_p,
             "test_result": {"git_patch": git_patch},
+            "evaluation": evaluation_result,
         }
 
         history_file = os.path.join(self.metadata.eval_output_dir, f"{instance.id}.history.json")
@@ -430,6 +455,7 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
+    add_evaluator_args(parser)
     args = parser.parse_args()
 
     # Validate max_attempts
@@ -462,6 +488,10 @@ def main() -> None:
     critic = create_critic(args)
     logger.info(f"Using critic: {type(critic).__name__}")
 
+    evaluator = create_evaluator(args)
+    if evaluator is not None:
+        logger.info(f"Using evaluator: {type(evaluator).__name__}")
+
     metadata = EvalMetadata(
         llm=llm,
         dataset=args.dataset,
@@ -480,14 +510,15 @@ def main() -> None:
     )
 
     # Run orchestrator with a simple JSONL writer
-    evaluator = SWEBenchEvaluation(
+    evaluator_obj = SWEBenchEvaluation(
         metadata=metadata,
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
+        evaluator=evaluator,
     )
 
-    evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))
+    evaluator_obj.run(on_result=get_default_on_result_writer(evaluator_obj.output_path))
 
     logger.info("Evaluation completed!")
 
