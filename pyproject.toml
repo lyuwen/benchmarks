@@ -41,6 +41,7 @@ dependencies = [
     "websockets>=12",
     "lmnr>=0.7.24",
     "multi-swe-bench>=1.1.1",
+    "omegaconf",
 ]
 
 [project.scripts]

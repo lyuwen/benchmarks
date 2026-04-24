@@ -139,6 +139,15 @@ def run_conversation_with_fake_user_response(
             stopping. This prevents infinite loops.
     """
 
+    # For remote conversations, send_message() only POSTs to the server without
+    # updating the local event cache. The WebSocket subscription may not have
+    # received the event yet. Force a REST sync so the user message is visible
+    # locally before the first run(). The dedupe in add_event (via
+    # _cached_event_ids) prevents the WebSocket from re-adding it later.
+    sync_events = getattr(conversation.state.events, '_do_full_sync', None)
+    if sync_events is not None:
+        sync_events()
+
     fake_response_count = 0
 
     while True:
