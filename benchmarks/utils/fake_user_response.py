@@ -10,6 +10,7 @@ a fake user response to keep the agent working on the task.
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Callable
 
 from openhands.sdk import get_logger
@@ -115,6 +116,76 @@ def _agent_sent_message(events: list[Event]) -> bool:
     return False
 
 
+def _reconcile_event_cache(event_list: object) -> None:
+    """Rebuild _cached_event_ids from _cached_events under the lock.
+
+    Works around a thread-safety bug in RemoteEventsList._do_full_sync():
+    it replaces _cached_events without the lock while _cached_event_ids is
+    only ever added to. This can leave event IDs marked as "seen" even though
+    the corresponding event was lost from the list, permanently blocking
+    re-delivery via WebSocket.
+    """
+    lock = getattr(event_list, "_lock", None)
+    cached_events = getattr(event_list, "_cached_events", None)
+    cached_event_ids = getattr(event_list, "_cached_event_ids", None)
+    if lock is None or cached_events is None or cached_event_ids is None:
+        return
+    with lock:
+        cached_event_ids.clear()
+        cached_event_ids.update(e.id for e in cached_events)
+
+
+def _ensure_user_message_synced(
+    conversation: "BaseConversation",
+    max_retries: int = 30,
+    interval: float = 1.0,
+) -> bool:
+    """Poll until the local event cache contains at least one user MessageEvent.
+
+    For RemoteConversation, send_message() only POSTs to the server and does
+    not update the local cache. This helper forces REST syncs until the user
+    message is visible locally, working around both the async WebSocket
+    delivery lag and the _do_full_sync thread-safety bug.
+
+    Returns True if the message was found, False if retries were exhausted.
+    Never raises.
+    """
+    event_list = getattr(conversation.state, "events", None)
+    sync_fn = getattr(event_list, "_do_full_sync", None)
+    if sync_fn is None:
+        return True
+
+    for attempt in range(max_retries + 1):
+        user_msg_count = sum(
+            1
+            for e in list(conversation.state.events)
+            if isinstance(e, MessageEvent) and e.source == "user"
+        )
+        if user_msg_count >= 1:
+            if attempt > 0:
+                logger.info(
+                    "User message synced after %d retries", attempt
+                )
+            return True
+
+        if attempt < max_retries:
+            logger.debug(
+                "User message not yet in local cache, syncing (attempt %d/%d)",
+                attempt + 1,
+                max_retries,
+            )
+            sync_fn()
+            _reconcile_event_cache(event_list)
+            time.sleep(interval)
+
+    logger.warning(
+        "User message sync timed out after %d retries; "
+        "the server-side state is correct but local history may be incomplete",
+        max_retries,
+    )
+    return False
+
+
 def run_conversation_with_fake_user_response(
     conversation: "BaseConversation",
     fake_user_response_fn: FakeUserResponseFn = fake_user_response,
@@ -139,14 +210,7 @@ def run_conversation_with_fake_user_response(
             stopping. This prevents infinite loops.
     """
 
-    # For remote conversations, send_message() only POSTs to the server without
-    # updating the local event cache. The WebSocket subscription may not have
-    # received the event yet. Force a REST sync so the user message is visible
-    # locally before the first run(). The dedupe in add_event (via
-    # _cached_event_ids) prevents the WebSocket from re-adding it later.
-    sync_events = getattr(conversation.state.events, '_do_full_sync', None)
-    if sync_events is not None:
-        sync_events()
+    _ensure_user_message_synced(conversation)
 
     fake_response_count = 0
 
