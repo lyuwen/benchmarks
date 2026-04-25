@@ -45,7 +45,7 @@ class ExecutionBasedJudge(BaseModel, abc.ABC):
         instance_id: str,
         git_patch: str,
         instance_data: dict[str, Any],
-    ) -> bool:
+    ) -> bool | None:
         """Evaluate a patch by executing tests in a container.
 
         Args:
@@ -55,7 +55,8 @@ class ExecutionBasedJudge(BaseModel, abc.ABC):
                 (image URL, test spec info, repo, version, etc.).
 
         Returns:
-            True if the patch resolves the issue, False otherwise.
+            True if the patch resolves the issue, False if not, None if
+            the judge could not run (e.g. missing dependency or error).
         """
         ...
 

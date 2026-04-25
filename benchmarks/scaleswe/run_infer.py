@@ -381,7 +381,7 @@ class ScaleSWEEvaluation(Evaluation):
                 )
             except Exception as e:
                 logger.error("Judge failed for %s: %s", instance.id, e)
-                evaluation_result = False
+                evaluation_result = None
 
         # Dump conversation history
         messages = []
@@ -415,8 +415,9 @@ class ScaleSWEEvaluation(Evaluation):
             "temperature": self.metadata.llm.temperature,
             "top_p": self.metadata.llm.top_p,
             "test_result": {"git_patch": git_patch},
-            "evaluation": evaluation_result,
         }
+        if self.judge is not None:
+            dump_data["evaluation"] = evaluation_result
 
         history_file = os.path.join(
             self.metadata.eval_output_dir, f"{instance.id}.history.json"

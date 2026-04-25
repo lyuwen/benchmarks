@@ -42,7 +42,7 @@ class SWEBenchJudge(ExecutionBasedJudge):
         instance_id: str,
         git_patch: str,
         instance_data: dict[str, Any],
-    ) -> bool:
+    ) -> bool | None:
         if not git_patch or not git_patch.strip():
             logger.warning("Empty or missing git patch for %s", instance_id)
             return False
@@ -60,7 +60,7 @@ class SWEBenchJudge(ExecutionBasedJudge):
                 "swebench package is not available (%s). Skipping judge.",
                 e,
             )
-            return False
+            return None
 
         try:
             test_spec = make_test_spec(instance_data)
@@ -99,4 +99,4 @@ class SWEBenchJudge(ExecutionBasedJudge):
                 e,
                 traceback.format_exc(),
             )
-            return False
+            return None

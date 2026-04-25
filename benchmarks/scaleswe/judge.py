@@ -48,7 +48,7 @@ class ScaleSWEJudge(ExecutionBasedJudge):
         instance_id: str,
         git_patch: str,
         instance_data: dict[str, Any],
-    ) -> bool:
+    ) -> bool | None:
         if not git_patch or not git_patch.strip():
             logger.warning("Empty or missing git patch for %s", instance_id)
             return False
@@ -79,14 +79,14 @@ class ScaleSWEJudge(ExecutionBasedJudge):
                 e,
                 traceback.format_exc(),
             )
-            return False
+            return None
 
     async def _judge_async(
         self,
         instance_id: str,
         git_patch: str,
         instance_data: dict[str, Any],
-    ) -> bool:
+    ) -> bool | None:
         try:
             from awe_agent.core.runtime import RuntimeConfig
             from awe_agent.core.runtime.docker import DockerRuntime
@@ -97,7 +97,7 @@ class ScaleSWEJudge(ExecutionBasedJudge):
                 "awe_agent package is not available (%s). Skipping judge.",
                 e,
             )
-            return False
+            return None
 
         image_url = instance_data.get("image_url", "")
         image = _resolve_image_url(image_url, self.docker_image_prefix)
