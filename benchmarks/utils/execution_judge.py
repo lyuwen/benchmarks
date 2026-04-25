@@ -13,10 +13,10 @@ history for later analysis.
 from __future__ import annotations
 
 import abc
-import importlib
 import logging
 from argparse import ArgumentParser, Namespace
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -61,16 +61,48 @@ class ExecutionBasedJudge(BaseModel, abc.ABC):
         ...
 
 
-_JUDGE_REGISTRY: dict[str, tuple[str, str]] = {
-    "swebench": (
-        "benchmarks.swebench.judge",
-        "SWEBenchJudge",
-    ),
-    "scaleswe": (
-        "benchmarks.scaleswe.judge",
-        "ScaleSWEJudge",
-    ),
-}
+# Global judge registry
+_JUDGE_REGISTRY: dict[str, type[ExecutionBasedJudge]] = {}
+
+T = TypeVar("T", bound=ExecutionBasedJudge)
+
+
+def register_judge(name: str) -> Callable[[type[T]], type[T]]:
+    """Decorator to register a judge class.
+
+    Usage:
+        @register_judge("swebench")
+        class SWEBenchJudge(ExecutionBasedJudge):
+            ...
+
+    Args:
+        name: The name to register the judge under (e.g., "swebench", "scaleswe").
+
+    Returns:
+        A decorator that registers the judge class.
+    """
+
+    def decorator(cls: type[T]) -> type[T]:
+        if name in _JUDGE_REGISTRY:
+            logger.warning(
+                "Judge '%s' is already registered, overwriting with %s",
+                name,
+                cls.__name__,
+            )
+        _JUDGE_REGISTRY[name] = cls
+        logger.debug("Registered judge '%s': %s", name, cls.__name__)
+        return cls
+
+    return decorator
+
+
+def get_registered_judges() -> dict[str, type[ExecutionBasedJudge]]:
+    """Get all registered judges.
+
+    Returns:
+        Dictionary mapping judge names to their classes.
+    """
+    return _JUDGE_REGISTRY.copy()
 
 
 def add_judge_args(parser: ArgumentParser, default_judge: str | None = None) -> None:
@@ -90,9 +122,7 @@ def add_judge_args(parser: ArgumentParser, default_judge: str | None = None) -> 
         help=(
             "Enable execution-based judge after the agent finishes. "
             + (f"Defaults to '{default_judge}' for this benchmark. " if default_judge else "")
-            + "Available: "
-            + ", ".join(sorted(_JUDGE_REGISTRY))
-            + ". "
+            + "Available judges depend on which benchmark modules have been imported. "
             "The judge result is saved in the history JSON file."
         ),
     )
@@ -101,6 +131,16 @@ def add_judge_args(parser: ArgumentParser, default_judge: str | None = None) -> 
         type=int,
         default=1800,
         help="Per-instance judge timeout in seconds (default: 1800).",
+    )
+    parser.add_argument(
+        "--judge-rm-image",
+        action="store_true",
+        help="Remove Docker image after each judge evaluation (default: False).",
+    )
+    parser.add_argument(
+        "--judge-force-rebuild",
+        action="store_true",
+        help="Force rebuild Docker images for judge evaluation (default: False).",
     )
 
 
@@ -116,17 +156,32 @@ def create_judge(args: Namespace) -> ExecutionBasedJudge | None:
     if name not in _JUDGE_REGISTRY:
         raise ValueError(
             f"Unknown judge: {name}. "
-            f"Available: {', '.join(sorted(_JUDGE_REGISTRY))}"
+            f"Available: {', '.join(sorted(_JUDGE_REGISTRY))}. "
+            "Make sure the judge module has been imported."
         )
 
     kwargs: dict[str, Any] = {}
+
+    # Common arguments
     timeout = getattr(args, "judge_timeout", None)
     if timeout is not None:
         kwargs["timeout"] = timeout
 
-    module_path, class_name = _JUDGE_REGISTRY[name]
-    module = importlib.import_module(module_path)
-    judge_class = getattr(module, class_name)
+    rm_image = getattr(args, "judge_rm_image", None)
+    if rm_image is not None:
+        kwargs["rm_image"] = rm_image
+
+    force_rebuild = getattr(args, "judge_force_rebuild", None)
+    if force_rebuild is not None:
+        kwargs["force_rebuild"] = force_rebuild
+
+    # Judge-specific arguments
+    if name == "scaleswe":
+        docker_image_prefix = getattr(args, "docker_image_prefix", None)
+        if docker_image_prefix is not None:
+            kwargs["docker_image_prefix"] = docker_image_prefix
+
+    judge_class = _JUDGE_REGISTRY[name]
     judge = judge_class(**kwargs)
-    logger.info("Created judge: %s with timeout: %s", name, kwargs.get("timeout"))
+    logger.info("Created judge: %s with config: %s", name, kwargs)
     return judge

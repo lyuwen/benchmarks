@@ -30,6 +30,9 @@ from benchmarks.utils.models import (
     EvalOutput,
 )
 from benchmarks.utils.version import SDK_SHORT_SHA
+
+# Import judge to trigger registration
+from benchmarks.scaleswe.judge import ScaleSWEJudge  # noqa: F401
 from openhands.sdk import LLM, Agent, Conversation, get_logger
 from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
@@ -344,7 +347,9 @@ class ScaleSWEEvaluation(Evaluation):
             workspace_path=workspace.working_dir,
         )
         conversation.send_message(instruction)
-        run_conversation_with_fake_user_response(conversation)
+        run_conversation_with_fake_user_response(
+            conversation, timeout=self.metadata.conversation_timeout
+        )
 
         # git add
         workspace.execute_command(f"cd {repo_path} ; git add -A")
@@ -528,6 +533,7 @@ def main() -> None:
         selected_instances_file=args.select,
         max_retries=args.max_retries,
         workspace_type=args.workspace,
+        conversation_timeout=args.conversation_timeout,
     )
 
     evaluator = ScaleSWEEvaluation(

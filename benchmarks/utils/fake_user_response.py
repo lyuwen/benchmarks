@@ -190,6 +190,7 @@ def run_conversation_with_fake_user_response(
     conversation: "BaseConversation",
     fake_user_response_fn: FakeUserResponseFn = fake_user_response,
     max_fake_responses: int = 10,
+    timeout: int | None = None,
 ) -> None:
     """Run a conversation with automatic fake user responses.
 
@@ -208,6 +209,8 @@ def run_conversation_with_fake_user_response(
             Defaults to fake_user_response.
         max_fake_responses: Maximum number of fake responses to send before
             stopping. This prevents infinite loops.
+        timeout: Timeout in seconds for each conversation.run() call.
+            If None, no timeout is applied.
     """
 
     _ensure_user_message_synced(conversation)
@@ -216,7 +219,19 @@ def run_conversation_with_fake_user_response(
 
     while True:
         # Run the conversation
-        conversation.run()
+        # Only pass timeout if it's not None and the conversation supports it
+        # (RemoteConversation supports timeout, LocalConversation does not)
+        if timeout is not None and hasattr(conversation.run, "__code__"):
+            # Check if the run method accepts a timeout parameter
+            import inspect
+
+            sig = inspect.signature(conversation.run)
+            if "timeout" in sig.parameters:
+                conversation.run(timeout=timeout)
+            else:
+                conversation.run()
+        else:
+            conversation.run()
 
         # Check the execution status
         status = conversation.state.execution_status

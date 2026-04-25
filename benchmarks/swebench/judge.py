@@ -15,11 +15,12 @@ from typing import Any
 import docker
 from pydantic import Field
 
-from benchmarks.utils.execution_judge import ExecutionBasedJudge
+from benchmarks.utils.execution_judge import ExecutionBasedJudge, register_judge
 
 logger = logging.getLogger(__name__)
 
 
+@register_judge("swebench")
 class SWEBenchJudge(ExecutionBasedJudge):
     """Judge that runs the SWE-bench test harness in Docker.
 

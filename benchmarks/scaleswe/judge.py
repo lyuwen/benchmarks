@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import Field
 
-from benchmarks.utils.execution_judge import ExecutionBasedJudge
+from benchmarks.utils.execution_judge import ExecutionBasedJudge, register_judge
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ def _resolve_image_url(image_url: str, prefix: str | None = None) -> str:
     return f"{prefix.rstrip('/')}/{image_name}"
 
 
+@register_judge("scaleswe")
 class ScaleSWEJudge(ExecutionBasedJudge):
     """Judge that runs the Scale-SWE test harness in Docker.
 
@@ -38,9 +39,9 @@ class ScaleSWEJudge(ExecutionBasedJudge):
         default=None,
         description="Override image namespace/registry prefix",
     )
-    remove_image_after_eval: bool = Field(
+    rm_image: bool = Field(
         default=False,
-        description="Remove Docker image after each evaluation",
+        description="Remove Docker image after evaluation",
     )
 
     def judge(
@@ -113,7 +114,7 @@ class ScaleSWEJudge(ExecutionBasedJudge):
                 backend="docker",
                 image=image,
                 workdir=workdir,
-                docker={"remove_image_after_use": self.remove_image_after_eval},
+                docker={"remove_image_after_use": self.rm_image},
             ),
         )
 
