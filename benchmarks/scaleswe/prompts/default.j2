@@ -19,10 +19,9 @@ Phase 1. READING: read the problem and reword it in clearer terms
    1.5 Hightlight any best practices to take into account when testing and fixing the issue
 
 Phase 2. RUNNING: install and run the tests on the repository
-   2.1 Activate the environment by running
-       ./opt/miniconda3/etc/profile.d/conda.sh ; conda activate testbed
+   2.1 First look for an existing Python environment. Prefer common conda locations like /opt/miniconda3, ./opt/miniconda3, or /opt/conda; then check /usr/local/bin; then check for .venv or venv inside {{ instance.repo_path }}.
    2.2 Follow the readme
-   2.3 Install the environment and anything needed
+   2.3 Install the environment and anything needed, including installing the code repository in editable mode
    2.4 Iterate and figure out how to run the tests
 
 Phase 3. EXPLORATION: find the files that are related to the problem and possible solutions
