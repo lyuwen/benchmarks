@@ -18,10 +18,10 @@ from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
-from benchmarks.utils.execution_evaluator import (
-    ExecutionBasedEvaluator,
-    add_evaluator_args,
-    create_evaluator,
+from benchmarks.utils.execution_judge import (
+    ExecutionBasedJudge,
+    add_judge_args,
+    create_judge,
 )
 from benchmarks.utils.dataset import get_dataset
 from benchmarks.utils.evaluation import Evaluation
@@ -98,8 +98,8 @@ class SWEBenchEvaluation(Evaluation):
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
     )
-    evaluator: ExecutionBasedEvaluator | None = Field(
-        default=None, description="Optional execution-based evaluator"
+    judge: ExecutionBasedJudge | None = Field(
+        default=None, description="Optional execution-based judge"
     )
 
     def prepare_instances(self) -> List[EvalInstance]:
@@ -358,20 +358,20 @@ class SWEBenchEvaluation(Evaluation):
         )
         git_patch = git_patch_result.stdout
 
-        # Run execution-based evaluator if configured
+        # Run execution-based judge if configured
         evaluation_result = None
-        if self.evaluator is not None:
+        if self.judge is not None:
             try:
-                evaluation_result = self.evaluator.evaluate(
+                evaluation_result = self.judge.judge(
                     instance_id=instance.id,
                     git_patch=git_patch,
                     instance_data=instance.data,
                 )
                 logger.info(
-                    "Evaluator result for %s: %s", instance.id, evaluation_result
+                    "Judge result for %s: %s", instance.id, evaluation_result
                 )
             except Exception as e:
-                logger.error("Evaluator failed for %s: %s", instance.id, e)
+                logger.error("Judge failed for %s: %s", instance.id, e)
                 evaluation_result = False
 
         # Dump conversation history
@@ -455,7 +455,7 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
-    add_evaluator_args(parser)
+    add_judge_args(parser)
     args = parser.parse_args()
 
     # Validate max_attempts
@@ -488,9 +488,9 @@ def main() -> None:
     critic = create_critic(args)
     logger.info(f"Using critic: {type(critic).__name__}")
 
-    evaluator = create_evaluator(args)
-    if evaluator is not None:
-        logger.info(f"Using evaluator: {type(evaluator).__name__}")
+    judge = create_judge(args)
+    if judge is not None:
+        logger.info(f"Using judge: {type(judge).__name__}")
 
     metadata = EvalMetadata(
         llm=llm,
@@ -510,15 +510,15 @@ def main() -> None:
     )
 
     # Run orchestrator with a simple JSONL writer
-    evaluator_obj = SWEBenchEvaluation(
+    evaluator = SWEBenchEvaluation(
         metadata=metadata,
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
-        evaluator=evaluator,
+        judge=judge,
     )
 
-    evaluator_obj.run(on_result=get_default_on_result_writer(evaluator_obj.output_path))
+    evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))
 
     logger.info("Evaluation completed!")
 

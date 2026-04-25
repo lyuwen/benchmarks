@@ -1,5 +1,5 @@
 """
-Scale-SWE execution-based evaluator.
+Scale-SWE execution-based judge.
 
 Evaluates agent patches by running the Scale-SWE test harness in Docker
 containers.  Mirrors the evaluation logic from
@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import Field
 
-from benchmarks.utils.execution_evaluator import ExecutionBasedEvaluator
+from benchmarks.utils.execution_judge import ExecutionBasedJudge
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +27,11 @@ def _resolve_image_url(image_url: str, prefix: str | None = None) -> str:
     return f"{prefix.rstrip('/')}/{image_name}"
 
 
-class ScaleSWEEvaluator(ExecutionBasedEvaluator):
-    """Evaluator that runs the Scale-SWE test harness in Docker.
+class ScaleSWEJudge(ExecutionBasedJudge):
+    """Judge that runs the Scale-SWE test harness in Docker.
 
     Uses AweAgent's ScaleSWEEvaluator to apply the patch, run F2P+P2P
     tests, and determine whether the issue is resolved.
-
-    Config example (``--evaluator-config evaluator.json``)::
-
-        {
-            "docker_image_prefix": "myregistry.com/myorg",
-            "timeout": 3600
-        }
     """
 
     docker_image_prefix: str | None = Field(
@@ -50,7 +43,7 @@ class ScaleSWEEvaluator(ExecutionBasedEvaluator):
         description="Remove Docker image after each evaluation",
     )
 
-    def evaluate(
+    def judge(
         self,
         instance_id: str,
         git_patch: str,
@@ -72,23 +65,23 @@ class ScaleSWEEvaluator(ExecutionBasedEvaluator):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     result = pool.submit(
                         asyncio.run,
-                        self._evaluate_async(instance_id, git_patch, instance_data),
+                        self._judge_async(instance_id, git_patch, instance_data),
                     ).result()
             else:
                 result = asyncio.run(
-                    self._evaluate_async(instance_id, git_patch, instance_data)
+                    self._judge_async(instance_id, git_patch, instance_data)
                 )
             return result
         except Exception as e:
             logger.error(
-                "ScaleSWEEvaluator failed for %s: %s\n%s",
+                "ScaleSWEJudge failed for %s: %s\n%s",
                 instance_id,
                 e,
                 traceback.format_exc(),
             )
             return False
 
-    async def _evaluate_async(
+    async def _judge_async(
         self,
         instance_id: str,
         git_patch: str,
@@ -101,7 +94,7 @@ class ScaleSWEEvaluator(ExecutionBasedEvaluator):
             from awe_agent.tasks.scale_swe.task import ScaleSWETask
         except (ImportError, ModuleNotFoundError) as e:
             logger.warning(
-                "awe_agent package is not available (%s). Skipping evaluation.",
+                "awe_agent package is not available (%s). Skipping judge.",
                 e,
             )
             return False
@@ -128,7 +121,7 @@ class ScaleSWEEvaluator(ExecutionBasedEvaluator):
 
         resolved = eval_result.accepted
         logger.info(
-            "ScaleSWEEvaluator %s: resolved=%s",
+            "ScaleSWEJudge %s: resolved=%s",
             instance_id,
             resolved,
         )

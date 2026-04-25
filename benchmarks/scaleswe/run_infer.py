@@ -11,6 +11,11 @@ from benchmarks.utils.args_parser import get_parser
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
+from benchmarks.utils.execution_judge import (
+    ExecutionBasedJudge,
+    add_judge_args,
+    create_judge,
+)
 from benchmarks.utils.dataset import get_dataset
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
@@ -111,6 +116,9 @@ class ScaleSWEEvaluation(Evaluation):
     docker_image_prefix: str | None = Field(
         default=None,
         description="Override image namespace/registry (e.g., 'myregistry.com/myorg')",
+    )
+    judge: ExecutionBasedJudge | None = Field(
+        default=None, description="Optional execution-based judge"
     )
 
     def prepare_instances(self) -> List[EvalInstance]:
@@ -359,6 +367,22 @@ class ScaleSWEEvaluation(Evaluation):
         )
         git_patch = git_patch_result.stdout
 
+        # Run execution-based judge if configured
+        evaluation_result = None
+        if self.judge is not None:
+            try:
+                evaluation_result = self.judge.judge(
+                    instance_id=instance.id,
+                    git_patch=git_patch,
+                    instance_data=instance.data,
+                )
+                logger.info(
+                    "Judge result for %s: %s", instance.id, evaluation_result
+                )
+            except Exception as e:
+                logger.error("Judge failed for %s: %s", instance.id, e)
+                evaluation_result = False
+
         # Dump conversation history
         messages = []
         tools_list = []
@@ -391,6 +415,7 @@ class ScaleSWEEvaluation(Evaluation):
             "temperature": self.metadata.llm.temperature,
             "top_p": self.metadata.llm.top_p,
             "test_result": {"git_patch": git_patch},
+            "evaluation": evaluation_result,
         }
 
         history_file = os.path.join(
@@ -453,6 +478,7 @@ def main() -> None:
             "into 'myregistry.com/myorg/scaleswe:tag'."
         ),
     )
+    add_judge_args(parser)
     args = parser.parse_args()
 
     if args.max_attempts < 1:
@@ -482,6 +508,10 @@ def main() -> None:
     critic = create_critic(args)
     logger.info(f"Using critic: {type(critic).__name__}")
 
+    judge = create_judge(args)
+    if judge is not None:
+        logger.info(f"Using judge: {type(judge).__name__}")
+
     metadata = EvalMetadata(
         llm=llm,
         dataset=args.dataset,
@@ -505,6 +535,7 @@ def main() -> None:
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
         docker_image_prefix=args.docker_image_prefix,
+        judge=judge,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))

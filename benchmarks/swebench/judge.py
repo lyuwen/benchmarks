@@ -1,5 +1,5 @@
 """
-SWE-bench execution-based evaluator.
+SWE-bench execution-based judge.
 
 Evaluates agent patches by running the SWE-bench test harness in Docker
 containers.  Mirrors the evaluation logic from
@@ -15,24 +15,17 @@ from typing import Any
 import docker
 from pydantic import Field
 
-from benchmarks.utils.execution_evaluator import ExecutionBasedEvaluator
+from benchmarks.utils.execution_judge import ExecutionBasedJudge
 
 logger = logging.getLogger(__name__)
 
 
-class SWEBenchEvaluator(ExecutionBasedEvaluator):
-    """Evaluator that runs the SWE-bench test harness in Docker.
+class SWEBenchJudge(ExecutionBasedJudge):
+    """Judge that runs the SWE-bench test harness in Docker.
 
     Creates a TestSpec from the instance data already provided by the
     inference harness, builds/reuses the Docker image, applies the patch,
     runs the eval script, and grades the result using SWE-bench's grading.
-
-    Config example (``--evaluator-config evaluator.json``)::
-
-        {
-            "timeout": 1800,
-            "force_rebuild": false
-        }
     """
 
     force_rebuild: bool = Field(
@@ -44,7 +37,7 @@ class SWEBenchEvaluator(ExecutionBasedEvaluator):
         description="Remove Docker image after evaluation",
     )
 
-    def evaluate(
+    def judge(
         self,
         instance_id: str,
         git_patch: str,
@@ -64,7 +57,7 @@ class SWEBenchEvaluator(ExecutionBasedEvaluator):
             from swebench.harness.test_spec.test_spec import make_test_spec
         except (ImportError, ModuleNotFoundError) as e:
             logger.warning(
-                "swebench package is not available (%s). Skipping evaluation.",
+                "swebench package is not available (%s). Skipping judge.",
                 e,
             )
             return False
@@ -74,7 +67,7 @@ class SWEBenchEvaluator(ExecutionBasedEvaluator):
 
             pred = {
                 KEY_INSTANCE_ID: instance_id,
-                KEY_MODEL: "evaluator",
+                KEY_MODEL: "judge",
                 KEY_PREDICTION: git_patch,
             }
 
@@ -86,13 +79,13 @@ class SWEBenchEvaluator(ExecutionBasedEvaluator):
                 rm_image=self.rm_image,
                 force_rebuild=self.force_rebuild,
                 client=client,
-                run_id="evaluator",
+                run_id="judge",
                 timeout=self.timeout,
             )
 
             resolved = result.get("completed", False) and result.get("resolved", False)
             logger.info(
-                "SWEBenchEvaluator %s: completed=%s resolved=%s",
+                "SWEBenchJudge %s: completed=%s resolved=%s",
                 instance_id,
                 result.get("completed"),
                 result.get("resolved"),
@@ -101,7 +94,7 @@ class SWEBenchEvaluator(ExecutionBasedEvaluator):
 
         except Exception as e:
             logger.error(
-                "SWEBenchEvaluator failed for %s: %s\n%s",
+                "SWEBenchJudge failed for %s: %s\n%s",
                 instance_id,
                 e,
                 traceback.format_exc(),
