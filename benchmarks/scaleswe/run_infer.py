@@ -479,7 +479,7 @@ def main() -> None:
             "into 'myregistry.com/myorg/scaleswe:tag'."
         ),
     )
-    add_judge_args(parser)
+    add_judge_args(parser, default_judge="scaleswe")
     args = parser.parse_args()
 
     if args.max_attempts < 1:

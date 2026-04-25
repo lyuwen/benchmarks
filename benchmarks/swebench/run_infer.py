@@ -456,7 +456,7 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
-    add_judge_args(parser)
+    add_judge_args(parser, default_judge="swebench")
     args = parser.parse_args()
 
     # Validate max_attempts

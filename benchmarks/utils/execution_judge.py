@@ -73,16 +73,24 @@ _JUDGE_REGISTRY: dict[str, tuple[str, str]] = {
 }
 
 
-def add_judge_args(parser: ArgumentParser) -> None:
-    """Add judge-related arguments to an argparse parser."""
+def add_judge_args(parser: ArgumentParser, default_judge: str | None = None) -> None:
+    """Add judge-related arguments to an argparse parser.
+
+    Args:
+        parser: The argument parser to add arguments to.
+        default_judge: Default judge name for this benchmark (e.g. "swebench").
+            When set, ``--judge`` acts as a flag that enables the default judge.
+            An explicit name can still be passed: ``--judge scaleswe``.
+    """
     parser.add_argument(
         "--judge",
-        type=str,
+        nargs="?",
+        const=default_judge,
         default=None,
         help=(
-            "Name of the execution-based judge to run after the agent "
-            "finishes (default: None — no execution evaluation). "
-            "Available: "
+            "Enable execution-based judge after the agent finishes. "
+            + (f"Defaults to '{default_judge}' for this benchmark. " if default_judge else "")
+            + "Available: "
             + ", ".join(sorted(_JUDGE_REGISTRY))
             + ". "
             "The judge result is saved in the history JSON file."
