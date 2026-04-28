@@ -72,6 +72,10 @@ class EvalMetadata(BaseModel):
         default=None,
         description="Laminar evaluation metadata",
     )
+    conversation_timeout: int | None = Field(
+        default=None,
+        description="Timeout in seconds for each conversation.run() call",
+    )
 
 
 EvalInstanceID = str

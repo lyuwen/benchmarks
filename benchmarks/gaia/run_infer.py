@@ -346,7 +346,9 @@ class GAIAEvaluation(Evaluation):
         else:
             conversation.send_message(instruction)
         # Run conversation with fake user responses to handle agent messages
-        run_conversation_with_fake_user_response(conversation)
+        run_conversation_with_fake_user_response(
+            conversation, timeout=self.metadata.conversation_timeout
+        )
 
         # Extract answer from conversation history
         model_answer_raw = self._extract_answer_from_history(conversation.state.events)
@@ -595,6 +597,7 @@ def main() -> None:
         critic=critic,
         selected_instances_file=args.select,
         workspace_type=args.workspace,
+        conversation_timeout=args.conversation_timeout,
     )
 
     # Create evaluator

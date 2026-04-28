@@ -461,7 +461,9 @@ class OpenAgentSafetyEvaluation(Evaluation):
         try:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
-                run_conversation_with_fake_user_response(conversation)
+                run_conversation_with_fake_user_response(
+                    conversation, timeout=self.metadata.conversation_timeout
+                )
             logger.info(f"Conversation completed for {instance.id}")
         except ValidationError as e:
             logger.warning(f"Validation error from custom events (continuing): {e}")
@@ -580,6 +582,7 @@ def main() -> None:
         max_attempts=args.max_attempts,
         critic=critic,
         selected_instances_file=args.select,
+        conversation_timeout=args.conversation_timeout,
     )
 
     # Initial cleanup

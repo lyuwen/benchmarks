@@ -18,6 +18,11 @@ from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
+from benchmarks.utils.execution_judge import (
+    ExecutionBasedJudge,
+    add_judge_args,
+    create_judge,
+)
 from benchmarks.utils.dataset import get_dataset
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
@@ -32,6 +37,10 @@ from benchmarks.utils.models import (
     EvalOutput,
 )
 from benchmarks.utils.version import SDK_SHORT_SHA
+
+# Import judge to trigger registration
+from benchmarks.swebench.judge import SWEBenchJudge  # noqa: F401
+
 from openhands.sdk import LLM, Agent, Conversation, get_logger
 from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
@@ -92,6 +101,9 @@ class SWEBenchEvaluation(Evaluation):
     )
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
+    )
+    judge: ExecutionBasedJudge | None = Field(
+        default=None, description="Optional execution-based judge"
     )
 
     def prepare_instances(self) -> List[EvalInstance]:
@@ -327,7 +339,9 @@ class SWEBenchEvaluation(Evaluation):
         )
         conversation.send_message(instruction)
         # Run conversation with fake user responses to handle agent messages
-        run_conversation_with_fake_user_response(conversation)
+        run_conversation_with_fake_user_response(
+            conversation, timeout=self.metadata.conversation_timeout
+        )
 
         # git add
         workspace.execute_command(f"cd {repo_path} ; git add -A")
@@ -349,6 +363,22 @@ class SWEBenchEvaluation(Evaluation):
             f"git diff failed: {git_patch_result.stderr}"
         )
         git_patch = git_patch_result.stdout
+
+        # Run execution-based judge if configured
+        evaluation_result = None
+        if self.judge is not None:
+            try:
+                evaluation_result = self.judge.judge(
+                    instance_id=instance.id,
+                    git_patch=git_patch,
+                    instance_data=instance.data,
+                )
+                logger.info(
+                    "Judge result for %s: %s", instance.id, evaluation_result
+                )
+            except Exception as e:
+                logger.error("Judge failed for %s: %s", instance.id, e)
+                evaluation_result = None
 
         # Dump conversation history
         messages = []
@@ -383,6 +413,8 @@ class SWEBenchEvaluation(Evaluation):
             "top_p": self.metadata.llm.top_p,
             "test_result": {"git_patch": git_patch},
         }
+        if self.judge is not None:
+            dump_data["evaluation"] = evaluation_result
 
         history_file = os.path.join(self.metadata.eval_output_dir, f"{instance.id}.history.json")
         with open(history_file, "w") as f:
@@ -430,6 +462,7 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
+    add_judge_args(parser, default_judge="swebench")
     args = parser.parse_args()
 
     # Validate max_attempts
@@ -462,6 +495,10 @@ def main() -> None:
     critic = create_critic(args)
     logger.info(f"Using critic: {type(critic).__name__}")
 
+    judge = create_judge(args)
+    if judge is not None:
+        logger.info(f"Using judge: {type(judge).__name__}")
+
     metadata = EvalMetadata(
         llm=llm,
         dataset=args.dataset,
@@ -477,6 +514,7 @@ def main() -> None:
         selected_instances_file=args.select,
         max_retries=args.max_retries,
         workspace_type=args.workspace,
+        conversation_timeout=args.conversation_timeout,
     )
 
     # Run orchestrator with a simple JSONL writer
@@ -485,6 +523,7 @@ def main() -> None:
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
+        judge=judge,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))

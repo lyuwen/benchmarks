@@ -316,7 +316,9 @@ class SWEBenchEvaluation(Evaluation):
             logger.info("No image_assets found, sending text-only instruction")
             conversation.send_message(instruction)
         # Run conversation with fake user responses to handle agent messages
-        run_conversation_with_fake_user_response(conversation)
+        run_conversation_with_fake_user_response(
+            conversation, timeout=self.metadata.conversation_timeout
+        )
 
         # git add
         workspace.execute_command(f"cd {repo_path} ; git add -A")
@@ -435,6 +437,7 @@ def main() -> None:
         selected_instances_file=args.select,
         max_retries=args.max_retries,
         workspace_type=args.workspace,
+        conversation_timeout=args.conversation_timeout,
     )
 
     # Run orchestrator with a simple JSONL writer

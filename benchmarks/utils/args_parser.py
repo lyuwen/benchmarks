@@ -75,4 +75,10 @@ def get_parser(add_llm_config: bool = True) -> argparse.ArgumentParser:
         default=3,
         help="Maximum retries for instances that throw exceptions (default: 3)",
     )
+    parser.add_argument(
+        "--conversation-timeout",
+        type=int,
+        default=None,
+        help="Timeout in seconds for each conversation.run() call (default: None, no timeout)",
+    )
     return parser

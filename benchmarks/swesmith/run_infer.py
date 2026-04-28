@@ -312,7 +312,9 @@ class SWEBenchEvaluation(Evaluation):
         )
         conversation.send_message(instruction)
         # Run conversation with fake user responses to handle agent messages
-        run_conversation_with_fake_user_response(conversation)
+        run_conversation_with_fake_user_response(
+            conversation, timeout=self.metadata.conversation_timeout
+        )
 
         git_status_diff_unstaged = workspace.execute_command(f"cd {repo_path} ; git status ; git --no-pager diff")
         logger.info(f"Repo status:\n{git_status_diff_unstaged.stdout.strip()}")
@@ -470,6 +472,7 @@ def main() -> None:
         selected_instances_file=args.select,
         max_retries=args.max_retries,
         workspace_type=args.workspace,
+        conversation_timeout=args.conversation_timeout,
     )
 
     # Run orchestrator with a simple JSONL writer
