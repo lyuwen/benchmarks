@@ -145,7 +145,7 @@ class SWEBenchEvaluation(Evaluation):
         else:
             official_docker_image = get_official_docker_image(instance.id)
         build_target = "source-minimal"
-        custom_tag = extract_custom_tag(official_docker_image)
+        custom_tag = extract_custom_tag(get_official_docker_image(instance.id))
         # For non-binary targets, append target suffix
         suffix = f"-{build_target}" if build_target != "binary" else ""
         base_agent_image = (
