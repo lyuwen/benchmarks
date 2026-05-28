@@ -16,6 +16,11 @@ from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
+from benchmarks.utils.execution_judge import (
+    ExecutionBasedJudge,
+    add_judge_args,
+    create_judge,
+)
 from benchmarks.utils.dataset import get_dataset
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
@@ -30,6 +35,9 @@ from benchmarks.utils.models import (
     EvalOutput,
 )
 from benchmarks.utils.version import SDK_SHORT_SHA
+
+# Import judge to trigger registration
+from benchmarks.swerebenchv2.judge import SWERebenchV2Judge  # noqa: F401
 from openhands.sdk import LLM, Agent, Conversation, get_logger
 from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
@@ -94,6 +102,9 @@ class SWERebenchV2Evaluation(Evaluation):
     )
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
+    )
+    judge: ExecutionBasedJudge | None = Field(
+        default=None, description="Optional execution-based judge"
     )
 
     def prepare_instances(self) -> List[EvalInstance]:
@@ -318,6 +329,22 @@ class SWERebenchV2Evaluation(Evaluation):
         )
         git_patch = git_patch_result.stdout
 
+        # Run execution-based judge if configured
+        evaluation_result = None
+        if self.judge is not None:
+            try:
+                evaluation_result = self.judge.judge(
+                    instance_id=instance.id,
+                    git_patch=git_patch,
+                    instance_data=instance.data,
+                )
+                logger.info(
+                    "Judge result for %s: %s", instance.id, evaluation_result
+                )
+            except Exception as e:
+                logger.error("Judge failed for %s: %s", instance.id, e)
+                evaluation_result = None
+
         # Dump conversation history
         messages = []
         tools_list = []
@@ -353,6 +380,8 @@ class SWERebenchV2Evaluation(Evaluation):
             "top_p": self.metadata.llm.top_p,
             "test_result": {"git_patch": git_patch},
         }
+        if self.judge is not None:
+            dump_data["evaluation"] = evaluation_result
 
         history_file = os.path.join(
             self.metadata.eval_output_dir, f"{instance.id}.history.json"
@@ -405,6 +434,7 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
+    add_judge_args(parser, default_judge="swerebenchv2")
     args = parser.parse_args()
 
     if args.max_attempts < 1:
@@ -433,6 +463,10 @@ def main() -> None:
 
     critic = create_critic(args)
     logger.info(f"Using critic: {type(critic).__name__}")
+
+    judge = create_judge(args)
+    if judge is not None:
+        logger.info(f"Using judge: {type(judge).__name__}")
 
     env_vars = [
         f"export {k}=\"{v}\""
@@ -463,6 +497,7 @@ def main() -> None:
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
+        judge=judge,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))
