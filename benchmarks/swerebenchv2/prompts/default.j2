@@ -1,4 +1,5 @@
-I have access to a code repository in the directory {{ instance.repo_path }} . You can explore and modify files using the available tools. Consider the following issue description:
+{% set lang = instance.language | default("python") | lower %}
+I have access to a {{ lang }} code repository in the directory {{ instance.repo_path }} . You can explore and modify files using the available tools. Consider the following issue description:
 
 <issue_description>
 {{ instance.problem_statement }}
@@ -8,6 +9,52 @@ Can you help me implement the necessary changes to the repository so that the re
 I've already taken care of all changes to any of the test files described in the <issue_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
 Also the development environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
 Your task is to make the minimal changes to non-test files in the {{ instance.repo_path }} directory to ensure the <issue_description> is satisfied.
+
+<environment_hints>
+{% if lang == "python" %}
+The Python environment is ready to use — the interpreter and all project dependencies are pre-installed on PATH. No conda or virtualenv activation is needed. You can run tests with `pytest` or whichever test runner the project uses.
+{% elif lang == "c" or lang == "cpp" or lang == "c++" %}
+The C/C++ build toolchain (gcc, g++, cmake, make, autoconf, libtool) is pre-installed. Build the project using its existing build system (Makefile, CMakeLists.txt, autotools, etc.).
+{% elif lang == "go" %}
+Go is installed at `/usr/local/go/bin` and is already on PATH. Use `go build`, `go test`, etc. as usual.
+{% elif lang == "rust" %}
+The Rust toolchain (rustc, cargo) is pre-installed and on PATH. Use `cargo build`, `cargo test`, etc.
+{% elif lang == "java" %}
+Java (Eclipse Temurin JDK) and Maven are pre-installed. Maven Daemon (mvnd) is also available. Use `mvn`, `mvnd`, or `ant`/`gradle` as the project requires.
+{% elif lang == "javascript" or lang == "typescript" or lang == "node" %}
+Node.js and npm are pre-installed. pnpm is available via corepack. Google Chrome is installed for browser testing if needed. Use the project's package manager (npm, yarn, pnpm) and test runner (jest, mocha, vitest, etc.).
+{% elif lang == "ruby" %}
+Ruby and Bundler are pre-installed and on PATH. Use `bundle exec` to run tests with the project's test framework (minitest, rspec, etc.).
+{% elif lang == "csharp" or lang == "c#" %}
+The .NET SDK 8.0 is pre-installed (dotnet CLI on PATH). Use `dotnet build`, `dotnet test`, etc.
+{% elif lang == "php" %}
+PHP and Composer are pre-installed. Use `composer` for dependency management and the project's test runner (phpunit, etc.).
+{% elif lang == "swift" %}
+Swift 5.10 is pre-installed and on PATH. Use `swift build`, `swift test`, or the project's build system.
+{% elif lang == "elixir" %}
+Elixir 1.16 and Erlang/OTP are pre-installed. Hex and Rebar are configured. Use `mix test` or the project's test runner.
+{% elif lang == "scala" or lang == "solidity" %}
+Foundry (forge, cast, anvil) and Node.js are pre-installed. Solidity compiler is available via solc-select. Use the project's build/test system.
+{% elif lang == "kotlin" %}
+Kotlin and Gradle are pre-installed via SDKMAN (on PATH). Use `gradle test` or the project's build system.
+{% elif lang == "dart" %}
+The Dart SDK is pre-installed and on PATH. Use `dart test` or the project's test runner.
+{% elif lang == "julia" %}
+Julia 1.10 is pre-installed and on PATH. Use `julia` to run tests.
+{% elif lang == "lua" %}
+Lua 5.4 and LuaRocks are pre-installed. Use the project's test runner.
+{% elif lang == "r" %}
+R 4.4.1 is pre-installed. Use `Rscript` or `R CMD check` for testing.
+{% elif lang == "ocaml" %}
+OCaml 5.2.1 is installed via opam. You MUST activate the opam environment first:
+  eval "$(opam env)"
+Then use `dune`, `make`, or the project's build system.
+{% elif lang == "clojure" %}
+Clojure tools.deps (clj), Leiningen (lein), and Boot are pre-installed with JDK 21. Use the project's build tool (lein test, clj -X:test, etc.).
+{% else %}
+The development environment is pre-configured. Explore the project structure to determine the build system and test runner.
+{% endif %}
+</environment_hints>
 
 Follow these phases to resolve the issue:
 
@@ -19,9 +66,18 @@ Phase 1. READING: read the problem and reword it in clearer terms
    1.5 Highlight any best practices to take into account when testing and fixing the issue
 
 Phase 2. RUNNING: discover and run the tests on the repository
-   2.1 Find the project's build/test configuration (Makefile, setup.py, CMakeLists.txt, Cargo.toml, etc.)
+{% if lang == "python" %}
+   2.1 Check for pytest.ini, setup.cfg, pyproject.toml, or tox.ini for test configuration
+   2.2 Run the relevant tests with `pytest` (or the project's configured test runner)
+{% elif lang == "ocaml" %}
+   2.1 Activate the opam environment: `eval "$(opam env)"`
+   2.2 Check for dune-project, Makefile, or other build configuration
+   2.3 Build the project and run tests (e.g., `dune runtest`, `make test`)
+{% else %}
+   2.1 Find the project's build/test configuration
    2.2 Follow any README or CONTRIBUTING guide for build/test instructions
    2.3 Discover how to run the relevant tests
+{% endif %}
    2.4 Run the tests to see the current state
 
 Phase 3. EXPLORATION: find the files that are related to the problem and possible solutions
