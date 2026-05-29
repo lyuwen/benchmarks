@@ -1,5 +1,9 @@
-{% set lang = instance.language | default("unknown") | lower %}
+{% set lang = instance.language | default("") | lower %}
+{% if lang %}
 I have access to a {{ lang }} code repository in the directory {{ instance.repo_path }} . You can explore and modify files using the available tools. Consider the following issue description:
+{% else %}
+I have access to a code repository in the directory {{ instance.repo_path }} . You can explore and modify files using the available tools. Consider the following issue description:
+{% endif %}
 
 <issue_description>
 {{ instance.problem_statement }}
