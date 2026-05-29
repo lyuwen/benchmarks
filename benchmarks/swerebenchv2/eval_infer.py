@@ -32,10 +32,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 V2_ROOT = REPO_ROOT / "thirdparty" / "SWE-rebench-V2"
 LIB_DIR = V2_ROOT / "lib"
 
-sys.path.insert(0, str(V2_ROOT))
-sys.path.insert(0, str(LIB_DIR))
 
-from agent import log_parsers  # noqa: E402
+def _get_log_parsers():
+    """Lazy-import V2 log parsers to avoid import-time failures."""
+    if str(V2_ROOT) not in sys.path:
+        sys.path.insert(0, str(V2_ROOT))
+    if str(LIB_DIR) not in sys.path:
+        sys.path.insert(0, str(LIB_DIR))
+    from agent import log_parsers
+    return log_parsers
 
 _TIMING_NORMALIZE_RES = [
     re.compile(r"\s*\[\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\]\s*$", re.IGNORECASE),
@@ -51,6 +56,7 @@ def _normalize_test_name(name: str) -> str:
 
 
 def _get_parser(parser_name: str):
+    log_parsers = _get_log_parsers()
     parser = log_parsers.NAME_TO_PARSER.get(parser_name)
     if parser is None:
         parser = getattr(log_parsers, parser_name, None)
@@ -77,12 +83,14 @@ def run_in_container(
     patch_name: str,
     test_patch_name: str,
     test_cmds: list[str],
+    timeout: int = 1800,
 ) -> tuple[int, str]:
     cmd_lines = [
         "set -e",
         "git reset --hard HEAD",
         f"git apply -v --3way --recount --ignore-space-change --whitespace=nowarn /patches/{patch_name}",
         f"git apply -v --3way --recount --ignore-space-change --whitespace=nowarn /patches/{test_patch_name}",
+        "set +e",
     ]
     cmd_lines.extend(test_cmds)
     script = "\n".join(cmd_lines)
@@ -101,7 +109,9 @@ def run_in_container(
         script,
     ]
 
-    result = subprocess.run(docker_cmd, check=False, capture_output=True, text=True)
+    result = subprocess.run(
+        docker_cmd, check=False, capture_output=True, text=True, timeout=timeout,
+    )
     output = (result.stdout or "") + (result.stderr or "")
     return result.returncode, output
 
@@ -140,7 +150,7 @@ def evaluate_instance(
     if not image:
         raise ValueError(f"Task {instance_id} missing image_name.")
 
-    workdir = f"/{repo.split('/')[1]}"
+    workdir = f"/{repo.split('/')[-1]}"
 
     with tempfile.TemporaryDirectory(prefix="eval_patches_") as tmp:
         patch_dir = Path(tmp)
@@ -159,13 +169,20 @@ def evaluate_instance(
     parsed = {_normalize_test_name(k): v for k, v in parsed.items()}
     passed = sorted(k for k, v in parsed.items() if v == "PASSED")
 
+    pass_to_pass = spec.get("PASS_TO_PASS", [])
+    if isinstance(pass_to_pass, str):
+        pass_to_pass = json.loads(pass_to_pass)
+    fail_to_pass_raw = spec.get("FAIL_TO_PASS", [])
+    if isinstance(fail_to_pass_raw, str):
+        fail_to_pass_raw = json.loads(fail_to_pass_raw)
+
     expected_passed = sorted(
         _normalize_test_name(n)
-        for n in spec.get("PASS_TO_PASS", []) + spec.get("FAIL_TO_PASS", [])
+        for n in pass_to_pass + fail_to_pass_raw
     )
 
-    fail_to_pass_expected = {_normalize_test_name(n) for n in spec.get("FAIL_TO_PASS", [])}
-    pass_to_pass_expected = {_normalize_test_name(n) for n in spec.get("PASS_TO_PASS", [])}
+    fail_to_pass_expected = {_normalize_test_name(n) for n in fail_to_pass_raw}
+    pass_to_pass_expected = {_normalize_test_name(n) for n in pass_to_pass}
     passed_set = set(passed)
 
     from_fail_to_pass = sorted(passed_set & fail_to_pass_expected)

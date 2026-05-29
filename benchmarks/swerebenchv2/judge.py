@@ -74,6 +74,10 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
         default=False,
         description="Remove Docker image after evaluation",
     )
+    force_rebuild: bool = Field(
+        default=False,
+        description="Force rebuild Docker images (unused, for CLI compat)",
+    )
 
     def judge(
         self,
@@ -136,7 +140,7 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
             logger.error("Instance %s has no image_name", instance_id)
             return None
 
-        workdir = f"/{repo.split('/')[1]}"
+        workdir = f"/{repo.split('/')[-1]}"
 
         with tempfile.TemporaryDirectory(prefix="judge_patches_") as tmp:
             patch_dir = Path(tmp)
@@ -148,6 +152,7 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
                 "git reset --hard HEAD",
                 "git apply -v --3way --recount --ignore-space-change --whitespace=nowarn /patches/patch.diff",
                 "git apply -v --3way --recount --ignore-space-change --whitespace=nowarn /patches/test_patch.diff",
+                "set +e",
             ]
             cmd_lines.extend(test_cmds)
             script = "\n".join(cmd_lines)
@@ -182,15 +187,21 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
         parsed = {_normalize_test_name(k): v for k, v in parsed.items()}
         passed = sorted(k for k, v in parsed.items() if v == "PASSED")
 
+        pass_to_pass = instance_data.get("PASS_TO_PASS", [])
+        if isinstance(pass_to_pass, str):
+            pass_to_pass = json.loads(pass_to_pass)
+        fail_to_pass_list = instance_data.get("FAIL_TO_PASS", [])
+        if isinstance(fail_to_pass_list, str):
+            fail_to_pass_list = json.loads(fail_to_pass_list)
+
         expected_passed = sorted(
             _normalize_test_name(n)
-            for n in instance_data.get("PASS_TO_PASS", [])
-            + instance_data.get("FAIL_TO_PASS", [])
+            for n in pass_to_pass + fail_to_pass_list
         )
 
         resolved = passed == expected_passed
 
-        fail_to_pass = {_normalize_test_name(n) for n in instance_data.get("FAIL_TO_PASS", [])}
+        fail_to_pass = {_normalize_test_name(n) for n in fail_to_pass_list}
         f2p_passed = sorted(set(passed) & fail_to_pass)
 
         logger.info(

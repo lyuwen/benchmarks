@@ -41,7 +41,6 @@ from benchmarks.swerebenchv2.judge import SWERebenchV2Judge  # noqa: F401
 from openhands.sdk import LLM, Agent, Conversation, get_logger
 from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
-from openhands.sdk.llm.message import Message
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
