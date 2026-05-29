@@ -52,52 +52,6 @@ from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspa
 logger = get_logger(__name__)
 
 
-# FlexWorkspace replaces PATH with a hardcoded value that omits language-specific
-# toolchain directories. These commands restore the necessary entries.
-_LANG_PATH_FIXUPS: dict[str, list[str]] = {
-    "go": [
-        'export PATH="/usr/local/go/bin:$PATH"',
-        'export GOPATH="${GOPATH:-/root/go}"',
-    ],
-    "rust": [
-        'export PATH="/usr/local/cargo/bin:$PATH"',
-    ],
-    "java": [
-        'export PATH="${MVND_HOME:-/usr/local/mvnd}/bin:$PATH"',
-    ],
-    "kotlin": [
-        'export SDKMAN_DIR="${SDKMAN_DIR:-/usr/local/sdkman}"',
-        'export PATH="${SDKMAN_DIR}/candidates/kotlin/current/bin:${SDKMAN_DIR}/candidates/gradle/current/bin:$PATH"',
-    ],
-    "ocaml": [
-        'eval "$(opam env)"',
-    ],
-    "scala": [
-        'export PATH="${FOUNDRY_DIR:-/workspace/.foundry}/bin:$PATH"',
-    ],
-    "solidity": [
-        'export PATH="${FOUNDRY_DIR:-/workspace/.foundry}/bin:$PATH"',
-    ],
-    "elixir": [
-        'export MIX_HOME="${MIX_HOME:-/workspace/.mix}"',
-        'export HEX_HOME="${HEX_HOME:-/workspace/.hex}"',
-    ],
-    "clojure": [
-        'export LEIN_HOME="${LEIN_HOME:-/workspace/.lein}"',
-    ],
-}
-
-
-def _get_path_fixup_commands(instance_data: dict) -> list[str]:
-    """Return shell commands to restore language-specific PATH entries.
-
-    FlexWorkspace replaces PATH entirely, dropping toolchain-specific
-    directories. These commands add them back.
-    """
-    lang = str(instance_data.get("language", "")).lower()
-    return list(_LANG_PATH_FIXUPS.get(lang, []))
-
-
 def get_instruction(
     instance: dict,
     metadata: EvalMetadata,
@@ -354,16 +308,6 @@ class SWERebenchV2Evaluation(Evaluation):
 
         git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
         assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
-
-        # Restore language-specific PATH entries that FlexWorkspace may have
-        # overwritten.  For docker/remote workspaces these are harmless no-ops.
-        for cmd in _get_path_fixup_commands(instance.data):
-            res = workspace.execute_command(cmd)
-            if res.exit_code != 0:
-                logger.warning(
-                    "PATH fixup command failed (non-fatal): %s -> %s",
-                    cmd, res.stderr,
-                )
 
         base_commit = str(instance.data["base_commit"])
 
