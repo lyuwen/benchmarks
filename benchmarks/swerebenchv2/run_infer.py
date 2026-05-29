@@ -46,10 +46,56 @@ from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.legacy import get_legacy_tools
-from openhands.workspace import APIRemoteWorkspace, DockerWorkspace
+from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
 
 
 logger = get_logger(__name__)
+
+
+# FlexWorkspace replaces PATH with a hardcoded value that omits language-specific
+# toolchain directories. These commands restore the necessary entries.
+_LANG_PATH_FIXUPS: dict[str, list[str]] = {
+    "go": [
+        'export PATH="/usr/local/go/bin:$PATH"',
+        'export GOPATH="${GOPATH:-/root/go}"',
+    ],
+    "rust": [
+        'export PATH="/usr/local/cargo/bin:$PATH"',
+    ],
+    "java": [
+        'export PATH="${MVND_HOME:-/usr/local/mvnd}/bin:$PATH"',
+    ],
+    "kotlin": [
+        'export SDKMAN_DIR="${SDKMAN_DIR:-/usr/local/sdkman}"',
+        'export PATH="${SDKMAN_DIR}/candidates/kotlin/current/bin:${SDKMAN_DIR}/candidates/gradle/current/bin:$PATH"',
+    ],
+    "ocaml": [
+        'eval "$(opam env)"',
+    ],
+    "scala": [
+        'export PATH="${FOUNDRY_DIR:-/workspace/.foundry}/bin:$PATH"',
+    ],
+    "solidity": [
+        'export PATH="${FOUNDRY_DIR:-/workspace/.foundry}/bin:$PATH"',
+    ],
+    "elixir": [
+        'export MIX_HOME="${MIX_HOME:-/workspace/.mix}"',
+        'export HEX_HOME="${HEX_HOME:-/workspace/.hex}"',
+    ],
+    "clojure": [
+        'export LEIN_HOME="${LEIN_HOME:-/workspace/.lein}"',
+    ],
+}
+
+
+def _get_path_fixup_commands(instance_data: dict) -> list[str]:
+    """Return shell commands to restore language-specific PATH entries.
+
+    FlexWorkspace replaces PATH entirely, dropping toolchain-specific
+    directories. These commands add them back.
+    """
+    lang = str(instance_data.get("language", "")).lower()
+    return list(_LANG_PATH_FIXUPS.get(lang, []))
 
 
 def get_instruction(
@@ -138,12 +184,34 @@ class SWERebenchV2Evaluation(Evaluation):
         build_target = "source-minimal"
         custom_tag = extract_custom_tag(official_docker_image)
         suffix = f"-{build_target}" if build_target != "binary" else ""
-        base_agent_image = (
-            f"{EVAL_AGENT_SERVER_IMAGE}:{SDK_SHORT_SHA}-{custom_tag}{suffix}"
-        )
-        agent_server_image = base_agent_image
 
-        if self.metadata.workspace_type == "docker":
+        if self.metadata.workspace_type == "flex":
+            agent_plugin_image = os.getenv(
+                "AGENT_PLUGIN_IMAGE", "openhands/agent-plugin"
+            )
+            bind_volumes = []
+            if self.bind_dev_sdk:
+                sdk_base = (
+                    Path(__file__).parent.parent.parent / "vendor/software-agent-sdk"
+                )
+                for module in ["tools", "sdk", "agent-server", "workspace"]:
+                    bind_volumes.append(
+                        f"{sdk_base}/openhands-{module}/openhands/{module}:"
+                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                        ":ro"
+                    )
+            workspace = FlexWorkspace(
+                base_image=official_docker_image,
+                agent_plugin_image=agent_plugin_image,
+                working_dir="/workspace",
+                forward_env=forward_env or [],
+                bind_volumes=bind_volumes,
+            )
+        elif self.metadata.workspace_type == "docker":
+            base_agent_image = (
+                f"{EVAL_AGENT_SERVER_IMAGE}:{SDK_SHORT_SHA}-{custom_tag}{suffix}"
+            )
+            agent_server_image = base_agent_image
             SKIP_BUILD = os.getenv("SKIP_BUILD", "1").lower() in ("1", "true", "yes")
             logger.info(f"SKIP_BUILD={SKIP_BUILD}")
             if not SKIP_BUILD:
@@ -287,6 +355,16 @@ class SWERebenchV2Evaluation(Evaluation):
         git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
         assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
 
+        # Restore language-specific PATH entries that FlexWorkspace may have
+        # overwritten.  For docker/remote workspaces these are harmless no-ops.
+        for cmd in _get_path_fixup_commands(instance.data):
+            res = workspace.execute_command(cmd)
+            if res.exit_code != 0:
+                logger.warning(
+                    "PATH fixup command failed (non-fatal): %s -> %s",
+                    cmd, res.stderr,
+                )
+
         base_commit = str(instance.data["base_commit"])
 
         brief_history = workspace.execute_command(
@@ -415,7 +493,7 @@ def main() -> None:
     parser = get_parser()
     parser.set_defaults(
         dataset="thirdparty/SWE-rebench-V2/SWE-rebench-V2-py.jsonl",
-        workspace="docker",
+        workspace="flex",
     )
     parser.add_argument(
         "--prompt-path",

@@ -69,6 +69,26 @@ Phase 2. RUNNING: discover and run the tests on the repository
 {% if lang == "python" %}
    2.1 Check for pytest.ini, setup.cfg, pyproject.toml, or tox.ini for test configuration
    2.2 Run the relevant tests with `pytest` (or the project's configured test runner)
+{% elif lang == "go" %}
+   2.1 Run `go test ./...` to see the current test state
+   2.2 Check for Makefile or test scripts that may wrap `go test` with specific flags
+{% elif lang == "rust" %}
+   2.1 Run `cargo test` to see the current test state
+   2.2 Check Cargo.toml for workspace members or feature flags that affect testing
+{% elif lang == "java" %}
+   2.1 Check for pom.xml (Maven), build.gradle (Gradle), or build.xml (Ant)
+   2.2 Run `mvn test` or `gradle test` or `ant test` as appropriate
+   2.3 For Maven projects, `mvnd` (Maven Daemon) is also available for faster builds
+{% elif lang == "c" or lang == "cpp" or lang == "c++" %}
+   2.1 Check for CMakeLists.txt, Makefile, configure.ac, or meson.build
+   2.2 Build the project (e.g., `mkdir build && cd build && cmake .. && make`)
+   2.3 Run tests (e.g., `make test`, `ctest`, or the project's test script)
+{% elif lang == "javascript" or lang == "typescript" or lang == "node" %}
+   2.1 Check package.json for test scripts (`npm test`, `yarn test`, or `pnpm test`)
+   2.2 Identify the test runner (jest, mocha, vitest, karma, etc.) and run it
+{% elif lang == "ruby" %}
+   2.1 Check for Gemfile, Rakefile, or .rspec configuration
+   2.2 Run `bundle exec rake test` or `bundle exec rspec` as appropriate
 {% elif lang == "ocaml" %}
    2.1 Activate the opam environment: `eval "$(opam env)"`
    2.2 Check for dune-project, Makefile, or other build configuration
