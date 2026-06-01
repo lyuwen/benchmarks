@@ -1,3 +1,6 @@
 [submodule "vendor/software-agent-sdk"]
 	path = vendor/software-agent-sdk
 	url = git@github.com:lyuwen/software-agent-sdk.git
+[submodule "benchmarks/swebenchpro/SWE-bench_Pro-os"]
+	path = benchmarks/swebenchpro/SWE-bench_Pro-os
+	url = https://github.com/scaleapi/SWE-bench_Pro-os.git
