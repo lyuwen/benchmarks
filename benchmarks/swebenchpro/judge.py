@@ -34,11 +34,9 @@ class SWEBenchProJudge(ExecutionBasedJudge):
             result = evaluate_instance(
                 instance_data,
                 git_patch,
-                self.harness_dir,
                 timeout=self.timeout,
                 block_network=self.block_network,
                 docker_platform=self.docker_platform,
-                rm_image=self.rm_image,
             )
             logger.info(
                 "SWEBenchProJudge %s: resolved=%s exit_code=%s error=%s",
