@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import sys
@@ -13,6 +14,19 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+def _load_constants_module():
+    constants_path = Path(__file__).resolve().parent / "constants.py"
+    spec = importlib.util.spec_from_file_location("benchmarks.swebenchpro.constants", constants_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load constants module from {constants_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+constants = _load_constants_module()
 
 try:
     from openhands.sdk import get_logger
@@ -105,7 +119,7 @@ def main() -> int:
     parser.add_argument("--report-json", default="eval_report.json")
     parser.add_argument(
         "--harness-dir",
-        default=str(Path(__file__).resolve().parent / "SWE-bench_Pro-os"),
+        default=str(constants.HARNESS_SUBMODULE_PATH),
         help="Reserved for forward compatibility; current evaluator uses the built-in harness path",
     )
     parser.add_argument("--timeout", type=int, default=1800)
@@ -118,7 +132,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    from benchmarks.swebenchpro import constants
     from benchmarks.utils.dataset import get_dataset
 
     predictions_path = Path(args.predictions)
