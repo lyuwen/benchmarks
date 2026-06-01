@@ -18,6 +18,10 @@ _BINARY_PATCH_MARKERS = (
     "Binary files ",
 )
 _EXPORT_RE = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_TIMING_SUFFIX_RE = re.compile(
+    r"\s*(?:\[\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\]|\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)|in\s+\d+(?:\.\d+)?\s+(?:msec|sec))\s*$",
+    re.IGNORECASE,
+)
 
 
 def _parse_literal_list(value: Any) -> list[str]:
@@ -38,19 +42,37 @@ def _parse_literal_list(value: Any) -> list[str]:
     return [str(item) for item in parsed if str(item).strip()]
 
 
-def _validate_harness_dir() -> Path:
-    harness_dir = constants.HARNESS_SUBMODULE_PATH
-    if not harness_dir.is_dir() or not any(harness_dir.iterdir()):
-        raise FileNotFoundError(
-            "Expected SWE-bench Pro harness checkout at "
-            f"{constants.HARNESS_SUBMODULE_PATH}. "
-            "Run: git submodule update --init benchmarks/swebenchpro/SWE-bench_Pro-os"
-        )
-    return harness_dir
+def _normalize_test_name(name: str) -> str:
+    normalized = str(name).strip()
+    if not normalized:
+        return ""
 
+    while True:
+        updated = _TIMING_SUFFIX_RE.sub("", normalized)
+        if updated == normalized:
+            break
+        normalized = updated.strip()
 
-def _load_text_file(path: str | Path) -> str:
-    return Path(path).read_text(encoding="utf-8")
+    parts = [part.strip() for part in normalized.split("::") if part.strip()]
+    if not parts:
+        return ""
+
+    path_part = parts[0]
+    tail_parts = parts[1:]
+
+    if path_part.endswith(".py"):
+        path_part = path_part.replace("\\", "/")
+        path_part = re.sub(r"/+", "/", path_part).strip("/")
+    else:
+        dotted_parts = [part for part in path_part.split(".") if part]
+        if len(dotted_parts) >= 2:
+            path_part = "/".join(dotted_parts[:-1]) + ".py"
+            tail_parts = [dotted_parts[-1], *tail_parts]
+        else:
+            path_part = path_part.replace(".", "/")
+        path_part = re.sub(r"/+", "/", path_part).strip("/")
+
+    return "::".join([path_part, *tail_parts]) if tail_parts else path_part
 
 
 def _load_instance_assets(instance: Any) -> dict[str, Any]:
@@ -188,7 +210,6 @@ def _run_in_container(
     git_patch: str,
     timeout: int = 1800,
 ) -> dict[str, Any]:
-    harness_dir = _validate_harness_dir()
     with tempfile.TemporaryDirectory(prefix="swebenchpro_eval_") as tmp_dir:
         tmp_path = Path(tmp_dir)
         patch_path = tmp_path / "model.patch"
@@ -207,8 +228,6 @@ def _run_in_container(
             "host",
             "-v",
             f"{tmp_path}:/eval",
-            "-v",
-            f"{harness_dir}:/harness:ro",
             assets["docker_image"],
             "/bin/bash",
             "/eval/entry.sh",
@@ -247,13 +266,13 @@ def _score_result(
     exit_code: int,
     git_patch: str,
 ) -> dict[str, Any]:
-    passed_tests = _parse_literal_list(output_data.get("passed_tests", []))
-    failed_tests = _parse_literal_list(output_data.get("failed_tests", []))
-    skipped_tests = _parse_literal_list(output_data.get("skipped_tests", []))
+    passed_tests = [_normalize_test_name(name) for name in _parse_literal_list(output_data.get("passed_tests", []))]
+    failed_tests = [_normalize_test_name(name) for name in _parse_literal_list(output_data.get("failed_tests", []))]
+    skipped_tests = [_normalize_test_name(name) for name in _parse_literal_list(output_data.get("skipped_tests", []))]
 
-    fail_to_pass_expected = set(assets["fail_to_pass"])
-    pass_to_pass_expected = set(assets["pass_to_pass"])
-    passed_set = set(passed_tests)
+    fail_to_pass_expected = {_normalize_test_name(name) for name in assets["fail_to_pass"]}
+    pass_to_pass_expected = {_normalize_test_name(name) for name in assets["pass_to_pass"]}
+    passed_set = {name for name in passed_tests if name}
 
     from_fail_to_pass = sorted(passed_set & fail_to_pass_expected)
     failed_from_pass_to_pass = sorted(pass_to_pass_expected - passed_set)
