@@ -6,7 +6,6 @@ import json
 import logging
 import sys
 import traceback
-import types
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -15,64 +14,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-
-def _install_openhands_shims() -> None:
-    openhands_module = types.ModuleType("openhands")
-    sdk_module = types.ModuleType("openhands.sdk")
-    tools_module = types.ModuleType("openhands.tools")
-    file_editor_module = types.ModuleType("openhands.tools.file_editor")
-    task_tracker_module = types.ModuleType("openhands.tools.task_tracker")
-    terminal_module = types.ModuleType("openhands.tools.terminal")
-
-    def _shim_get_logger(name: str):
-        return logging.getLogger(name)
-
-    sdk_module.get_logger = _shim_get_logger
-    file_editor_module.FileEditorTool = type("FileEditorTool", (), {})
-    task_tracker_module.TaskTrackerTool = type("TaskTrackerTool", (), {})
-    terminal_module.TerminalTool = type("TerminalTool", (), {})
-
-    openhands_module.sdk = sdk_module
-    openhands_module.tools = tools_module
-    tools_module.file_editor = file_editor_module
-    tools_module.task_tracker = task_tracker_module
-    tools_module.terminal = terminal_module
-
-    sys.modules.setdefault("openhands", openhands_module)
-    sys.modules.setdefault("openhands.sdk", sdk_module)
-    sys.modules.setdefault("openhands.tools", tools_module)
-    sys.modules.setdefault("openhands.tools.file_editor", file_editor_module)
-    sys.modules.setdefault("openhands.tools.task_tracker", task_tracker_module)
-    sys.modules.setdefault("openhands.tools.terminal", terminal_module)
-
-
 try:
     from openhands.sdk import get_logger
 except ModuleNotFoundError:
-    _install_openhands_shims()
-    from openhands.sdk import get_logger
-
-
-def _runtime_harness_dir_default() -> str:
-    return str(Path(__file__).resolve().parent / "SWE-bench_Pro-os")
-
-
-def _import_constants():
-    from benchmarks.swebenchpro import constants
-
-    return constants
-
-
-def _import_evaluate_instance():
-    from benchmarks.swebenchpro._evaluator import evaluate_instance
-
-    return evaluate_instance
-
-
-def _import_get_dataset():
-    from benchmarks.utils.dataset import get_dataset
-
-    return get_dataset
+    get_logger = logging.getLogger
 
 logger = get_logger(__name__)
 
@@ -124,8 +69,9 @@ def _evaluate_row(
     block_network: bool,
     docker_platform: str | None,
 ) -> dict[str, Any]:
+    from benchmarks.swebenchpro._evaluator import evaluate_instance
+
     instance_id = str(row.get("instance_id") or row.get("id") or "").strip()
-    evaluate_instance = _import_evaluate_instance()
     try:
         result = evaluate_instance(
             row,
@@ -159,7 +105,7 @@ def main() -> int:
     parser.add_argument("--report-json", default="eval_report.json")
     parser.add_argument(
         "--harness-dir",
-        default=_runtime_harness_dir_default(),
+        default=str(Path(__file__).resolve().parent / "SWE-bench_Pro-os"),
         help="Reserved for forward compatibility; current evaluator uses the built-in harness path",
     )
     parser.add_argument("--timeout", type=int, default=1800)
@@ -172,9 +118,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    from benchmarks.swebenchpro import constants
+    from benchmarks.utils.dataset import get_dataset
+
     predictions_path = Path(args.predictions)
     report_path = Path(args.report_json)
-    constants = _import_constants()
 
     if args.harness_dir != str(constants.HARNESS_SUBMODULE_PATH):
         logger.warning(
@@ -190,7 +138,6 @@ def main() -> int:
     predictions = load_predictions(predictions_path)
     logger.info("Loaded %s predictions from %s", len(predictions), predictions_path)
 
-    get_dataset = _import_get_dataset()
     dataset = get_dataset(dataset_name=args.dataset, split=args.split)
     dataset_rows = dataset.to_dict(orient="records")
     matched_rows = [
