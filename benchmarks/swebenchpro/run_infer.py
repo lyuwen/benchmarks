@@ -1,171 +1,48 @@
-import argparse
 import json
-import logging
 import os
-import sys
 from pathlib import Path
-from typing import Any, List
+from typing import List
 
-RUNTIME_IMPORT_ERROR: ModuleNotFoundError | None = None
+from jinja2 import Environment, FileSystemLoader
+from omegaconf import OmegaConf
+from pydantic import Field
 
-try:
-    from omegaconf import OmegaConf
-    from pydantic import Field
-
-    from benchmarks.swebenchpro.build_images import (
-        extract_custom_tag,
-        get_official_docker_image,
-    )
-    from benchmarks.swebenchpro.judge import SWEBenchProJudge  # noqa: F401
-    from benchmarks.utils.args_parser import get_parser
-    from benchmarks.utils.build_utils import build_image
-    from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
-    from benchmarks.utils.conversation import build_event_persistence_callback
-    from benchmarks.utils.critics import create_critic
-    from benchmarks.utils.dataset import get_dataset
-    from benchmarks.utils.evaluation import Evaluation
-    from benchmarks.utils.evaluation_utils import (
-        construct_eval_output_dir,
-        get_default_on_result_writer,
-    )
-    from benchmarks.utils.execution_judge import (
-        ExecutionBasedJudge,
-        add_judge_args,
-        create_judge,
-    )
-    from benchmarks.utils.fake_user_response import run_conversation_with_fake_user_response
-    from benchmarks.utils.image_utils import image_exists
-    from benchmarks.utils.models import EvalInstance, EvalMetadata, EvalOutput
-    from benchmarks.utils.version import SDK_SHORT_SHA
-    from openhands.sdk import LLM, Agent, Conversation, get_logger
-    from openhands.sdk.event.base import LLMConvertibleEvent
-    from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
-    from openhands.sdk.tool.tool import ToolDefinition
-    from openhands.sdk.workspace import RemoteWorkspace
-    from openhands.tools.preset.default import get_default_tools
-    from openhands.tools.preset.legacy import get_legacy_tools
-    from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
-
-    logger = get_logger(__name__)
-except ModuleNotFoundError as exc:
-    RUNTIME_IMPORT_ERROR = exc
-    OmegaConf = None
-
-    def Field(*args, **kwargs):
-        return kwargs.get("default")
-
-    class Evaluation:  # type: ignore[override]
-        pass
-
-    class ExecutionBasedJudge:
-        pass
-
-    class EvalInstance:
-        id: str
-        data: dict[str, Any]
-
-    class EvalMetadata:
-        details: dict[str, Any] | None
-        prompt_path: str | None
-        llm: Any
-        eval_output_dir: str
-        max_iterations: int
-        conversation_timeout: int | None
-        dataset: str
-        dataset_split: str
-        eval_limit: int
-        selected_instances_file: str | None
-        env_setup_commands: list[str] | None
-        workspace_type: str
-
-    class EvalOutput:
-        pass
-
-    class RemoteWorkspace:
-        pass
-
-    class LLMConvertibleEvent:
-        pass
-
-    class SystemPromptEvent:
-        pass
-
-    class ToolDefinition:
-        pass
-
-    class APIRemoteWorkspace:
-        pass
-
-    class DockerWorkspace:
-        pass
-
-    class FlexWorkspace:
-        pass
-
-    LLM = Agent = Conversation = object
-    SDK_SHORT_SHA = ""
-    EVAL_AGENT_SERVER_IMAGE = ""
-    logger = logging.getLogger(__name__)
+from benchmarks.swebenchpro.build_images import (
+    extract_custom_tag,
+    get_official_docker_image,
+)
+from benchmarks.swebenchpro.judge import SWEBenchProJudge  # noqa: F401
+from benchmarks.utils.args_parser import get_parser
+from benchmarks.utils.build_utils import build_image
+from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
+from benchmarks.utils.conversation import build_event_persistence_callback
+from benchmarks.utils.critics import create_critic
+from benchmarks.utils.dataset import get_dataset
+from benchmarks.utils.evaluation import Evaluation
+from benchmarks.utils.evaluation_utils import (
+    construct_eval_output_dir,
+    get_default_on_result_writer,
+)
+from benchmarks.utils.execution_judge import (
+    ExecutionBasedJudge,
+    add_judge_args,
+    create_judge,
+)
+from benchmarks.utils.fake_user_response import run_conversation_with_fake_user_response
+from benchmarks.utils.image_utils import image_exists
+from benchmarks.utils.models import EvalInstance, EvalMetadata, EvalOutput
+from benchmarks.utils.version import SDK_SHORT_SHA
+from openhands.sdk import LLM, Agent, Conversation, get_logger
+from openhands.sdk.event.base import LLMConvertibleEvent
+from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
+from openhands.sdk.tool.tool import ToolDefinition
+from openhands.sdk.workspace import RemoteWorkspace
+from openhands.tools.preset.default import get_default_tools
+from openhands.tools.preset.legacy import get_legacy_tools
+from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
 
 
-def _build_bootstrap_help_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run Evaluation inference")
-    parser.add_argument("llm_config_path", type=str, nargs="?", help="Path to JSON LLM configuration")
-    parser.add_argument("--dataset", type=str, default="ScaleAI/SWE-bench_Pro", help="Dataset name")
-    parser.add_argument("--split", type=str, default="test", help="Dataset split")
-    parser.add_argument(
-        "--workspace",
-        type=str,
-        default="flex",
-        choices=["docker", "flex", "remote"],
-        help="Type of workspace to use (default: docker)",
-    )
-    parser.add_argument("--max-iterations", type=int, default=100, help="Maximum iterations")
-    parser.add_argument("--num-workers", type=int, default=1, help="Number of evaluation workers")
-    parser.add_argument("--note", type=str, default="initial", help="Evaluation note")
-    parser.add_argument("--output-dir", type=str, default="./eval_outputs", help="Evaluation output directory")
-    parser.add_argument("--n-limit", type=int, default=0, help="Limit number of instances to evaluate")
-    parser.add_argument(
-        "--max-attempts",
-        type=int,
-        default=3,
-        help="Maximum number of attempts for iterative mode (default: 3, min: 1)",
-    )
-    parser.add_argument("--critic", type=str, default="pass", help="Name of the critic to use for evaluation")
-    parser.add_argument("--critic-config", type=str, default=None, help="Path to JSON critic config")
-    parser.add_argument("--select", type=str, default=None, help="Path to selected instance IDs file")
-    parser.add_argument("--max-retries", type=int, default=3, help="Maximum retries for instance failures")
-    parser.add_argument(
-        "--conversation-timeout",
-        type=int,
-        default=None,
-        help="Timeout in seconds for each conversation.run() call (default: None, no timeout)",
-    )
-
-    prompt_dir = (Path(__file__).parent / "prompts").resolve()
-    choices = [str(p.relative_to(Path.cwd())) for p in prompt_dir.glob("*.j2")]
-    default_prompt_path = prompt_dir / "default.j2"
-    assert default_prompt_path.exists(), f"Default prompt {default_prompt_path} not found"
-    parser.add_argument(
-        "--prompt-path",
-        type=str,
-        default=str(default_prompt_path),
-        choices=choices,
-        help="Path to prompt template file",
-    )
-    parser.add_argument("--use-legacy-tools", action="store_true", help="Use legacy tools")
-    parser.add_argument("--bind-dev-sdk", action="store_true", help="Bind SDK paths for dev features")
-    parser.add_argument(
-        "--judge",
-        nargs="?",
-        const="swebenchpro",
-        default=None,
-        help="Enable execution-based judge after the agent finishes.",
-    )
-    parser.add_argument("--judge-timeout", type=int, default=1800, help="Per-instance judge timeout in seconds (default: 1800).")
-    parser.add_argument("--judge-rm-image", action="store_true", help="Remove Docker image after each judge evaluation (default: False).")
-    parser.add_argument("--judge-force-rebuild", action="store_true", help="Force rebuild Docker images for judge evaluation (default: False).")
-    return parser
+logger = get_logger(__name__)
 
 
 def get_instruction(
@@ -174,12 +51,10 @@ def get_instruction(
     workspace_path: str,
 ) -> str:
     """Generate instruction for the agent."""
-    from jinja2 import Environment, FileSystemLoader
-
     workspace_dir_name = instance["repo"].split("/")[-1]
     assert metadata.details is not None
-    assert metadata.prompt_path is not None
 
+    assert metadata.prompt_path is not None
     prompts_dir = os.path.dirname(metadata.prompt_path)
     template_name = os.path.basename(metadata.prompt_path)
     env = Environment(loader=FileSystemLoader(prompts_dir))
@@ -190,9 +65,11 @@ def get_instruction(
         "workspace_dir_name": workspace_dir_name,
         "actual_workspace_path": workspace_path,
         "metadata": metadata,
-        "test_instructions": "",
     }
-    return template.render(context)
+    context["test_instructions"] = ""
+
+    instruction = template.render(context)
+    return instruction
 
 
 class SWEBenchProEvaluation(Evaluation):
@@ -268,10 +145,12 @@ class SWEBenchProEvaluation(Evaluation):
             logger.info("SKIP_BUILD=%s", skip_build)
             if not skip_build:
                 logger.info(
-                    "Building workspace from %s for instance %s. This may take a while...\n"
-                    "You can run benchmarks/swebenchpro/build_images.py and set SKIP_BUILD=1 to skip building and use pre-built agent-server image.",
-                    official_docker_image,
-                    instance.id,
+                    f"Building workspace from {official_docker_image} "
+                    f"for instance {instance.id}. "
+                    "This may take a while...\n"
+                    "You can run benchmarks/swebenchpro/build_images.py and set "
+                    "SKIP_BUILD=1 to skip building and use pre-built "
+                    "agent-server image."
                 )
                 output = build_image(
                     base_image=official_docker_image,
@@ -280,7 +159,7 @@ class SWEBenchProEvaluation(Evaluation):
                     target=build_target,
                     push=False,
                 )
-                logger.info("Image build output: %s", output)
+                logger.info(f"Image build output: {output}")
                 assert output.error is None, f"Image build failed: {output.error}"
                 if base_agent_image not in output.tags:
                     raise RuntimeError(
@@ -321,10 +200,8 @@ class SWEBenchProEvaluation(Evaluation):
                     "make sure to build, push it, and make it public accessible before using remote workspace."
                 )
             logger.info(
-                "Using remote workspace with image %s (sdk sha: %s, resource_factor: %s)",
-                agent_server_image,
-                sdk_short_sha,
-                resource_factor,
+                f"Using remote workspace with image {agent_server_image} "
+                f"(sdk sha: {sdk_short_sha}, resource_factor: {resource_factor})"
             )
             startup_timeout = float(
                 os.getenv("REMOTE_RUNTIME_STARTUP_TIMEOUT", "600")
@@ -352,7 +229,7 @@ class SWEBenchProEvaluation(Evaluation):
                 raise RuntimeError(
                     f"Failed to run env setup command '{cmd}': {res.stderr}"
                 )
-            logger.debug("Ran env setup command '%s': %s", cmd, res.stdout)
+            logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
         return workspace
 
     def evaluate_instance(
@@ -401,9 +278,8 @@ class SWEBenchProEvaluation(Evaluation):
             f"cd {repo_path} ; git --no-pager log --oneline -10"
         )
         logger.info(
-            "Repo status:\n* Current commit: %s\n* Top 10 history:\n%s",
-            base_commit,
-            brief_history.stdout.strip(),
+            f"Repo status:\n* Current commit: {base_commit}\n"
+            f"* Top 10 history:\n{brief_history.stdout.strip()}"
         )
 
         instruction = get_instruction(
@@ -419,7 +295,7 @@ class SWEBenchProEvaluation(Evaluation):
         git_status_diff = workspace.execute_command(
             f"cd {repo_path} ; git status ; git --no-pager diff"
         )
-        logger.info("Repo status:\n%s", git_status_diff.stdout.strip())
+        logger.info(f"Repo status:\n{git_status_diff.stdout.strip()}")
 
         workspace.execute_command(f"cd {repo_path} ; git add -A")
         workspace.execute_command(
@@ -445,7 +321,9 @@ class SWEBenchProEvaluation(Evaluation):
                     git_patch=git_patch,
                     instance_data=instance.data,
                 )
-                logger.info("Judge result for %s: %s", instance.id, evaluation_result)
+                logger.info(
+                    "Judge result for %s: %s", instance.id, evaluation_result
+                )
             except Exception as exc:
                 logger.error("Judge failed for %s: %s", instance.id, exc)
                 evaluation_result = None
@@ -492,7 +370,7 @@ class SWEBenchProEvaluation(Evaluation):
         )
         with open(history_file, "w") as file:
             json.dump(dump_data, file, indent=2)
-        logger.info("Dumped conversation history to %s", history_file)
+        logger.info(f"Dumped conversation history to {history_file}")
 
         return EvalOutput(
             instance_id=instance.id,
@@ -506,13 +384,6 @@ class SWEBenchProEvaluation(Evaluation):
 
 
 def main() -> None:
-    if RUNTIME_IMPORT_ERROR is not None and any(arg in sys.argv[1:] for arg in ["-h", "--help"]):
-        _build_bootstrap_help_parser().parse_args(["--help"])
-        return
-
-    if RUNTIME_IMPORT_ERROR is not None:
-        raise RUNTIME_IMPORT_ERROR
-
     prompt_dir = (Path(__file__).parent / "prompts").resolve()
     choices = [str(p.relative_to(Path.cwd())) for p in prompt_dir.glob("*.j2")]
     default_prompt_path = prompt_dir / "default.j2"
@@ -566,11 +437,11 @@ def main() -> None:
     )
 
     critic = create_critic(args)
-    logger.info("Using critic: %s", type(critic).__name__)
+    logger.info(f"Using critic: {type(critic).__name__}")
 
     judge = create_judge(args)
     if judge is not None:
-        logger.info("Using judge: %s", type(judge).__name__)
+        logger.info(f"Using judge: {type(judge).__name__}")
 
     env_vars = [
         f'export {key}="{value}"'
