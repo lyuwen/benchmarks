@@ -194,8 +194,12 @@ set -euo pipefail
 git reset --hard {shlex.quote(base_commit)}
 git checkout {shlex.quote(base_commit)}
 git apply -v /workspace/patch.diff
-{before_repo_block}bash /workspace/run_script.sh{selected_tests_suffix} > /workspace/stdout.log 2> /workspace/stderr.log
+{before_repo_block}set +e
+bash /workspace/run_script.sh{selected_tests_suffix} > /workspace/stdout.log 2> /workspace/stderr.log
+run_script_exit_code=$?
+set -e
 python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json
+exit "$run_script_exit_code"
 """
 
 
