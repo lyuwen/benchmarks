@@ -17,7 +17,7 @@ _BINARY_PATCH_MARKERS = (
     "GIT binary patch",
     "Binary files ",
 )
-_EXPORT_RE = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_ENV_LINE_RE = re.compile(r"^\s*ENV\s+(.+?)\s*$")
 _TIMING_SUFFIX_RE = re.compile(
     r"\s*(?:\[\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\]|\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)|in\s+\d+(?:\.\d+)?\s+(?:msec|sec))\s*$",
     re.IGNORECASE,
@@ -42,68 +42,39 @@ def _parse_literal_list(value: Any) -> list[str]:
     return [str(item) for item in parsed if str(item).strip()]
 
 
-def _normalize_test_name(name: str) -> str:
-    normalized = str(name).strip()
-    if not normalized:
-        return ""
-
-    while True:
-        updated = _TIMING_SUFFIX_RE.sub("", normalized)
-        if updated == normalized:
-            break
-        normalized = updated.strip()
-
-    parts = [part.strip() for part in normalized.split("::") if part.strip()]
-    if not parts:
-        return ""
-
-    path_part = parts[0]
-    tail_parts = parts[1:]
-
-    if path_part.endswith(".py"):
-        path_part = path_part.replace("\\", "/")
-        path_part = re.sub(r"/+", "/", path_part).strip("/")
-    else:
-        dotted_parts = [part for part in path_part.split(".") if part]
-        if len(dotted_parts) >= 2:
-            path_part = "/".join(dotted_parts[:-1]) + ".py"
-            tail_parts = [dotted_parts[-1], *tail_parts]
-        else:
-            path_part = path_part.replace(".", "/")
-        path_part = re.sub(r"/+", "/", path_part).strip("/")
-
-    return "::".join([path_part, *tail_parts]) if tail_parts else path_part
+def _validate_harness_dir(harness_dir: str | Path) -> Path:
+    harness_path = Path(harness_dir)
+    if not harness_path.is_dir() or not any(harness_path.iterdir()):
+        raise FileNotFoundError(
+            "Expected SWE-bench Pro harness checkout at "
+            f"{constants.HARNESS_SUBMODULE_PATH}. "
+            "Run: git submodule update --init benchmarks/swebenchpro/SWE-bench_Pro-os"
+        )
+    return harness_path
 
 
-def _load_instance_assets(instance: Any) -> dict[str, Any]:
-    row = getattr(instance, "data", instance)
-    if not isinstance(row, dict):
-        raise TypeError("instance must be a dict or expose a dict-like .data attribute")
+def _load_instance_assets(harness_dir: str | Path, instance_id: str) -> dict[str, str]:
+    harness_path = _validate_harness_dir(harness_dir)
+    instance_dir = harness_path / "run_scripts" / instance_id
+    base_docker_dir = harness_path / "dockerfiles" / "base_dockerfile" / instance_id
+    instance_docker_dir = harness_path / "dockerfiles" / "instance_dockerfile" / instance_id
 
-    dockerhub_tag = str(row["dockerhub_tag"]).strip()
-    base_commit = str(row["base_commit"]).strip()
-    before_repo_set_cmd = str(row.get("before_repo_set_cmd", "") or "")
-    selected_test_files_to_run = _parse_literal_list(
-        row.get("selected_test_files_to_run", [])
-    )
-    fail_to_pass = _parse_literal_list(row.get("fail_to_pass", []))
-    pass_to_pass = _parse_literal_list(row.get("pass_to_pass", []))
+    asset_paths = {
+        "run_script": instance_dir / "run_script.sh",
+        "parser": instance_dir / "parser.py",
+        "base_dockerfile": base_docker_dir / "Dockerfile",
+        "instance_dockerfile": instance_docker_dir / "Dockerfile",
+    }
 
-    repo = str(row.get("repo", "")).strip()
-    repo_dirname = repo.rsplit("/", 1)[-1] if repo else "repo"
-    instance_id = str(row.get("instance_id") or row.get("id") or repo_dirname).strip()
+    missing = [str(path) for path in asset_paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing SWE-bench Pro harness assets for {instance_id}: {', '.join(missing)}"
+        )
 
     return {
-        "instance_id": instance_id,
-        "repo": repo,
-        "repo_dirname": repo_dirname,
-        "dockerhub_tag": dockerhub_tag,
-        "docker_image": get_official_docker_image(dockerhub_tag),
-        "base_commit": base_commit,
-        "before_repo_set_cmd": before_repo_set_cmd,
-        "selected_test_files_to_run": selected_test_files_to_run,
-        "fail_to_pass": fail_to_pass,
-        "pass_to_pass": pass_to_pass,
+        name: path.read_text(encoding="utf-8")
+        for name, path in asset_paths.items()
     }
 
 
@@ -137,142 +108,174 @@ def _strip_binary_hunks(git_patch: str) -> str:
     return "".join(kept_sections).strip()
 
 
-def _extract_env_exports(before_repo_set_cmd: str) -> list[str]:
+def _extract_env_exports(dockerfile_text: str) -> list[str]:
     exports: list[str] = []
-    for line in before_repo_set_cmd.splitlines():
-        match = _EXPORT_RE.match(line)
-        if match:
-            exports.append(f"{match.group(1)}={match.group(2).strip()}")
+    for raw_line in dockerfile_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _ENV_LINE_RE.match(line)
+        if not match:
+            continue
+
+        payload = match.group(1).strip()
+        tokens = shlex.split(payload)
+        if not tokens:
+            continue
+
+        if all("=" in token for token in tokens):
+            for token in tokens:
+                key, value = token.split("=", 1)
+                exports.append(f"export {key}={shlex.quote(value)}")
+            continue
+
+        if len(tokens) >= 2:
+            key = tokens[0]
+            value = " ".join(tokens[1:])
+            exports.append(f"export {key}={shlex.quote(value)}")
     return exports
 
 
-def _create_entryscript(assets: dict[str, Any]) -> str:
-    repo_dir = "/workspace/repo"
-    selected_tests = assets["selected_test_files_to_run"]
-    test_args = " ".join(shlex.quote(test) for test in selected_tests)
-    before_repo_set_cmd = assets["before_repo_set_cmd"].strip()
-    before_repo_block = f"\n{before_repo_set_cmd}\n" if before_repo_set_cmd else "\n"
+def _normalize_test_name(name: str) -> str:
+    normalized = str(name).strip()
+    if not normalized:
+        return ""
 
-    test_command = "python3 -m pytest --color=no --junitxml=/eval/junit.xml"
-    if test_args:
-        test_command = f"{test_command} {test_args}"
+    while True:
+        updated = _TIMING_SUFFIX_RE.sub("", normalized)
+        if updated == normalized:
+            break
+        normalized = updated.strip()
 
-    script = f"""#!/bin/bash
-set -euo pipefail
-rm -rf {repo_dir}
-mkdir -p {repo_dir}
-cp -r /testbed/. {repo_dir}
-cd {repo_dir}
-git reset --hard
-git checkout {shlex.quote(assets['base_commit'])}
-git apply --whitespace=nowarn /eval/model.patch{before_repo_block}set +e
-{test_command} >/eval/test.stdout 2>/eval/test.stderr
-test_exit=$?
-set -e
-python3 - <<'PY'
-import json
-import os
-import xml.etree.ElementTree as ET
+    parts = [part.strip() for part in normalized.split("::") if part.strip()]
+    if not parts:
+        return ""
 
-passed = []
-failed = []
-skipped = []
-xml_path = '/eval/junit.xml'
-if os.path.exists(xml_path):
-    root = ET.parse(xml_path).getroot()
-    for testcase in root.iter('testcase'):
-        classname = testcase.attrib.get('classname', '').strip()
-        name = testcase.attrib.get('name', '').strip()
-        test_name = '::'.join(part for part in (classname, name) if part)
-        if testcase.find('failure') is not None or testcase.find('error') is not None:
-            failed.append(test_name)
-        elif testcase.find('skipped') is not None:
-            skipped.append(test_name)
+    path_part = parts[0].replace("\\", "/")
+    tail_parts = parts[1:]
+
+    if path_part.endswith(".py"):
+        path_part = re.sub(r"/+", "/", path_part).strip("/")
+    elif "." in path_part:
+        dotted_parts = [part for part in path_part.split(".") if part]
+        if len(dotted_parts) >= 2:
+            path_part = "/".join(dotted_parts[:-1]) + ".py"
+            tail_parts = [dotted_parts[-1], *tail_parts]
         else:
-            passed.append(test_name)
-payload = {{
-    'passed_tests': passed,
-    'failed_tests': failed,
-    'skipped_tests': skipped,
-    'exit_code': test_exit,
-    'selected_test_files_to_run': {assets['selected_test_files_to_run']!r},
-}}
-with open('/eval/output.json', 'w', encoding='utf-8') as fh:
-    json.dump(payload, fh)
-PY
-exit "$test_exit"
+            path_part = path_part.replace(".", "/")
+        path_part = re.sub(r"/+", "/", path_part).strip("/")
+
+    return "::".join([path_part, *tail_parts]) if tail_parts else path_part
+
+
+def _create_entryscript(
+    spec: dict[str, Any],
+    base_dockerfile: str,
+    instance_dockerfile: str,
+) -> str:
+    env_exports = _extract_env_exports(base_dockerfile) + _extract_env_exports(instance_dockerfile)
+    export_block = "\n".join(env_exports)
+    export_block = f"{export_block}\n" if export_block else ""
+
+    selected_tests = " ".join(
+        shlex.quote(test)
+        for test in _parse_literal_list(spec.get("selected_test_files_to_run", []))
+    )
+    selected_tests_suffix = f" {selected_tests}" if selected_tests else ""
+
+    before_repo_set_cmd = str(spec.get("before_repo_set_cmd", "") or "").strip()
+    before_repo_block = f"{before_repo_set_cmd}\n" if before_repo_set_cmd else ""
+
+    base_commit = str(spec["base_commit"]).strip()
+
+    return f"""#!/bin/bash
+set -euo pipefail
+{export_block}cd /app
+git reset --hard {shlex.quote(base_commit)}
+git checkout {shlex.quote(base_commit)}
+git apply -v /workspace/patch.diff
+{before_repo_block}bash /workspace/run_script.sh{selected_tests_suffix} > /workspace/stdout.log 2> /workspace/stderr.log
+python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json
 """
-    return script
 
 
 def _run_in_container(
-    assets: dict[str, Any],
-    git_patch: str,
+    image: str,
+    workspace_dir: str | Path,
     timeout: int = 1800,
+    block_network: bool = False,
+    docker_platform: str | None = None,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="swebenchpro_eval_") as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        patch_path = tmp_path / "model.patch"
-        script_path = tmp_path / "entry.sh"
-        output_path = tmp_path / "output.json"
-
-        patch_path.write_text(git_patch, encoding="utf-8")
-        script_path.write_text(_create_entryscript(assets), encoding="utf-8")
-        script_path.chmod(0o755)
-
-        docker_cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            "host",
+    docker_cmd = ["docker", "run", "--rm"]
+    if docker_platform:
+        docker_cmd.extend(["--platform", docker_platform])
+    if block_network:
+        docker_cmd.extend(["--network", "none"])
+    docker_cmd.extend(
+        [
             "-v",
-            f"{tmp_path}:/eval",
-            assets["docker_image"],
+            f"{Path(workspace_dir)}:/workspace",
+            image,
             "/bin/bash",
-            "/eval/entry.sh",
+            "/workspace/entryscript.sh",
         ]
-        for export in _extract_env_exports(assets["before_repo_set_cmd"]):
-            docker_cmd[1:1] = ["-e", export]
+    )
 
-        try:
-            completed = subprocess.run(
-                docker_cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else None
-            return {
-                "exit_code": completed.returncode,
-                "stdout": completed.stdout or "",
-                "stderr": completed.stderr or "",
-                "output_text": output_text,
-            }
-        except subprocess.TimeoutExpired as exc:
-            output_text = output_path.read_text(encoding="utf-8") if output_path.exists() else None
-            return {
-                "exit_code": 124,
-                "stdout": exc.stdout or "",
-                "stderr": exc.stderr or "",
-                "output_text": output_text,
-            }
+    try:
+        completed = subprocess.run(
+            docker_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return {
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout or "",
+            "stderr": completed.stderr or "",
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "exit_code": 124,
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+        }
 
 
 def _score_result(
-    assets: dict[str, Any],
+    spec: dict[str, Any],
     output_data: dict[str, Any],
     exit_code: int,
     git_patch: str,
 ) -> dict[str, Any]:
-    passed_tests = [_normalize_test_name(name) for name in _parse_literal_list(output_data.get("passed_tests", []))]
-    failed_tests = [_normalize_test_name(name) for name in _parse_literal_list(output_data.get("failed_tests", []))]
-    skipped_tests = [_normalize_test_name(name) for name in _parse_literal_list(output_data.get("skipped_tests", []))]
+    passed_tests = _parse_literal_list(output_data.get("passed_tests", []))
+    if not passed_tests:
+        for key in ("test_status_map", "tests_status", "tests"):
+            statuses = output_data.get(key)
+            if isinstance(statuses, dict):
+                passed_tests = [
+                    str(name)
+                    for name, status in statuses.items()
+                    if str(status).strip().upper() in {"PASSED", "PASS"}
+                ]
+                if passed_tests:
+                    break
 
-    fail_to_pass_expected = {_normalize_test_name(name) for name in assets["fail_to_pass"]}
-    pass_to_pass_expected = {_normalize_test_name(name) for name in assets["pass_to_pass"]}
-    passed_set = {name for name in passed_tests if name}
+    fail_to_pass_expected = {
+        _normalize_test_name(name)
+        for name in _parse_literal_list(spec.get("fail_to_pass", []))
+        if _normalize_test_name(name)
+    }
+    pass_to_pass_expected = {
+        _normalize_test_name(name)
+        for name in _parse_literal_list(spec.get("pass_to_pass", []))
+        if _normalize_test_name(name)
+    }
+    passed_set = {
+        _normalize_test_name(name)
+        for name in passed_tests
+        if _normalize_test_name(name)
+    }
 
     from_fail_to_pass = sorted(passed_set & fail_to_pass_expected)
     failed_from_pass_to_pass = sorted(pass_to_pass_expected - passed_set)
@@ -283,16 +286,14 @@ def _score_result(
     )
 
     return {
-        "instance_id": assets["instance_id"],
+        "instance_id": str(spec.get("instance_id") or spec.get("id") or "").strip(),
         "resolved": resolved,
         "exit_code": exit_code,
         "from_fail_to_pass": from_fail_to_pass,
         "fail_to_pass_total": len(fail_to_pass_expected),
         "failed_from_pass_to_pass": failed_from_pass_to_pass,
         "pass_to_pass_total": len(pass_to_pass_expected),
-        "passed_tests": passed_tests,
-        "failed_tests": failed_tests,
-        "skipped_tests": skipped_tests,
+        "passed_tests": sorted(passed_set),
         "test_result": {
             "git_patch": git_patch,
             "output": output_data,
@@ -305,32 +306,62 @@ def evaluate_instance(
     instance: Any,
     git_patch: str,
     timeout: int = 1800,
+    block_network: bool = False,
+    docker_platform: str | None = None,
 ) -> dict[str, Any]:
-    assets = _load_instance_assets(instance)
+    spec = getattr(instance, "data", instance)
+    if not isinstance(spec, dict):
+        raise TypeError("instance must be a dict or expose a dict-like .data attribute")
+
     cleaned_patch = _strip_binary_hunks(git_patch)
+    instance_id = str(spec.get("instance_id") or spec.get("id") or "").strip()
     if not cleaned_patch:
         return {
-            "instance_id": assets["instance_id"],
+            "instance_id": instance_id,
             "resolved": False,
             "exit_code": 0,
             "error": "empty git patch",
             "test_result": {"git_patch": ""},
         }
 
-    run_result = _run_in_container(assets=assets, git_patch=cleaned_patch, timeout=timeout)
-    if not run_result["output_text"]:
-        return {
-            "instance_id": assets["instance_id"],
-            "resolved": False,
-            "exit_code": run_result["exit_code"],
-            "error": f"no output.json (exit_code={run_result['exit_code']})",
-            "test_result": {"git_patch": cleaned_patch},
-        }
+    harness_dir = _validate_harness_dir(constants.HARNESS_SUBMODULE_PATH)
+    assets = _load_instance_assets(harness_dir, instance_id)
+    image = get_official_docker_image(str(spec["dockerhub_tag"]))
 
-    output_data = json.loads(run_result["output_text"])
-    return _score_result(
-        assets=assets,
-        output_data=output_data,
-        exit_code=run_result["exit_code"],
-        git_patch=cleaned_patch,
-    )
+    with tempfile.TemporaryDirectory(prefix="swebenchpro_eval_") as tmp_dir:
+        workspace_dir = Path(tmp_dir)
+        (workspace_dir / "patch.diff").write_text(cleaned_patch, encoding="utf-8")
+        (workspace_dir / "run_script.sh").write_text(assets["run_script"], encoding="utf-8")
+        (workspace_dir / "parser.py").write_text(assets["parser"], encoding="utf-8")
+        (workspace_dir / "entryscript.sh").write_text(
+            _create_entryscript(spec, assets["base_dockerfile"], assets["instance_dockerfile"]),
+            encoding="utf-8",
+        )
+        (workspace_dir / "run_script.sh").chmod(0o755)
+        (workspace_dir / "entryscript.sh").chmod(0o755)
+
+        run_result = _run_in_container(
+            image=image,
+            workspace_dir=workspace_dir,
+            timeout=timeout,
+            block_network=block_network,
+            docker_platform=docker_platform,
+        )
+
+        output_path = workspace_dir / "output.json"
+        if not output_path.is_file():
+            return {
+                "instance_id": instance_id,
+                "resolved": False,
+                "exit_code": run_result["exit_code"],
+                "error": f"no output.json (exit_code={run_result['exit_code']})",
+                "test_result": {"git_patch": cleaned_patch},
+            }
+
+        output_data = json.loads(output_path.read_text(encoding="utf-8"))
+        return _score_result(
+            spec=spec,
+            output_data=output_data,
+            exit_code=run_result["exit_code"],
+            git_patch=cleaned_patch,
+        )
