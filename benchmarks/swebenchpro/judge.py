@@ -15,10 +15,22 @@ logger = get_logger(__name__)
 
 @register_judge("swebenchpro")
 class SWEBenchProJudge(ExecutionBasedJudge):
-    harness_dir: Path = Field(default_factory=lambda: constants.HARNESS_SUBMODULE_PATH)
-    rm_image: bool = Field(default=False)
-    block_network: bool = Field(default=False)
-    docker_platform: str | None = Field(default=None)
+    harness_dir: Path = Field(
+        default_factory=lambda: constants.HARNESS_SUBMODULE_PATH,
+        description="Reserved harness checkout path override for future evaluator support",
+    )
+    rm_image: bool = Field(
+        default=False,
+        description="Request Docker image cleanup after evaluation when evaluator supports it",
+    )
+    block_network: bool = Field(
+        default=False,
+        description="Disable network access during Docker-based judge evaluation",
+    )
+    docker_platform: str | None = Field(
+        default=None,
+        description="Optional Docker platform passed through to the evaluator",
+    )
 
     def judge(
         self,
@@ -31,6 +43,22 @@ class SWEBenchProJudge(ExecutionBasedJudge):
             return False
 
         try:
+            if self.harness_dir != constants.HARNESS_SUBMODULE_PATH:
+                logger.warning(
+                    "SWEBenchProJudge %s configured harness_dir=%s, but the current "
+                    "evaluator ignores harness overrides and uses %s",
+                    instance_id,
+                    self.harness_dir,
+                    constants.HARNESS_SUBMODULE_PATH,
+                )
+            if self.rm_image:
+                logger.warning(
+                    "SWEBenchProJudge %s configured rm_image=%s, but the current "
+                    "evaluator does not support image cleanup overrides yet",
+                    instance_id,
+                    self.rm_image,
+                )
+
             result = evaluate_instance(
                 instance_data,
                 git_patch,
