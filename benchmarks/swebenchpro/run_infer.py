@@ -252,7 +252,8 @@ class SWEBenchProEvaluation(Evaluation):
 
         assert isinstance(workspace, RemoteWorkspace)
 
-        repo_path = "/workspace/repo/"
+        repo_name = instance.data["repo"].split("/")[-1]
+        repo_path = f"/workspace/{repo_name}/"
         instance.data["repo_path"] = repo_path
 
         persist_callback = build_event_persistence_callback(
@@ -276,6 +277,13 @@ class SWEBenchProEvaluation(Evaluation):
 
         git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
         assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
+
+        # Reinstall the repo in editable mode to update the installation
+        pip_install = workspace.execute_command(
+            f"pip install --no-deps -e {repo_path}"
+        )
+        if pip_install.exit_code != 0:
+            logger.warning(f"pip install --no-deps -e failed: {pip_install.stderr}")
 
         base_commit = str(instance.data["base_commit"])
         brief_history = workspace.execute_command(
