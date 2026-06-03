@@ -82,6 +82,9 @@ class SWEBenchProEvaluation(Evaluation):
     judge: ExecutionBasedJudge | None = Field(
         default=None, description="Optional execution-based judge"
     )
+    docker_image_prefix: str | None = Field(
+        default=None, description="Override Docker image repository prefix"
+    )
 
     def prepare_instances(self) -> List[EvalInstance]:
         logger.info("Setting up SWE-bench Pro evaluation data")
@@ -108,7 +111,8 @@ class SWEBenchProEvaluation(Evaluation):
         forward_env: list[str] | None = None,
     ) -> RemoteWorkspace:
         official_docker_image = get_official_docker_image(
-            str(instance.data["dockerhub_tag"])
+            str(instance.data["dockerhub_tag"]),
+            self.docker_image_prefix,
         )
         build_target = "source-minimal"
         custom_tag = extract_custom_tag(official_docker_image)
@@ -410,6 +414,15 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
+    parser.add_argument(
+        "--docker-image-prefix",
+        type=str,
+        default=None,
+        help=(
+            "Override Docker image repository prefix. "
+            "E.g., 'myregistry.com/myorg/sweap-images' to use your own registry."
+        ),
+    )
     add_judge_args(parser, default_judge="swebenchpro")
     args = parser.parse_args()
 
@@ -473,6 +486,7 @@ def main() -> None:
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
         judge=judge,
+        docker_image_prefix=args.docker_image_prefix,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))

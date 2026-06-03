@@ -24,11 +24,12 @@ MAX_CUSTOM_TAG_LENGTH = 96
 CUSTOM_TAG_SANITIZER = re.compile(r"[^a-z0-9_.-]+")
 
 
-def get_official_docker_image(dockerhub_tag: str) -> str:
+def get_official_docker_image(dockerhub_tag: str, image_prefix: str | None = None) -> str:
     tag = dockerhub_tag.strip()
     if not tag:
         raise ValueError("dockerhub_tag must not be empty")
-    return f"{constants.DOCKER_IMAGE_PREFIX}:{tag}"
+    prefix = image_prefix or constants.DOCKER_IMAGE_PREFIX
+    return f"{prefix}:{tag}"
 
 
 def extract_custom_tag(base_image: str) -> str:
@@ -52,6 +53,7 @@ def collect_unique_base_images(
     split: str,
     n_limit: int,
     selected_instances_file: str | None = None,
+    image_prefix: str | None = None,
 ) -> list[str]:
     df = get_dataset(
         dataset_name=dataset,
@@ -60,13 +62,24 @@ def collect_unique_base_images(
         selected_instances_file=selected_instances_file,
     )
     return sorted(
-        {get_official_docker_image(str(row["dockerhub_tag"])) for _, row in df.iterrows()}
+        {get_official_docker_image(str(row["dockerhub_tag"]), image_prefix) for _, row in df.iterrows()}
     )
 
 
 def main(argv: list[str]) -> int:
     parser = get_build_parser()
     parser.set_defaults(dataset="ScaleAI/SWE-bench_Pro", split="test")
+    parser.add_argument(
+        "--docker-image-prefix",
+        type=str,
+        default=None,
+        help=(
+            f"Override Docker image repository prefix (default: {constants.DOCKER_IMAGE_PREFIX}). "
+            "Replaces everything before the last ':' in the image reference. "
+            "E.g., 'myregistry.com/myorg/sweap-images' turns 'docker.io/jefzda/sweap-images:tag' "
+            "into 'myregistry.com/myorg/sweap-images:tag'."
+        ),
+    )
     args = parser.parse_args(argv)
 
     base_images = collect_unique_base_images(
@@ -74,6 +87,7 @@ def main(argv: list[str]) -> int:
         args.split,
         args.n_limit,
         args.select,
+        args.docker_image_prefix,
     )
     build_dir = default_build_output_dir(args.dataset, args.split)
 
