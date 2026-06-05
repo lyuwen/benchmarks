@@ -84,6 +84,7 @@ def _evaluate_row(
     docker_platform: str | None,
     docker_image_prefix: str | None,
     log_dir: str | None,
+    remove_image: bool,
 ) -> dict[str, Any]:
     from benchmarks.swebenchpro._evaluator import evaluate_instance
 
@@ -97,6 +98,7 @@ def _evaluate_row(
             docker_platform=docker_platform,
             docker_image_prefix=docker_image_prefix,
             log_dir=log_dir,
+            remove_image=remove_image,
         )
         if "instance_id" not in result or not result.get("instance_id"):
             result["instance_id"] = instance_id
@@ -126,7 +128,7 @@ def main() -> int:
         default=str(constants.HARNESS_SUBMODULE_PATH),
         help="Reserved for forward compatibility; current evaluator uses the built-in harness path",
     )
-    parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--timeout", type=int, default=3600, help="Timeout in seconds per instance (default: 3600 = 1 hour, includes image pull time)")
     parser.add_argument("--block-network", action="store_true")
     parser.add_argument("--docker-platform", default=None)
     parser.add_argument(
@@ -144,7 +146,7 @@ def main() -> int:
     parser.add_argument(
         "--rm-image",
         action="store_true",
-        help="Reserved for forward compatibility; current evaluator does not remove images",
+        help="Remove Docker image after evaluating each instance to save disk space",
     )
     args = parser.parse_args()
 
@@ -199,6 +201,7 @@ def main() -> int:
                 args.docker_platform,
                 args.docker_image_prefix,
                 args.log_dir,
+                args.rm_image,
             ): str(row.get("instance_id") or row.get("id") or "").strip()
             for row in matched_rows
         }

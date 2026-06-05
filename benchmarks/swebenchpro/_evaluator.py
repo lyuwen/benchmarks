@@ -224,9 +224,10 @@ exit "$run_script_exit_code"
 def _run_in_container(
     image: str,
     workspace_dir: str | Path,
-    timeout: int = 1800,
+    timeout: int = 3600,
     block_network: bool = False,
     docker_platform: str | None = None,
+    remove_image: bool = False,
 ) -> dict[str, Any]:
     docker_cmd = ["docker", "run", "--rm"]
     if docker_platform:
