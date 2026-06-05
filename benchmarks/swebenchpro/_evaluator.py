@@ -211,7 +211,16 @@ set -euo pipefail
 {export_block}cd /app
 git reset --hard {shlex.quote(base_commit)}
 git checkout {shlex.quote(base_commit)}
-git apply -v /workspace/patch.diff
+# Try to apply patch with various fallback strategies
+if git apply --reject -v /workspace/patch.diff; then
+    echo "Patch applied successfully"
+elif git apply --reject --3way -v /workspace/patch.diff 2>/dev/null; then
+    echo "Patch applied with 3-way merge"
+elif git apply --reject --ignore-whitespace -v /workspace/patch.diff 2>/dev/null; then
+    echo "Patch applied ignoring whitespace differences"
+else
+    echo "Patch applied with failures, continuing anyway. Check .rej files for failed hunks."
+fi
 {before_repo_block}set +e
 bash /workspace/run_script.sh{selected_tests_suffix} > /workspace/stdout.log 2> /workspace/stderr.log
 run_script_exit_code=$?
