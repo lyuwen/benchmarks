@@ -161,10 +161,6 @@ def main() -> int:
             args.harness_dir,
             constants.HARNESS_SUBMODULE_PATH,
         )
-    if args.rm_image:
-        logger.warning(
-            "Ignoring --rm-image because the current evaluator does not support image cleanup overrides"
-        )
 
     predictions = load_predictions(predictions_path)
     logger.info("Loaded %s predictions from %s", len(predictions), predictions_path)
