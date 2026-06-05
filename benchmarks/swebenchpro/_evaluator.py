@@ -328,11 +328,12 @@ def _score_result(
 def evaluate_instance(
     instance: Any,
     git_patch: str,
-    timeout: int = 1800,
+    timeout: int = 3600,
     block_network: bool = False,
     docker_platform: str | None = None,
     docker_image_prefix: str | None = None,
     log_dir: str | None = None,
+    remove_image: bool = False,
 ) -> dict[str, Any]:
     spec = getattr(instance, "data", instance)
     if not isinstance(spec, dict):
