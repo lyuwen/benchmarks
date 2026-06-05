@@ -238,8 +238,9 @@ def _run_in_container(
         [
             "-v",
             f"{Path(workspace_dir)}:/workspace",
-            image,
+            "--entrypoint",
             "/bin/bash",
+            image,
             "/workspace/entryscript.sh",
         ]
     )
