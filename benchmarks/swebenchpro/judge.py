@@ -31,6 +31,10 @@ class SWEBenchProJudge(ExecutionBasedJudge):
         default=None,
         description="Optional Docker platform passed through to the evaluator",
     )
+    docker_image_prefix: str | None = Field(
+        default=None,
+        description="Optional Docker image prefix/registry override",
+    )
     mirror: str | None = Field(
         default=None,
         description="Package manager mirror configuration for faster installations",
@@ -65,6 +69,7 @@ class SWEBenchProJudge(ExecutionBasedJudge):
                 timeout=self.timeout,
                 block_network=self.block_network,
                 docker_platform=self.docker_platform,
+                docker_image_prefix=self.docker_image_prefix,
                 log_dir=self.log_dir,
                 remove_image=self.rm_image,
                 mirror=self.mirror,
