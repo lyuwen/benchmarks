@@ -273,7 +273,8 @@ class SWEBenchProEvaluation(Evaluation):
 
         logger.info("repo_path: %s (source: /app)", repo_path)
         cp_repo = workspace.execute_command(
-            f"mkdir -p {repo_path} ; cp -r /app/. {repo_path}"
+            f"mkdir -p {repo_path} ; cp -r /app/. {repo_path}",
+            timeout=300  # 5 minutes for large repos
         )
         assert cp_repo.exit_code == 0, f"cp repo failed: {cp_repo.stderr}"
 
