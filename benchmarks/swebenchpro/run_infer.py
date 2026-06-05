@@ -473,6 +473,10 @@ def main() -> None:
     judge = create_judge(args)
     if judge is not None:
         logger.info(f"Using judge: {type(judge).__name__}")
+        # Set log_dir for judge to save execution outputs
+        if hasattr(judge, 'log_dir'):
+            judge.log_dir = os.path.join(eval_output_dir, "judge")
+            logger.info(f"Judge will save logs to: {judge.log_dir}")
 
     env_vars = [
         f'export {key}="{value}"'

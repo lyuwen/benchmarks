@@ -35,6 +35,10 @@ class SWEBenchProJudge(ExecutionBasedJudge):
         default=None,
         description="Package manager mirror configuration for faster installations",
     )
+    log_dir: str | None = Field(
+        default=None,
+        description="Directory to save evaluation logs (stdout, stderr, output.json, etc.)",
+    )
 
     def judge(
         self,
@@ -61,6 +65,7 @@ class SWEBenchProJudge(ExecutionBasedJudge):
                 timeout=self.timeout,
                 block_network=self.block_network,
                 docker_platform=self.docker_platform,
+                log_dir=self.log_dir,
                 remove_image=self.rm_image,
                 mirror=self.mirror,
             )
