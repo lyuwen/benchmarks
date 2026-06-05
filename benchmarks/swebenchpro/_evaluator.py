@@ -3,8 +3,10 @@
 
 import ast
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -12,6 +14,22 @@ from typing import Any
 
 from benchmarks.swebenchpro import constants
 from benchmarks.swebenchpro.build_images import get_official_docker_image
+
+
+def _save_logs(log_dir: str, instance_id: str, workspace_dir: Path, result: dict[str, Any]) -> None:
+    """Save evaluation logs for an instance."""
+    instance_log_dir = Path(log_dir) / instance_id
+    instance_log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save all workspace files
+    for file_name in ["stdout.log", "stderr.log", "output.json", "patch.diff", "entryscript.sh", "run_script.sh", "parser.py"]:
+        src = workspace_dir / file_name
+        if src.exists():
+            shutil.copy2(src, instance_log_dir / file_name)
+
+    # Save result JSON
+    (instance_log_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+
 
 _BINARY_PATCH_MARKERS = (
     "GIT binary patch",
@@ -312,6 +330,8 @@ def evaluate_instance(
     timeout: int = 1800,
     block_network: bool = False,
     docker_platform: str | None = None,
+    docker_image_prefix: str | None = None,
+    log_dir: str | None = None,
 ) -> dict[str, Any]:
     spec = getattr(instance, "data", instance)
     if not isinstance(spec, dict):
@@ -330,7 +350,7 @@ def evaluate_instance(
 
     harness_dir = _validate_harness_dir(constants.HARNESS_SUBMODULE_PATH)
     assets = _load_instance_assets(harness_dir, instance_id)
-    image = get_official_docker_image(str(spec["dockerhub_tag"]))
+    image = get_official_docker_image(str(spec["dockerhub_tag"]), docker_image_prefix)
 
     with tempfile.TemporaryDirectory(prefix="swebenchpro_eval_") as tmp_dir:
         workspace_dir = Path(tmp_dir)
@@ -354,18 +374,28 @@ def evaluate_instance(
 
         output_path = workspace_dir / "output.json"
         if not output_path.is_file():
-            return {
+            result = {
                 "instance_id": instance_id,
                 "resolved": False,
                 "exit_code": run_result["exit_code"],
                 "error": f"no output.json (exit_code={run_result['exit_code']})",
                 "test_result": {"git_patch": cleaned_patch},
+                "docker_stdout": run_result.get("stdout", ""),
+                "docker_stderr": run_result.get("stderr", ""),
             }
+            if log_dir:
+                _save_logs(log_dir, instance_id, workspace_dir, result)
+            return result
 
         output_data = json.loads(output_path.read_text(encoding="utf-8"))
-        return _score_result(
+        result = _score_result(
             spec=spec,
             output_data=output_data,
             exit_code=run_result["exit_code"],
             git_patch=cleaned_patch,
         )
+
+        if log_dir:
+            _save_logs(log_dir, instance_id, workspace_dir, result)
+
+        return result

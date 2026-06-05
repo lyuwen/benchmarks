@@ -82,6 +82,8 @@ def _evaluate_row(
     timeout: int,
     block_network: bool,
     docker_platform: str | None,
+    docker_image_prefix: str | None,
+    log_dir: str | None,
 ) -> dict[str, Any]:
     from benchmarks.swebenchpro._evaluator import evaluate_instance
 
@@ -93,6 +95,8 @@ def _evaluate_row(
             timeout=timeout,
             block_network=block_network,
             docker_platform=docker_platform,
+            docker_image_prefix=docker_image_prefix,
+            log_dir=log_dir,
         )
         if "instance_id" not in result or not result.get("instance_id"):
             result["instance_id"] = instance_id
@@ -126,6 +130,18 @@ def main() -> int:
     parser.add_argument("--block-network", action="store_true")
     parser.add_argument("--docker-platform", default=None)
     parser.add_argument(
+        "--docker-image-prefix",
+        type=str,
+        default=None,
+        help="Override Docker image repository prefix (e.g., 'myregistry.com/myorg/sweap-images')",
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default=None,
+        help="Directory to save per-instance evaluation logs (stdout, stderr, output.json, etc.)",
+    )
+    parser.add_argument(
         "--rm-image",
         action="store_true",
         help="Reserved for forward compatibility; current evaluator does not remove images",
@@ -150,6 +166,11 @@ def main() -> int:
 
     predictions = load_predictions(predictions_path)
     logger.info("Loaded %s predictions from %s", len(predictions), predictions_path)
+
+    # Create log directory if specified
+    if args.log_dir:
+        Path(args.log_dir).mkdir(parents=True, exist_ok=True)
+        logger.info("Per-instance logs will be saved to %s", args.log_dir)
 
     dataset = get_dataset(dataset_name=args.dataset, split=args.split)
     dataset_rows = dataset.to_dict(orient="records")
@@ -176,6 +197,8 @@ def main() -> int:
                 args.timeout,
                 args.block_network,
                 args.docker_platform,
+                args.docker_image_prefix,
+                args.log_dir,
             ): str(row.get("instance_id") or row.get("id") or "").strip()
             for row in matched_rows
         }
