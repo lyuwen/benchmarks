@@ -55,14 +55,6 @@ class SWEBenchProJudge(ExecutionBasedJudge):
                     self.harness_dir,
                     constants.HARNESS_SUBMODULE_PATH,
                 )
-            if self.rm_image:
-                logger.warning(
-                    "SWEBenchProJudge %s configured rm_image=%s, but the current "
-                    "evaluator does not support image cleanup overrides yet",
-                    instance_id,
-                    self.rm_image,
-                )
-
             result = evaluate_instance(
                 instance_data,
                 git_patch,
