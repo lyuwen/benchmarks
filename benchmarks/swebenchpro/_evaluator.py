@@ -364,7 +364,7 @@ def evaluate_instance(
 
     with tempfile.TemporaryDirectory(prefix="swebenchpro_eval_") as tmp_dir:
         workspace_dir = Path(tmp_dir)
-        (workspace_dir / "patch.diff").write_text(cleaned_patch if cleaned_patch.endswith("\n") else cleaned_patch + "\n", encoding="utf-8")
+        (workspace_dir / "patch.diff").write_text(cleaned_patch + "\n", encoding="utf-8")
         (workspace_dir / "run_script.sh").write_text(assets["run_script"], encoding="utf-8")
         (workspace_dir / "parser.py").write_text(assets["parser"], encoding="utf-8")
         (workspace_dir / "entryscript.sh").write_text(
