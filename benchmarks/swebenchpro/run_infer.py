@@ -283,7 +283,8 @@ class SWEBenchProEvaluation(Evaluation):
 
         # Reinstall the repo in editable mode to update the installation
         pip_install = workspace.execute_command(
-            f"pip install --no-deps -e {repo_path}"
+            f"pip install --no-deps -e {repo_path}",
+            timeout=300  # 5 minutes for pip install
         )
         if pip_install.exit_code != 0:
             logger.warning(f"pip install --no-deps -e failed: {pip_install.stderr}")
