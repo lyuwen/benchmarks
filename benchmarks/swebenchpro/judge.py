@@ -31,6 +31,10 @@ class SWEBenchProJudge(ExecutionBasedJudge):
         default=None,
         description="Optional Docker platform passed through to the evaluator",
     )
+    mirror: str | None = Field(
+        default=None,
+        description="Package manager mirror configuration for faster installations",
+    )
 
     def judge(
         self,
@@ -65,6 +69,8 @@ class SWEBenchProJudge(ExecutionBasedJudge):
                 timeout=self.timeout,
                 block_network=self.block_network,
                 docker_platform=self.docker_platform,
+                remove_image=self.rm_image,
+                mirror=self.mirror,
             )
             logger.info(
                 "SWEBenchProJudge %s: resolved=%s exit_code=%s error=%s",

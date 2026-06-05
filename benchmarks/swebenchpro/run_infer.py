@@ -12,6 +12,8 @@ from benchmarks.swebenchpro.build_images import (
     get_official_docker_image,
 )
 from benchmarks.swebenchpro.judge import SWEBenchProJudge  # noqa: F401
+from benchmarks.swebenchpro._evaluator import _strip_binary_hunks
+from benchmarks.swebenchpro.mirror_config import get_mirror_env_commands
 from benchmarks.utils.args_parser import get_parser
 from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
@@ -325,6 +327,12 @@ class SWEBenchProEvaluation(Evaluation):
         )
         git_patch = git_patch_result.stdout
 
+        # Strip binary diff hunks for consistency with evaluation
+        cleaned_patch = _strip_binary_hunks(git_patch)
+        if cleaned_patch != git_patch:
+            logger.info("Stripped binary diff hunks from patch for %s", instance.id)
+        git_patch = cleaned_patch
+
         evaluation_result = None
         if self.judge is not None:
             try:
@@ -479,7 +487,7 @@ def main() -> None:
         details={},
         prompt_path=args.prompt_path,
         eval_limit=args.n_limit,
-        env_setup_commands=["export PIP_CACHE_DIR=~/.cache/pip"] + env_vars,
+        env_setup_commands=get_mirror_env_commands() + ["export PIP_CACHE_DIR=~/.cache/pip"] + env_vars,
         max_attempts=args.max_attempts,
         critic=critic,
         selected_instances_file=args.select,

@@ -11,6 +11,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -85,6 +90,7 @@ def _evaluate_row(
     docker_image_prefix: str | None,
     log_dir: str | None,
     remove_image: bool,
+    mirror: str | None,
 ) -> dict[str, Any]:
     from benchmarks.swebenchpro._evaluator import evaluate_instance
 
@@ -99,6 +105,7 @@ def _evaluate_row(
             docker_image_prefix=docker_image_prefix,
             log_dir=log_dir,
             remove_image=remove_image,
+            mirror=mirror,
         )
         if "instance_id" not in result or not result.get("instance_id"):
             result["instance_id"] = instance_id
@@ -148,6 +155,12 @@ def main() -> int:
         action="store_true",
         help="Remove Docker image after evaluating each instance to save disk space",
     )
+    parser.add_argument(
+        "--mirror",
+        type=str,
+        default=None,
+        help="Package manager mirror configuration (china, tsinghua, aliyun) or set PACKAGE_MIRROR env var",
+    )
     args = parser.parse_args()
 
     from benchmarks.utils.dataset import get_dataset
@@ -186,6 +199,10 @@ def main() -> int:
     )
 
     results: list[dict[str, Any]] = []
+    resolved_count = 0
+    failed_count = 0
+    error_count = 0
+
     with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
         future_to_instance = {
             executor.submit(
@@ -198,19 +215,66 @@ def main() -> int:
                 args.docker_image_prefix,
                 args.log_dir,
                 args.rm_image,
+                args.mirror,
             ): str(row.get("instance_id") or row.get("id") or "").strip()
             for row in matched_rows
         }
+
+        # Create progress bar if tqdm is available
+        if tqdm is not None:
+            pbar = tqdm(total=len(future_to_instance), desc="Evaluating", unit="instance", position=0, leave=True)
+            # Suppress logger output to avoid interfering with progress bar
+            original_log_level = logger.level
+            if logger.level < logging.WARNING:
+                logger.setLevel(logging.WARNING)
+        else:
+            pbar = None
+            original_log_level = None
+
         for future in as_completed(future_to_instance):
             instance_id = future_to_instance[future]
             result = future.result()
             results.append(result)
-            logger.info(
-                "Finished %s: resolved=%s error=%s",
-                instance_id,
-                result.get("resolved"),
-                result.get("error"),
-            )
+
+            # Update counts
+            if result.get("resolved") is True:
+                resolved_count += 1
+            elif result.get("error"):
+                error_count += 1
+            else:
+                failed_count += 1
+
+            # Calculate current pass rate
+            total_completed = len(results)
+            pass_rate = (resolved_count / total_completed * 100) if total_completed > 0 else 0.0
+
+            # Update progress bar with statistics
+            if pbar is not None:
+                pbar.set_postfix({
+                    "passed": resolved_count,
+                    "failed": failed_count,
+                    "errors": error_count,
+                    "rate": f"{pass_rate:.1f}%"
+                })
+                pbar.update(1)
+            else:
+                # Only log if no progress bar
+                logger.info(
+                    "Finished %s: resolved=%s error=%s (passed=%d failed=%d errors=%d rate=%.1f%%)",
+                    instance_id,
+                    result.get("resolved"),
+                    result.get("error"),
+                    resolved_count,
+                    failed_count,
+                    error_count,
+                    pass_rate,
+                )
+
+        if pbar is not None:
+            pbar.close()
+            # Restore original log level
+            if original_log_level is not None:
+                logger.setLevel(original_log_level)
 
     results.sort(key=lambda item: str(item.get("instance_id") or ""))
     resolved_count = sum(1 for item in results if item.get("resolved") is True)

@@ -14,6 +14,7 @@ from typing import Any
 
 from benchmarks.swebenchpro import constants
 from benchmarks.swebenchpro.build_images import get_official_docker_image
+from benchmarks.swebenchpro.mirror_config import format_mirror_env_exports
 
 
 def _save_logs(log_dir: str, instance_id: str, workspace_dir: Path, result: dict[str, Any]) -> None:
@@ -155,9 +156,8 @@ def _extract_env_exports(dockerfile_text: str) -> list[str]:
 
 
 def _normalize_test_name(name: str) -> str:
-    normalized = str(name).strip()
-    if not normalized:
-        return ""
+    """No normalization - return name as-is to match official evaluator."""
+    return str(name)
 
     while True:
         updated = _TIMING_SUFFIX_RE.sub("", normalized)
@@ -190,43 +190,50 @@ def _create_entryscript(
     spec: dict[str, Any],
     base_dockerfile: str,
     instance_dockerfile: str,
+    mirror: str | None = None,
 ) -> str:
+    # Add package manager mirror configurations if specified
+    from benchmarks.swebenchpro.mirror_config import format_mirror_env_exports
+    mirror_env_block = format_mirror_env_exports(mirror)
+
     env_exports = _extract_env_exports(base_dockerfile) + _extract_env_exports(instance_dockerfile)
     export_block = "\n".join(env_exports)
     export_block = f"{export_block}\n" if export_block else ""
 
-    selected_tests = " ".join(
-        shlex.quote(test)
-        for test in _parse_literal_list(spec.get("selected_test_files_to_run", []))
-    )
-    selected_tests_suffix = f" {selected_tests}" if selected_tests else ""
+    selected_tests_list = _parse_literal_list(spec.get("selected_test_files_to_run", []))
+    selected_tests = ",".join(selected_tests_list) if selected_tests_list else ""
 
     before_repo_set_cmd = str(spec.get("before_repo_set_cmd", "") or "").strip()
+    if before_repo_set_cmd:
+        before_repo_set_cmd = before_repo_set_cmd.split("\n")[-1].strip()
     before_repo_block = f"{before_repo_set_cmd}\n" if before_repo_set_cmd else ""
 
     base_commit = str(spec["base_commit"]).strip()
 
     return f"""#!/bin/bash
-set -euo pipefail
-{export_block}cd /app
+{mirror_env_block}{export_block}
+# apply patch
+cd /app
 git reset --hard {shlex.quote(base_commit)}
 git checkout {shlex.quote(base_commit)}
-# Try to apply patch with various fallback strategies
-if git apply --reject -v /workspace/patch.diff; then
+# Try multiple patch application strategies for robustness
+if git apply -v /workspace/patch.diff 2>/dev/null; then
     echo "Patch applied successfully"
-elif git apply --reject --3way -v /workspace/patch.diff 2>/dev/null; then
+elif git reset --hard {shlex.quote(base_commit)} && git apply --reject -v /workspace/patch.diff 2>/dev/null; then
+    echo "Patch applied with --reject"
+elif git reset --hard {shlex.quote(base_commit)} && git apply --3way -v /workspace/patch.diff 2>/dev/null; then
     echo "Patch applied with 3-way merge"
-elif git apply --reject --ignore-whitespace -v /workspace/patch.diff 2>/dev/null; then
-    echo "Patch applied ignoring whitespace differences"
+elif git reset --hard {shlex.quote(base_commit)} && git apply --ignore-whitespace -v /workspace/patch.diff 2>/dev/null; then
+    echo "Patch applied ignoring whitespace"
 else
-    echo "Patch applied with failures, continuing anyway. Check .rej files for failed hunks."
+    git reset --hard {shlex.quote(base_commit)}
+    echo "Warning: Patch application had issues, continuing anyway"
+    git apply --reject --ignore-whitespace -v /workspace/patch.diff 2>&1 || true
 fi
-{before_repo_block}set +e
-bash /workspace/run_script.sh{selected_tests_suffix} > /workspace/stdout.log 2> /workspace/stderr.log
-run_script_exit_code=$?
-set -e
+{before_repo_block}# run test and save stdout and stderr to separate files
+bash /workspace/run_script.sh {selected_tests} > /workspace/stdout.log 2> /workspace/stderr.log
+# run parsing script
 python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json
-exit "$run_script_exit_code"
 """
 
 
@@ -273,6 +280,16 @@ def _run_in_container(
             "stdout": exc.stdout or "",
             "stderr": exc.stderr or "",
         }
+    finally:
+        # Remove Docker image if requested
+        if remove_image:
+            try:
+                subprocess.run(
+                    ["docker", "rmi", "-f", image],
+                    check=False, capture_output=True, timeout=60
+                )
+            except Exception:
+                pass
 
 
 def _score_result(
@@ -281,58 +298,34 @@ def _score_result(
     exit_code: int,
     git_patch: str,
 ) -> dict[str, Any]:
-    passed_tests = _parse_literal_list(output_data.get("passed_tests", []))
-    if not passed_tests:
-        for key in ("test_status_map", "tests_status", "tests"):
-            statuses = output_data.get(key)
-            if isinstance(statuses, dict):
-                passed_tests = [
-                    str(name)
-                    for name, status in statuses.items()
-                    if str(status).strip().upper() in {"PASSED", "PASS"}
-                ]
-                if passed_tests:
-                    break
+    """Score result matching official evaluator logic exactly.
 
-    fail_to_pass_expected = {
-        _normalize_test_name(name)
-        for name in _parse_literal_list(spec.get("fail_to_pass", []))
-        if _normalize_test_name(name)
-    }
-    pass_to_pass_expected = {
-        _normalize_test_name(name)
-        for name in _parse_literal_list(spec.get("pass_to_pass", []))
-        if _normalize_test_name(name)
-    }
-    passed_set = {
-        _normalize_test_name(name)
-        for name in passed_tests
-        if _normalize_test_name(name)
-    }
+    Official (swe_bench_pro_eval.py:560-563):
+        passed_tests = {x["name"] for x in output["tests"] if x["status"] == "PASSED"}
+        f2p = set(eval(raw_sample["fail_to_pass"]))
+        p2p = set(eval(raw_sample["pass_to_pass"]))
+        result = (f2p | p2p) <= passed_tests
+    """
+    instance_id = str(spec.get("instance_id") or spec.get("id") or "").strip()
+    tests = output_data.get("tests") or []
 
-    from_fail_to_pass = sorted(passed_set & fail_to_pass_expected)
-    failed_from_pass_to_pass = sorted(pass_to_pass_expected - passed_set)
-    resolved = (
-        fail_to_pass_expected.issubset(passed_set)
-        and not failed_from_pass_to_pass
-        and exit_code == 0
-    )
+    # NO normalization - match official exactly
+    passed_tests = {x["name"] for x in tests if x.get("status") == "PASSED"}
+    f2p = set(_parse_literal_list(spec.get("fail_to_pass", [])))
+    p2p = set(_parse_literal_list(spec.get("pass_to_pass", [])))
+
+    # Match official scoring
+    result = (f2p | p2p) <= passed_tests
 
     return {
-        "instance_id": str(spec.get("instance_id") or spec.get("id") or "").strip(),
-        "resolved": resolved,
+        "instance_id": instance_id,
+        "resolved": result,
+        "test_result": {"git_patch": git_patch},
+        "tests": tests,
         "exit_code": exit_code,
-        "from_fail_to_pass": from_fail_to_pass,
-        "fail_to_pass_total": len(fail_to_pass_expected),
-        "failed_from_pass_to_pass": failed_from_pass_to_pass,
-        "pass_to_pass_total": len(pass_to_pass_expected),
-        "passed_tests": sorted(passed_set),
-        "test_result": {
-            "git_patch": git_patch,
-            "output": output_data,
-        },
-        "error": "",
     }
+
+
 
 
 def evaluate_instance(
@@ -344,13 +337,18 @@ def evaluate_instance(
     docker_image_prefix: str | None = None,
     log_dir: str | None = None,
     remove_image: bool = False,
+    mirror: str | None = None,
 ) -> dict[str, Any]:
     spec = getattr(instance, "data", instance)
     if not isinstance(spec, dict):
         raise TypeError("instance must be a dict or expose a dict-like .data attribute")
 
-    cleaned_patch = _strip_binary_hunks(git_patch)
     instance_id = str(spec.get("instance_id") or spec.get("id") or "").strip()
+    cleaned_patch = _strip_binary_hunks(git_patch)
+
+    if cleaned_patch != git_patch:
+        print(f"Stripped binary diff hunks from patch for {instance_id}")
+
     if not cleaned_patch:
         return {
             "instance_id": instance_id,
@@ -370,7 +368,7 @@ def evaluate_instance(
         (workspace_dir / "run_script.sh").write_text(assets["run_script"], encoding="utf-8")
         (workspace_dir / "parser.py").write_text(assets["parser"], encoding="utf-8")
         (workspace_dir / "entryscript.sh").write_text(
-            _create_entryscript(spec, assets["base_dockerfile"], assets["instance_dockerfile"]),
+            _create_entryscript(spec, assets["base_dockerfile"], assets["instance_dockerfile"], mirror),
             encoding="utf-8",
         )
         (workspace_dir / "run_script.sh").chmod(0o755)
@@ -382,6 +380,7 @@ def evaluate_instance(
             timeout=timeout,
             block_network=block_network,
             docker_platform=docker_platform,
+            remove_image=remove_image,
         )
 
         output_path = workspace_dir / "output.json"
