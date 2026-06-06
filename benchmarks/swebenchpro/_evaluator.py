@@ -97,34 +97,24 @@ def _load_instance_assets(harness_dir: str | Path, instance_id: str) -> dict[str
     }
 
 
-def _strip_binary_hunks(git_patch: str) -> str:
-    if not git_patch.strip():
-        return ""
+def _strip_binary_hunks(patch: str) -> str:
+    """Remove binary diff sections from a git patch."""
+    if not patch:
+        return patch
 
-    lines = git_patch.splitlines(keepends=True)
-    if not any(line.startswith("diff --git ") for line in lines):
-        if any(marker in git_patch for marker in _BINARY_PATCH_MARKERS):
-            return ""
-        return git_patch.strip()
+    sections = re.split(r'(?=^diff --git )', patch, flags=re.MULTILINE)
 
-    sections: list[list[str]] = []
-    current: list[str] = []
-    for line in lines:
-        if line.startswith("diff --git ") and current:
-            sections.append(current)
-            current = [line]
-        else:
-            current.append(line)
-    if current:
-        sections.append(current)
-
-    kept_sections: list[str] = []
+    kept: list[str] = []
     for section in sections:
-        section_text = "".join(section)
-        if any(marker in section_text for marker in _BINARY_PATCH_MARKERS):
+        if not section.strip():
             continue
-        kept_sections.append(section_text)
-    return "".join(kept_sections).strip()
+        if re.search(r'^Binary files .* differ$', section, re.MULTILINE):
+            continue
+        if re.search(r'^GIT binary patch$', section, re.MULTILINE):
+            continue
+        kept.append(section)
+
+    return "".join(kept)
 
 
 def _extract_env_exports(dockerfile_text: str) -> list[str]:
