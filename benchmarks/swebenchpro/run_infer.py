@@ -13,7 +13,7 @@ from benchmarks.swebenchpro.build_images import (
 )
 from benchmarks.swebenchpro.judge import SWEBenchProJudge  # noqa: F401
 from benchmarks.swebenchpro._evaluator import _strip_binary_hunks
-from benchmarks.swebenchpro.mirror_config import get_mirror_env_commands
+from benchmarks.utils.mirror_config import get_mirror_env_commands
 from benchmarks.utils.args_parser import get_parser
 from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE

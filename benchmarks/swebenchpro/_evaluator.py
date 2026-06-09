@@ -14,7 +14,7 @@ from typing import Any
 
 from benchmarks.swebenchpro import constants
 from benchmarks.swebenchpro.build_images import get_official_docker_image
-from benchmarks.swebenchpro.mirror_config import format_mirror_env_exports
+from benchmarks.utils.mirror_config import format_mirror_env_exports
 
 
 def _save_logs(log_dir: str, instance_id: str, workspace_dir: Path, result: dict[str, Any]) -> None:
@@ -183,7 +183,6 @@ def _create_entryscript(
     mirror: str | None = None,
 ) -> str:
     # Add package manager mirror configurations if specified
-    from benchmarks.swebenchpro.mirror_config import format_mirror_env_exports
     mirror_env_block = format_mirror_env_exports(mirror)
 
     env_exports = _extract_env_exports(base_dockerfile) + _extract_env_exports(instance_dockerfile)

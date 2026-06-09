@@ -10,6 +10,7 @@ from benchmarks.swebenchmultimodal.build_images import (
     get_official_docker_image,
 )
 from benchmarks.utils.args_parser import get_parser
+from benchmarks.utils.mirror_config import get_mirror_env_commands
 from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
@@ -431,7 +432,7 @@ def main() -> None:
         details={},
         prompt_path=args.prompt_path,
         eval_limit=args.n_limit,
-        env_setup_commands=["export PIP_CACHE_DIR=~/.cache/pip"],
+        env_setup_commands=get_mirror_env_commands() + ["export PIP_CACHE_DIR=~/.cache/pip"],
         max_attempts=args.max_attempts,
         critic=critic,
         selected_instances_file=args.select,
