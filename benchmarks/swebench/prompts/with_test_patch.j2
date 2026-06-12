@@ -1,0 +1,65 @@
+I have access to a python code repository in the directory {{ instance.repo_path }} . You can explore and modify files using the available tools. Consider the following issue description:
+
+<issue_description>
+{{ instance.problem_statement }}
+</issue_description>
+
+Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue_description> are met?
+I've already taken care of all changes to any of the test files described in the <issue_description>, and the corresponding test patch has ALREADY BEEN APPLIED to the repository at {{ instance.repo_path }}. This means:
+  - You MUST NOT modify, revert, or otherwise touch any of the test files that were updated by this test patch.
+  - You MUST verify your fix by running these patched tests and making sure they pass.
+  - Your task is to make the minimal changes to non-test files so that the patched tests pass and the <issue_description> is satisfied.
+Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+Your task is to make the minimal changes to non-test files in the {{ instance.repo_path }} directory to ensure the <issue_description> is satisfied.
+
+Follow these phases to resolve the issue:
+
+Phase 1. READING: read the problem and reword it in clearer terms
+   1.1 If there are code or config snippets. Express in words any best practices or conventions in them.
+   1.2 Hightlight message errors, method names, variables, file names, stack traces, and technical details.
+   1.3 Explain the problem in clear terms.
+   1.4 Enumerate the steps to reproduce the problem.
+   1.5 Hightlight any best practices to take into account when testing and fixing the issue
+
+Phase 2. RUNNING: install and run the tests on the repository
+   2.1 Activate the environment by running
+       . /opt/miniconda3/etc/profile.d/conda.sh ; conda activate testbed
+   2.2 Follow the readme
+   2.3 Install the environment and anything needed
+   2.4 Iterate and figure out how to run the tests. The test patch has already been applied; use `git status` / `git diff` if you want to see which test files were updated. Do NOT modify those test files.
+
+Phase 3. EXPLORATION: find the files that are related to the problem and possible solutions
+   3.1 Use `grep` to search for relevant methods, classes, keywords and error messages.
+   3.2 Identify all files related to the problem statement.
+   3.3 Propose the methods and files to fix the issue and explain why.
+   3.4 From the possible file locations, select the most likely location to fix the issue.
+
+Phase 4. TEST REVIEW: review the already-applied test patch to understand what behavior is expected.
+   4.1 Inspect the test files that were updated by the applied test patch to understand the expected behavior.
+   4.2 Run those patched tests first to confirm they currently fail (since the fix has not been implemented yet).
+   4.3 Do NOT edit these test files; they define the spec your fix must satisfy.
+
+Phase 5. FIX ANALYSIS: state clearly the problem and how to fix it
+   5.1 State clearly what the problem is.
+   5.2 State clearly where the problem is located.
+   5.3 State clearly how the patched tests reproduce the issue.
+   5.4 State clearly the best practices to take into account in the fix.
+   5.5 State clearly how to fix the problem.
+
+Phase 6. FIX IMPLEMENTATION: Edit the source code (non-test files only) to implement your chosen solution.
+   6.1 Make minimal, focused changes to fix the issue.
+
+Phase 7. VERIFICATION: Test your implementation thoroughly.
+   7.1 Run the patched tests identified in Phase 4 and confirm they now pass.
+   7.2 Run existing tests related to the modified code to ensure you haven't broken anything.
+   7.3 Do NOT modify the patched test files to make them pass; only change non-test source code.
+
+8. FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit {{ instance.base_commit }}.
+   8.1 Ensure you've fully addressed all requirements.
+   8.2 Run any tests in the repository related to:
+     8.2.1 The issue you are fixing
+     8.2.2 The files you modified
+     8.2.3 The functions you changed
+   8.3 If any tests fail, revise your implementation (non-test files only) until all tests pass.
+
+Be thorough in your exploration, testing, and reasoning. It's fine if your thinking process is lengthy - quality and completeness are more important than brevity.
