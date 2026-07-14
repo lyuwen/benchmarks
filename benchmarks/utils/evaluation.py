@@ -2,7 +2,6 @@
 Evaluation orchestrator.
 """
 
-import base64
 import json
 import os
 import sys
@@ -139,34 +138,55 @@ class Evaluation(ABC, BaseModel):
             instance: The evaluation instance being processed
         """
         try:
-            # Create command to tar and base64 encode the conversations directory
-            conv_cmd = (
+            # Build the archive inside the container, then download it via the
+            # dedicated file-download endpoint. Piping a large base64 blob back
+            # through execute_command truncates/corrupts it: the remote bash
+            # search API caps results at 100 BashOutput events with no
+            # pagination, so big archives lose their tail and fail to decode
+            # ("Incorrect padding"). file_download streams the full file over
+            # HTTP instead.
+            remote_tar_path = "/tmp/conversations.tar.gz"
+            tar_cmd = workspace.execute_command(
                 "cd / && "
                 "if [ -d workspace/conversations ]; then "
-                "tar -czf - workspace/conversations | base64; "
-                "else echo ''; fi"
+                f"tar -czf {remote_tar_path} workspace/conversations; "
+                "else exit 3; fi"
             )
-            tar_cmd = workspace.execute_command(conv_cmd)
 
-            if tar_cmd.exit_code == 0 and tar_cmd.stdout.strip():
-                # Save to instance-specific file to support parallel execution
-                conversations_dir = (
-                    Path(self.metadata.eval_output_dir) / "conversations"
+            if tar_cmd.exit_code == 3:
+                logger.debug(
+                    "[child] No conversation archive for %s (directory not found)",
+                    instance.id,
                 )
-                conversations_dir.mkdir(parents=True, exist_ok=True)
-                conv_tar_path = conversations_dir / f"{instance.id}.tar.gz"
+                return
 
-                # Decode and write the tar.gz file
-                conv_tar_path.write_bytes(base64.b64decode(tar_cmd.stdout))
+            if tar_cmd.exit_code != 0:
+                logger.warning(
+                    "[child] Failed to build conversation archive for %s "
+                    "(exit_code=%s): %s",
+                    instance.id,
+                    tar_cmd.exit_code,
+                    tar_cmd.stderr,
+                )
+                return
+
+            # Save to instance-specific file to support parallel execution
+            conversations_dir = Path(self.metadata.eval_output_dir) / "conversations"
+            conversations_dir.mkdir(parents=True, exist_ok=True)
+            conv_tar_path = conversations_dir / f"{instance.id}.tar.gz"
+
+            result = workspace.file_download(remote_tar_path, conv_tar_path)
+            if result.success:
                 logger.info(
                     "[child] Saved conversation archive for %s to %s",
                     instance.id,
                     conv_tar_path,
                 )
             else:
-                logger.debug(
-                    "[child] No conversation archive for %s (directory not found or empty)",
+                logger.warning(
+                    "[child] Failed to download conversation archive for %s: %s",
                     instance.id,
+                    result.error,
                 )
         except Exception as e:
             logger.warning(
