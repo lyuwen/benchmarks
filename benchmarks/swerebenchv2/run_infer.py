@@ -103,6 +103,10 @@ class SWERebenchV2Evaluation(Evaluation):
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
     )
+    docker_image_prefix: str | None = Field(
+        default=None,
+        description="Override image namespace/registry (e.g., 'myregistry.com/myorg')",
+    )
     judge: ExecutionBasedJudge | None = Field(
         default=None, description="Optional execution-based judge"
     )
@@ -133,7 +137,7 @@ class SWERebenchV2Evaluation(Evaluation):
     ) -> RemoteWorkspace:
         """Create workspace from the dataset's image_name field."""
         official_docker_image = get_official_docker_image(
-            str(instance.data["image_name"])
+            str(instance.data["image_name"]), self.docker_image_prefix
         )
         build_target = "source-minimal"
         custom_tag = extract_custom_tag(official_docker_image)
@@ -456,6 +460,18 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
+    parser.add_argument(
+        "--docker-image-prefix",
+        type=str,
+        default=None,
+        help=(
+            "Override image namespace/registry. Replaces everything before "
+            "the last '/' in the dataset image_name. "
+            "E.g., 'myregistry.com/myorg' turns "
+            "'docker.io/swerebenchv2/owner-repo:tag' into "
+            "'myregistry.com/myorg/owner-repo:tag'."
+        ),
+    )
     add_judge_args(parser, default_judge="swerebenchv2")
     args = parser.parse_args()
 
@@ -519,6 +535,7 @@ def main() -> None:
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
+        docker_image_prefix=args.docker_image_prefix,
         judge=judge,
     )
 

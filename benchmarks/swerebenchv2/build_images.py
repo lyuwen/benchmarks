@@ -22,15 +22,27 @@ from openhands.sdk import get_logger
 logger = get_logger(__name__)
 
 
-def get_official_docker_image(image_name: str) -> str:
+def get_official_docker_image(image_name: str, prefix: str | None = None) -> str:
     """Normalize SWE-rebench-V2 image name to a full Docker reference.
 
     Images in the dataset are stored as e.g.:
         docker.io/swerebenchv2/unidata-netcdf-c:1925-ad6bff3
-    If the prefix is missing, prepend docker.io/.
+
+    If ``prefix`` is provided, everything before the last '/' (the
+    registry/namespace) is replaced while the image name/tag is kept, e.g.::
+
+        get_official_docker_image(
+            "docker.io/swerebenchv2/unidata-netcdf-c:1925-ad6bff3",
+            "myregistry.com/myorg",
+        ) -> "myregistry.com/myorg/unidata-netcdf-c:1925-ad6bff3"
+
+    If no prefix is given and the registry is missing, prepend docker.io/.
     """
     official_image_name: str = image_name.lower().strip()
-    if not official_image_name.startswith("docker.io"):
+    if prefix:
+        _, _, name = official_image_name.rpartition("/")
+        official_image_name = f"{prefix.rstrip('/')}/{name}"
+    elif not official_image_name.startswith("docker.io"):
         official_image_name = f"docker.io/{official_image_name}"
     logger.debug(f"Official SWE-rebench-V2 image: {official_image_name}")
     return official_image_name

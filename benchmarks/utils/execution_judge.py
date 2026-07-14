@@ -176,7 +176,7 @@ def create_judge(args: Namespace) -> ExecutionBasedJudge | None:
         kwargs["force_rebuild"] = force_rebuild
 
     # Judge-specific arguments
-    if name == "scaleswe":
+    if name in ("scaleswe", "swerebenchv2"):
         docker_image_prefix = getattr(args, "docker_image_prefix", None)
         if docker_image_prefix is not None:
             kwargs["docker_image_prefix"] = docker_image_prefix

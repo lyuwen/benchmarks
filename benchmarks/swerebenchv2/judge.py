@@ -41,6 +41,18 @@ def _normalize_test_name(name: str) -> str:
     return name.strip()
 
 
+def _resolve_image_name(image_name: str, prefix: str | None = None) -> str:
+    """Override an image's registry/namespace prefix, keeping name and tag.
+
+    Mirrors ``get_official_docker_image`` so judge evaluation targets the
+    same image the inference workspace was built from.
+    """
+    if not prefix:
+        return image_name
+    _, _, name = image_name.rpartition("/")
+    return f"{prefix.rstrip('/')}/{name}"
+
+
 def _get_log_parsers():
     """Lazy-import V2 log parsers to avoid import-time side effects."""
     if str(_V2_ROOT) not in sys.path:
@@ -77,6 +89,10 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
     force_rebuild: bool = Field(
         default=False,
         description="Force rebuild Docker images (unused, for CLI compat)",
+    )
+    docker_image_prefix: str | None = Field(
+        default=None,
+        description="Override image namespace/registry prefix",
     )
 
     def judge(
@@ -139,6 +155,7 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
         if not image:
             logger.error("Instance %s has no image_name", instance_id)
             return None
+        image = _resolve_image_name(image, self.docker_image_prefix)
 
         workdir = f"/{repo.split('/')[-1]}"
 
@@ -190,9 +207,11 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
         pass_to_pass = instance_data.get("PASS_TO_PASS", [])
         if isinstance(pass_to_pass, str):
             pass_to_pass = json.loads(pass_to_pass)
+        pass_to_pass = list(pass_to_pass)
         fail_to_pass_list = instance_data.get("FAIL_TO_PASS", [])
         if isinstance(fail_to_pass_list, str):
             fail_to_pass_list = json.loads(fail_to_pass_list)
+        fail_to_pass_list = list(fail_to_pass_list)
 
         expected_passed = sorted(
             _normalize_test_name(n)
