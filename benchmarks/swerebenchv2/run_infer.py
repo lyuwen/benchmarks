@@ -310,6 +310,20 @@ class SWERebenchV2Evaluation(Evaluation):
             f"cp repo failed: {cp_repo.stderr}"
         )
 
+        # Replace the original source repo with a symlink to the workspace copy.
+        # Some agents ignore the instructed working directory and edit the
+        # source tree (e.g. /pandas) instead of {repo_path} (/workspace/pandas).
+        # Those edits are then invisible to patch extraction, which diffs only
+        # {repo_path}. Removing the source and symlinking it to {repo_path}
+        # ensures any path-based edit lands in the single tracked repo.
+        rp_no_slash = repo_path.rstrip("/")
+        link_repo = workspace.execute_command(
+            f"rm -rf {source_repo_path} ; ln -s {rp_no_slash} {source_repo_path}"
+        )
+        assert link_repo.exit_code == 0, (
+            f"symlink repo failed: {link_repo.stderr}"
+        )
+
         git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
         assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
 
