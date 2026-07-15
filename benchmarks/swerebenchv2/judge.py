@@ -3,8 +3,8 @@ SWE-rebench-V2 execution-based judge.
 
 Evaluates agent patches by applying them alongside the ground-truth test
 patch in the instance's Docker image, running the test command, and parsing
-results with the instance-specific log parser from
-``thirdparty/SWE-rebench-V2/lib/agent/log_parsers.py``.
+results with the instance-specific log parser from the vendored
+``benchmarks/swerebenchv2/lib/agent/log_parsers.py``.
 """
 
 from __future__ import annotations
@@ -25,8 +25,9 @@ from benchmarks.utils.execution_judge import ExecutionBasedJudge, register_judge
 
 logger = logging.getLogger(__name__)
 
-_V2_ROOT = Path(__file__).resolve().parents[2] / "thirdparty" / "SWE-rebench-V2"
-_LIB_DIR = _V2_ROOT / "lib"
+# Vendored copy of the SWE-rebench-V2 log parsers, kept alongside this task so
+# evaluation does not depend on the (large) thirdparty checkout being present.
+_LIB_PARENT = Path(__file__).resolve().parent
 
 _TIMING_NORMALIZE_RES = [
     re.compile(r"\s*\[\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\]\s*$", re.IGNORECASE),
@@ -54,12 +55,10 @@ def _resolve_image_name(image_name: str, prefix: str | None = None) -> str:
 
 
 def _get_log_parsers():
-    """Lazy-import V2 log parsers to avoid import-time side effects."""
-    if str(_V2_ROOT) not in sys.path:
-        sys.path.insert(0, str(_V2_ROOT))
-    if str(_LIB_DIR) not in sys.path:
-        sys.path.insert(0, str(_LIB_DIR))
-    from agent import log_parsers
+    """Lazy-import vendored V2 log parsers to avoid import-time side effects."""
+    if str(_LIB_PARENT) not in sys.path:
+        sys.path.insert(0, str(_LIB_PARENT))
+    from lib.agent import log_parsers
     return log_parsers
 
 

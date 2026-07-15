@@ -28,18 +28,16 @@ from openhands.sdk import get_logger
 
 logger = get_logger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-V2_ROOT = REPO_ROOT / "thirdparty" / "SWE-rebench-V2"
-LIB_DIR = V2_ROOT / "lib"
+# Vendored copy of the V2 log parsers lives beside this task so evaluation does
+# not require the (large) thirdparty checkout.
+LIB_PARENT = Path(__file__).resolve().parent
 
 
 def _get_log_parsers():
-    """Lazy-import V2 log parsers to avoid import-time failures."""
-    if str(V2_ROOT) not in sys.path:
-        sys.path.insert(0, str(V2_ROOT))
-    if str(LIB_DIR) not in sys.path:
-        sys.path.insert(0, str(LIB_DIR))
-    from agent import log_parsers
+    """Lazy-import vendored V2 log parsers to avoid import-time failures."""
+    if str(LIB_PARENT) not in sys.path:
+        sys.path.insert(0, str(LIB_PARENT))
+    from lib.agent import log_parsers
     return log_parsers
 
 _TIMING_NORMALIZE_RES = [
