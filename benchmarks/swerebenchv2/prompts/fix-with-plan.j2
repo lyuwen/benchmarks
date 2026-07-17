@@ -67,8 +67,13 @@ The development environment is pre-configured. Explore the project structure to 
 
 Follow these phases to resolve the issue, using the <plan> as your guide:
 
+How to work with the plan: the plan is an authoritative starting point produced from a careful earlier pass, but it is not infallible and it was written WITHOUT actually applying the fix. Your ultimate objective is to resolve the <issue_description> correctly — not to follow the plan literally. Handle uncertainty as follows:
+   - When the plan's assumptions turn out to be wrong when you inspect the actual code (wrong file/function, an approach that doesn't compile or breaks other behavior, an expected test outcome that doesn't hold): prefer what the code actually shows, adapt, and note the deviation.
+   - When the plan explicitly flags an ambiguity or open question, or you hit a genuinely ambiguous case where the issue and codebase do not make the intended behavior clear: do NOT guess or silently commit to one interpretation. Choose the most conservative, minimal, backward-compatible behavior that satisfies the <issue_description>, keep your change narrowly scoped to what the issue clearly requires, and DEFER the ambiguous part. Record each such deferred/ambiguous case explicitly and surface it in your final finish message (what is ambiguous, the options you saw, what you did in the meantime, and what a maintainer would need to decide).
+When you deviate from or extend the plan, do so deliberately and briefly explain the reasoning; do not pad the change with unrelated edits.
+
 Phase 1. GROUND THE PLAN: read the <plan> together with the <issue_description>.
-   1.1 Confirm you understand which files, functions, and methods the plan targets.
+   1.1 Confirm you understand which files, functions, and methods the plan targets, and note any ambiguities or open questions the plan flagged so you can track them through to your final report.
    1.2 Open the files the plan references and verify they match the plan's assumptions. If reality diverges from the plan, prefer what the code actually shows and adapt the plan accordingly — the plan is a strong guide, not an infallible one.
 
 Phase 2. REPRODUCTION TEST: following the plan's reproduction-tests section, create a script that reproduces the issue.
@@ -82,12 +87,13 @@ Phase 3. FIX IMPLEMENTATION: following the plan's fix-implementation section, ed
 
 Phase 4. VERIFICATION: following the plan's test-strategy section, test your implementation thoroughly.
    4.1 Run your reproduction script to verify the core issue is fixed.
-   4.2 Implement and run the boundary and special-value cases the plan enumerated (empty/single/zero/negative/min-max inputs, null/NaN, error modes, etc.), following the plan's case-to-test mapping and expected outcomes.
+   4.2 Implement and run the boundary and special-value cases the plan enumerated (empty/single/zero/negative/min-max inputs, null/NaN, error modes, etc.), following the plan's case-to-test mapping and expected outcomes. If you discover a boundary case the plan missed, add it. If a case's correct behavior is genuinely ambiguous, do not force an assertion — use the conservative behavior, mark the case as deferred, and flag it in your final report rather than guessing.
    4.3 Run the plan's execution plan (its exact test commands) plus the existing tests related to the modified code to ensure you haven't broken anything.
 
 Phase 5. FINAL REVIEW: carefully re-read the <issue_description> and the <plan>, and compare your changes with the base commit {{ instance.base_commit }}.
    5.1 Ensure you've fully addressed all requirements.
    5.2 Run any tests in the repository related to the issue, the files you modified, and the functions you changed.
-   5.3 If any tests fail, revise your implementation until all tests pass.
+   5.3 If any tests fail, revise your implementation until all tests pass. If a test failure reveals that the plan's approach is fundamentally flawed, step back and correct the approach rather than forcing the plan's original steps to pass.
+   5.4 If you deferred any ambiguous cases or deviated from the plan, summarize them clearly at the end (in your final message when you finish): what was ambiguous or changed, the interpretation you fell back on, and what a maintainer would need to decide to resolve it.
 
 Be thorough in your implementation, testing, and reasoning. It's fine if your thinking process is lengthy — quality and completeness are more important than brevity.
