@@ -1,0 +1,139 @@
+{% set lang = instance.language | default("") | lower %}
+{% if lang %}
+I have access to a {{ lang }} code repository in the directory {{ instance.repo_path }} . You can explore and read files using the available tools. Consider the following issue description:
+{% else %}
+I have access to a code repository in the directory {{ instance.repo_path }} . You can explore and read files using the available tools. Consider the following issue description:
+{% endif %}
+
+<issue_description>
+{{ instance.problem_statement }}
+</issue_description>
+{% if instance.interface %}
+
+The following interfaces of the affected functions/methods/classes are provided to help you understand the intended API surface. Use them to orient your exploration and planning:
+
+<interface>
+{{ instance.interface }}
+</interface>
+{% endif %}
+
+Your task is EXPLORATION AND PLANNING ONLY. You must NOT edit any source code, create, delete, or modify any files in the repository. Do not apply any fix. Your sole deliverable is a thorough, well-reasoned plan for how the issue would be resolved.
+
+The development environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+
+<environment_hints>
+{% if lang == "python" %}
+The Python environment is ready to use — the interpreter and all project dependencies are pre-installed on PATH. No conda or virtualenv activation is needed. You can run tests with `pytest` or whichever test runner the project uses.
+{% elif lang == "c" or lang == "cpp" or lang == "c++" %}
+The C/C++ build toolchain (gcc, g++, cmake, make, autoconf, libtool) is pre-installed. Build the project using its existing build system (Makefile, CMakeLists.txt, autotools, etc.).
+{% elif lang == "go" %}
+Go is installed at `/usr/local/go/bin` and is already on PATH. Use `go build`, `go test`, etc. as usual.
+{% elif lang == "rust" %}
+The Rust toolchain (rustc, cargo) is pre-installed and on PATH. Use `cargo build`, `cargo test`, etc.
+{% elif lang == "java" %}
+Java (Eclipse Temurin JDK) and Maven are pre-installed. Maven Daemon (mvnd) is also available. Use `mvn`, `mvnd`, or `ant`/`gradle` as the project requires.
+{% elif lang == "javascript" or lang == "typescript" or lang == "node" %}
+Node.js and npm are pre-installed. pnpm is available via corepack. Google Chrome is installed for browser testing if needed. Use the project's package manager (npm, yarn, pnpm) and test runner (jest, mocha, vitest, etc.).
+{% elif lang == "ruby" %}
+Ruby and Bundler are pre-installed and on PATH. Use `bundle exec` to run tests with the project's test framework (minitest, rspec, etc.).
+{% elif lang == "csharp" or lang == "c#" %}
+The .NET SDK 8.0 is pre-installed (dotnet CLI on PATH). Use `dotnet build`, `dotnet test`, etc.
+{% elif lang == "php" %}
+PHP and Composer are pre-installed. Use `composer` for dependency management and the project's test runner (phpunit, etc.).
+{% elif lang == "swift" %}
+Swift 5.10 is pre-installed and on PATH. Use `swift build`, `swift test`, or the project's build system.
+{% elif lang == "elixir" %}
+Elixir 1.16 and Erlang/OTP are pre-installed. Hex and Rebar are configured. Use `mix test` or the project's test runner.
+{% elif lang == "scala" or lang == "solidity" %}
+Foundry (forge, cast, anvil) and Node.js are pre-installed. Solidity compiler is available via solc-select. Use the project's build/test system.
+{% elif lang == "kotlin" %}
+Kotlin and Gradle are pre-installed via SDKMAN (on PATH). Use `gradle test` or the project's build system.
+{% elif lang == "dart" %}
+The Dart SDK is pre-installed and on PATH. Use `dart test` or the project's test runner.
+{% elif lang == "julia" %}
+Julia 1.10 is pre-installed and on PATH. Use `julia` to run tests.
+{% elif lang == "lua" %}
+Lua 5.4 and LuaRocks are pre-installed. Use the project's test runner.
+{% elif lang == "r" %}
+R 4.4.1 is pre-installed. Use `Rscript` or `R CMD check` for testing.
+{% elif lang == "ocaml" %}
+OCaml 5.2.1 is installed via opam. You MUST activate the opam environment first:
+  eval "$(opam env)"
+Then use `dune`, `make`, or the project's build system.
+{% elif lang == "clojure" %}
+Clojure tools.deps (clj), Leiningen (lein), and Boot are pre-installed with JDK 21. Use the project's build tool (lein test, clj -X:test, etc.).
+{% else %}
+The development environment is pre-configured. Explore the project structure to determine the build system and test runner.
+{% endif %}
+</environment_hints>
+
+Follow these phases. Remember: you may read files, search the codebase, and run tests or exploratory commands to understand behavior, but you must NOT modify the codebase or write any files.
+
+Phase 1. READING: read the problem and reword it in clearer terms
+   1.1 If there are code or config snippets, express in words any best practices or conventions in them.
+   1.2 Highlight message errors, method names, variables, file names, stack traces, and technical details.
+   1.3 Explain the problem in clear terms.
+   1.4 Enumerate the steps to reproduce the problem.
+   1.5 Highlight any best practices to take into account when testing and fixing the issue.
+
+Phase 2. UNDERSTANDING THE PROJECT: explore the codebase and learn how it works
+   2.1 Map the overall project structure and identify the packages/modules relevant to the issue.
+   2.2 Read the source of the affected functions/methods/classes (use the <interface> section above to guide you) and understand how they are called and how data flows through them.
+   2.3 Identify related helpers, abstractions, and conventions the fix would need to respect.
+
+Phase 3. TEST DISCOVERY: understand how the tests are structured and run
+{% if lang == "python" %}
+   3.1 Check for pytest.ini, setup.cfg, pyproject.toml, or tox.ini for test configuration.
+   3.2 Run the relevant existing tests with `pytest` (or the project's configured test runner) to observe the current state.
+{% elif lang == "go" %}
+   3.1 Run `go test ./...` to see the current test state.
+   3.2 Check for Makefile or test scripts that may wrap `go test` with specific flags.
+{% elif lang == "rust" %}
+   3.1 Run `cargo test` to see the current test state.
+   3.2 Check Cargo.toml for workspace members or feature flags that affect testing.
+{% elif lang == "java" %}
+   3.1 Check for pom.xml (Maven), build.gradle (Gradle), or build.xml (Ant).
+   3.2 Run the relevant tests with `mvn test`, `gradle test`, or `ant test` as appropriate.
+{% elif lang == "c" or lang == "cpp" or lang == "c++" %}
+   3.1 Check for CMakeLists.txt, Makefile, configure.ac, or meson.build.
+   3.2 Build the project and run the relevant tests to observe the current state.
+{% elif lang == "javascript" or lang == "typescript" or lang == "node" %}
+   3.1 Check package.json for test scripts (`npm test`, `yarn test`, or `pnpm test`).
+   3.2 Identify the test runner (jest, mocha, vitest, karma, etc.) and run the relevant tests.
+{% elif lang == "ruby" %}
+   3.1 Check for Gemfile, Rakefile, or .rspec configuration.
+   3.2 Run the relevant tests with `bundle exec rake test` or `bundle exec rspec`.
+{% elif lang == "ocaml" %}
+   3.1 Activate the opam environment: `eval "$(opam env)"`.
+   3.2 Check for dune-project, Makefile, or other build configuration, then run the relevant tests (e.g., `dune runtest`).
+{% else %}
+   3.1 Find the project's build/test configuration.
+   3.2 Follow any README or CONTRIBUTING guide, then run the relevant tests to observe the current state.
+{% endif %}
+   3.3 Locate the existing test files that cover the affected code, and understand their format and conventions so a reproduction test would fit in naturally.
+
+Phase 4. LOCATING THE PROBLEM: find the files and code that would need to change
+   4.1 Use `grep` to search for relevant methods, classes, keywords, and error messages.
+   4.2 Identify all files related to the problem statement.
+   4.3 Determine the most likely location(s) where the fix belongs and explain why.
+
+Phase 5. PLANNING: produce a concrete, actionable plan (do NOT implement it). The plan must cover:
+   5.1 REPRODUCTION TESTS: how you would create a test that reproduces the issue — which test file it belongs in, what it would assert, and how it fails today.
+   5.2 FIX IMPLEMENTATION: precisely what changes you would make and where (files, functions, methods), and why this approach is correct and minimal.
+   5.3 TESTING THE FIX: which tests (new reproduction test plus existing related tests) you would run to verify the fix works and nothing regresses.
+   5.4 RISKS AND EDGE CASES: edge cases the fix must handle and any risks or trade-offs.
+   5.5 TIME ESTIMATE: estimate the total development effort needed to carry out this plan — writing the reproduction tests, implementing the fix, and verifying it. The plan above is the justification, so give a single number only. Emit this section in EXACTLY the following machine-parseable format, on its own line, so it can be extracted programmatically later. Report the duration in hours as a plain decimal number (no units, no range — a single best-estimate number):
+
+```
+### TIME_ESTIMATE
+total_hours: <number>
+```
+
+Phase 6. SELF-REVIEW: critically review your own plan.
+   6.1 Re-read the problem description and the <interface> section and check the plan fully addresses every requirement.
+   6.2 Look for gaps, incorrect assumptions, missed files, or steps that would not actually work.
+   6.3 Revise and iterate on the plan as many times as needed until you are confident it is solid, complete, and correct.
+
+When — and only when — you are confident the plan is solid, call the `finish` tool. Pass the finalized plan as the message, organized clearly into the reproduction tests, fix implementation, testing, risks/edge-cases, and time-estimate sections described above. The message MUST include the `### TIME_ESTIMATE` block verbatim in the exact key/value format specified in Phase 5.5 so it can be parsed programmatically.
+
+Be thorough in your exploration, reasoning, and planning. It's fine if your process is lengthy — quality and completeness of the plan are what matter. Do NOT edit the codebase or create any files.
