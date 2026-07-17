@@ -80,10 +80,10 @@ Phase 3. FIX IMPLEMENTATION: following the plan's fix-implementation section, ed
    3.1 Make minimal, focused changes to non-test files to fix the issue.
    3.2 Keep the changes consistent with the conventions and abstractions the plan identified.
 
-Phase 4. VERIFICATION: following the plan's testing section, test your implementation thoroughly.
-   4.1 Run your reproduction script to verify the fix works.
-   4.2 Add edge cases (including those called out in the plan's risks/edge-cases section) to ensure comprehensive coverage.
-   4.3 Run existing tests related to the modified code to ensure you haven't broken anything.
+Phase 4. VERIFICATION: following the plan's test-strategy section, test your implementation thoroughly.
+   4.1 Run your reproduction script to verify the core issue is fixed.
+   4.2 Implement and run the boundary and special-value cases the plan enumerated (empty/single/zero/negative/min-max inputs, null/NaN, error modes, etc.), following the plan's case-to-test mapping and expected outcomes.
+   4.3 Run the plan's execution plan (its exact test commands) plus the existing tests related to the modified code to ensure you haven't broken anything.
 
 Phase 5. FINAL REVIEW: carefully re-read the <issue_description> and the <plan>, and compare your changes with the base commit {{ instance.base_commit }}.
    5.1 Ensure you've fully addressed all requirements.

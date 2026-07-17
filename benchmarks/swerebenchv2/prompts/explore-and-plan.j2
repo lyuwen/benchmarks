@@ -118,11 +118,21 @@ Phase 4. LOCATING THE PROBLEM: find the files and code that would need to change
    4.3 Determine the most likely location(s) where the fix belongs and explain why.
 
 Phase 5. PLANNING: produce a concrete, actionable plan (do NOT implement it). The plan must cover:
-   5.1 REPRODUCTION TESTS: how you would create a test that reproduces the issue — which test file it belongs in, what it would assert, and how it fails today.
+   5.1 REPRODUCTION TESTS: how you would create a test that reproduces the core issue — which test file it belongs in, the exact scenario it sets up, what it would assert, and how it fails today (the observed vs. expected behavior).
    5.2 FIX IMPLEMENTATION: precisely what changes you would make and where (files, functions, methods), and why this approach is correct and minimal.
-   5.3 TESTING THE FIX: which tests (new reproduction test plus existing related tests) you would run to verify the fix works and nothing regresses.
-   5.4 RISKS AND EDGE CASES: edge cases the fix must handle and any risks or trade-offs.
-   5.5 TIME ESTIMATE: estimate the total development effort needed to carry out this plan — writing the reproduction tests, implementing the fix, and verifying it. The plan above is the justification, so give a single number only. Emit this section in EXACTLY the following machine-parseable format, on its own line, so it can be extracted programmatically later. Report the duration in hours as a plain decimal number (no units, no range — a single best-estimate number):
+   5.3 TEST STRATEGY: design a thorough test plan that goes well beyond the single reproduction case. This is the most important part of the plan — be specific and exhaustive. It must cover:
+       5.3.1 CASE ENUMERATION: systematically enumerate the input/behavior space of the affected code and list the concrete cases worth testing. Explicitly work through these categories and state which apply:
+             - Happy-path / typical cases that must keep working.
+             - Boundary values: empty inputs, single-element inputs, zero, negative numbers, maximum/minimum values, off-by-one edges, first/last elements, thresholds where behavior changes.
+             - Special / degenerate values: null/None/nil, NaN/inf, empty string, whitespace, zero-length collections, duplicate or unsorted data, unicode/encoding edges.
+             - Type and shape variations relevant to the affected API (e.g. different dtypes, nested vs. flat, mixed types).
+             - Error and failure modes: invalid inputs that should raise, and the exact exception type/message expected.
+             - Interaction/regression cases: nearby behaviors or call sites that could be affected by the fix and must be shown NOT to regress.
+       5.3.2 CASE-TO-TEST MAPPING: for each case above that you would test, specify the concrete test (name, the file it belongs in, the input it constructs, and the exact assertion / expected output). Prefer table-driven or parametrized tests where the framework supports them, following the repository's existing conventions.
+       5.3.3 EXPECTED OUTCOMES: for every case, state the expected result BEFORE the fix (which fail, which already pass) and AFTER the fix (all pass), so the tests unambiguously demonstrate the fix.
+       5.3.4 EXECUTION PLAN: the exact commands to run these tests (test runner, selection flags, specific test paths/ids), the order to run them in, and how to interpret pass/fail. Include both the new tests and the existing related tests that guard against regressions.
+   5.4 RISKS AND EDGE CASES: call out the trickiest edge cases from 5.3, any cases you are unsure how the code should behave for (and how you would resolve that ambiguity), and any risks or trade-offs in the fix.
+   5.5 TIME ESTIMATE: estimate the total development effort needed to carry out this plan — writing the reproduction and boundary-case tests, implementing the fix, and verifying it. The plan above is the justification, so give a single number only. Emit this section in EXACTLY the following machine-parseable format, on its own line, so it can be extracted programmatically later. Report the duration in hours as a plain decimal number (no units, no range — a single best-estimate number):
 
 ```
 ### TIME_ESTIMATE
@@ -132,8 +142,9 @@ total_hours: <number>
 Phase 6. SELF-REVIEW: critically review your own plan.
    6.1 Re-read the problem description and the <interface> section and check the plan fully addresses every requirement.
    6.2 Look for gaps, incorrect assumptions, missed files, or steps that would not actually work.
-   6.3 Revise and iterate on the plan as many times as needed until you are confident it is solid, complete, and correct.
+   6.3 Scrutinize the TEST STRATEGY specifically: are there boundary or special-value cases you skipped? Would the tests actually fail before the fix and pass after? Are the expected outcomes correct? Add any missing cases.
+   6.4 Revise and iterate on the plan as many times as needed until you are confident it is solid, complete, and correct.
 
-When — and only when — you are confident the plan is solid, call the `finish` tool. Pass the finalized plan as the message, organized clearly into the reproduction tests, fix implementation, testing, risks/edge-cases, and time-estimate sections described above. The message MUST include the `### TIME_ESTIMATE` block verbatim in the exact key/value format specified in Phase 5.5 so it can be parsed programmatically.
+When — and only when — you are confident the plan is solid, call the `finish` tool. Pass the finalized plan as the message, organized clearly into the reproduction tests, fix implementation, test strategy (with its enumerated boundary cases, case-to-test mapping, expected outcomes, and execution plan), risks/edge-cases, and time-estimate sections described above. The message MUST include the `### TIME_ESTIMATE` block verbatim in the exact key/value format specified in Phase 5.5 so it can be parsed programmatically.
 
 Be thorough in your exploration, reasoning, and planning. It's fine if your process is lengthy — quality and completeness of the plan are what matter. Do NOT edit the codebase or create any files.
