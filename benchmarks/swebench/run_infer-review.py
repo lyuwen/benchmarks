@@ -61,6 +61,17 @@ from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspa
 logger = get_logger(__name__)
 
 
+def fake_user_response_review(
+    conversation: "BaseConversation",
+    encapsulate_solution: bool = False,
+) -> str:
+    return (
+        "Please continue reviewing the applied patch. When you have reached a "
+        "judgement, submit it with the `finish` tool, including the machine-parseable "
+        "### VERDICT block (decision: pass|fail, confidence, reasoning) in the message."
+    )
+
+
 def get_instruction(
     instance: dict,
     metadata: EvalMetadata,
@@ -457,9 +468,13 @@ class SWEBenchEvaluation(Evaluation):
             review_mode=self.review_mode,
         )
         conversation.send_message(instruction)
-        # Run conversation with fake user responses to handle agent messages
+        # Run conversation with a review-specific fake user response: the default
+        # response nudges the agent to keep *fixing* the task, which is wrong for
+        # a reviewer. This one nudges it to finish with a verdict instead.
         run_conversation_with_fake_user_response(
-            conversation, timeout=self.metadata.conversation_timeout
+            conversation,
+            timeout=self.metadata.conversation_timeout,
+            fake_user_response_fn=fake_user_response_review,
         )
 
         # Extract the reviewer's verdict from the final finish message.
