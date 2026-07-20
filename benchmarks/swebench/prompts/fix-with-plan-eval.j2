@@ -1,0 +1,47 @@
+I have access to a python code repository in the directory {{ instance.repo_path }} . You can explore and modify files using the available tools.
+
+You are given an implementation plan produced by a prior exploration-and-planning pass over this repository. The plan is your COMPLETE and ONLY specification of the work: the original issue it was written for is intentionally hidden from you. Your job is to implement EXACTLY what the plan describes — no more, no less.
+
+<plan>
+{{ instance.plan }}
+</plan>
+
+Your task is to make the changes to the non-test files in {{ instance.repo_path }} that the <plan> prescribes, so that the repository ends up in the state the plan intends.
+I've already taken care of all changes to any of the test files. This means you DON'T have to modify the testing logic or any of the tests in any way!
+Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+
+How to work with the plan: the plan is your authoritative and sole source of truth. Implement precisely what it prescribes.
+   - Do NOT invent requirements, add behavior, or make changes the plan does not call for, even if you suspect a broader problem. If the plan does not mention it, it is out of scope.
+   - Do NOT try to reconstruct or guess the hidden original issue and design toward it. Build only what the plan states.
+   - Follow the plan's stated file, function, and method targets and its described approach. Use the codebase only to LOCATE the exact edit points the plan refers to and to make its instructions concrete (correct line/context, signatures, imports) — not to second-guess the plan's design.
+   - If a detail is genuinely underspecified by the plan, make the smallest, most conservative choice that satisfies the plan's stated intent, and note it in your final message. Do not expand scope to cover cases the plan is silent about.
+
+Follow these phases, using the <plan> as your specification:
+
+Phase 1. GROUND THE PLAN: read the <plan> carefully.
+   1.1 Identify every file, function, and method the plan says to change, and exactly what change it prescribes for each.
+   1.2 Open those files in {{ instance.repo_path }} and locate the precise edit points. Confirm the surrounding code matches what the plan describes so your edits land correctly.
+
+Phase 2. REPRODUCTION TEST: if the plan specifies a reproduction test, follow its reproduction-tests section to create a script that exercises the behavior the plan targets.
+   2.1 Activate the environment by running
+       . /opt/miniconda3/etc/profile.d/conda.sh ; conda activate testbed
+   2.2 Look at existing test files in the repository to understand the test format/structure.
+   2.3 Create the reproduction script exactly as the plan describes, and run it to observe the current (pre-change) behavior the plan predicts.
+
+Phase 3. IMPLEMENTATION: apply the plan's fix-implementation section to the source code.
+   3.1 Make exactly the changes the plan prescribes to the non-test files, at the locations it names.
+   3.2 If the plan enumerates multiple code paths / edit points, implement every one it lists — do not stop after the first.
+   3.3 Keep the changes consistent with the conventions and abstractions the plan identified. Make no edits the plan does not call for.
+
+Phase 4. VERIFICATION: verify your implementation against the plan's own test strategy.
+   4.1 Run the reproduction script (if any) to confirm the behavior now matches what the plan says the fix should produce.
+   4.2 Implement and run the cases the plan's test-strategy section enumerates, following its case-to-test mapping and expected outcomes.
+   4.3 Run the plan's execution plan (its exact test commands) plus the existing tests related to the code you changed, to confirm you have not broken anything.
+
+Phase 5. FINAL REVIEW: re-read the <plan> and compare your changes against it and against the base commit {{ instance.base_commit }}.
+   5.1 Confirm you have implemented every item the plan prescribes, and nothing beyond it.
+   5.2 Confirm each edit point the plan named has been addressed.
+   5.3 If any test the plan specifies fails, revise your implementation so it faithfully realizes the plan's intent.
+   5.4 In your final message, note any point where the plan was underspecified and the conservative choice you made, so the plan's completeness can be assessed.
+
+Be thorough and faithful to the plan. Implement exactly what it specifies — quality and fidelity to the plan are what matter.
