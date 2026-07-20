@@ -1,0 +1,57 @@
+I have access to a python code repository in the directory {{ instance.repo_path }} . You can explore and read files using the available tools.
+
+Your task is to REVIEW a proposed fix for the issue described below and deliver a judgement on whether it correctly resolves the issue. A candidate patch has ALREADY been applied to the repository in {{ instance.repo_path }} — you are reviewing the current state of the code, not writing a fix.
+
+<issue_description>
+{{ instance.problem_statement }}
+</issue_description>
+
+The following patch is the proposed fix under review. It has already been applied to the working tree:
+
+<patch>
+{{ instance.patch }}
+</patch>
+
+You must NOT edit, create, or delete any files, and you must NOT modify the applied patch. Your sole deliverable is a well-reasoned judgement.
+{% if review_mode == "readonly" %}
+This is a READ-ONLY review: reason from careful reading of the patch and the surrounding source code. You have a file viewer but no shell — you cannot run tests or execute code. Base your judgement on code inspection and reasoning about behavior.
+{% else %}
+The development Python environment is already set up (all dependencies installed). You may read the code AND run the repository's tests to empirically verify the fix. You must not modify any source or test files — only read and run them.
+{% endif %}
+
+Follow these phases:
+
+Phase 1. UNDERSTAND THE ISSUE: read the <issue_description> and restate, in clear terms, the exact behavior that is required for the issue to be considered resolved. Enumerate the concrete scenarios/inputs that must work after a correct fix.
+
+Phase 2. UNDERSTAND THE PATCH: read the <patch> and the files it touches in {{ instance.repo_path }}.
+   2.1 Identify every file, function, and method the patch changes, and describe what each change does.
+   2.2 Map the patch's changes to the requirements from Phase 1: which requirement does each hunk address?
+   2.3 Trace the actual execution paths for the scenarios from Phase 1. Check whether the patch covers every path those scenarios take — watch for paths that bypass the changed code (specialized branches, reflected/flipped operators, broadcast/alignment paths, type-specific overrides, mixed-type dispatch). A fix to one path does not cover scenarios that never reach it.
+
+Phase 3. ASSESS CORRECTNESS: judge whether the applied patch fully and correctly resolves the issue.
+   3.1 Does it address every requirement from Phase 1, across every relevant code path?
+   3.2 Is it correct and minimal, or does it over-reach / break unrelated behavior?
+   3.3 Consider boundary and special-value cases (empty/single/zero/negative/None/NaN, mixed types, error modes) — would any of them still be wrong?
+   3.4 Look for regressions: could the change break nearby behavior or existing callers?
+{% if review_mode != "readonly" %}
+
+Phase 4. VERIFY BY TESTING: empirically confirm your assessment.
+   4.1 Activate the environment by running
+       . /opt/miniconda3/etc/profile.d/conda.sh ; conda activate testbed
+   4.2 Locate and run the existing tests relevant to the issue and to the files the patch modifies. Report what passes and fails.
+   4.3 If the issue references specific tests (e.g. tests that were expected to fail), run those and confirm they now pass.
+   4.4 Reconcile the test results with your Phase 3 reasoning. If tests contradict your reasoning, trust the tests and explain the discrepancy.
+{% endif %}
+
+Phase {% if review_mode == "readonly" %}4{% else %}5{% endif %}. JUDGEMENT: decide whether the patch resolves the issue.
+
+When you are confident in your judgement, call the `finish` tool. Your finish message MUST contain a well-reasoned explanation of your assessment, followed by the following machine-parseable verdict block, verbatim, on its own lines, so it can be extracted programmatically. Use `pass` if the patch correctly and completely resolves the issue, `fail` otherwise:
+
+```
+### VERDICT
+decision: <pass|fail>
+confidence: <low|medium|high>
+reasoning: <one or two sentences summarizing why>
+```
+
+Be thorough and objective. It's fine if your reasoning is lengthy — quality and correctness of the judgement are what matter. Do NOT edit the codebase or create any files.
