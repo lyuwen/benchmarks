@@ -43,10 +43,27 @@ the test suite during its session (Phase 2 "RUNNING", Phase 7 "VERIFICATION",
 Phase 8 "FINAL REVIEW"). For `psf/requests`, those tests hit the flaky public
 `httpbin.org`, so the agent's own iterate-and-verify loop is unreliable.
 
-Relevant facts confirmed:
+Relevant facts confirmed (openhands agent-server workspace image, **not** the
+bare testbed image):
 
-- The container runs as **root** (`uid=0`); `/etc/hosts` is writable and
-  `openssl` is present in the testbed conda env — the fix's requirements hold.
+- The workspace container runs as user **`openhands` (uid 10001)**, not root.
+  The `openhands` user has **passwordless sudo** (`NOPASSWD:ALL`, granted in the
+  agent-server Dockerfile). `openssl` is present.
+- The testbed conda env (`/opt/miniconda3/envs/testbed`) and the requests CA
+  bundle (`requests.certs.where()`) are **root-owned**, and ports 80/443 and
+  `/etc/hosts` / `/etc/profile.d` require root. Therefore nearly every setup step
+  must be run through `sudo`:
+
+  | Step | Needs `sudo` | Why |
+  |------|:---:|------|
+  | `pip install httpbin ...` (into testbed) | yes | testbed env is root-owned |
+  | append cert to `requests.certs.where()` | yes | root-owned CA file |
+  | `gunicorn` bind :80 / :443 | yes | privileged ports |
+  | write `/etc/hosts` | yes | root-owned |
+  | write `/etc/profile.d/*.sh` | yes | root-owned |
+  | generate cert under `/tmp/...` | no | writable by `openhands` |
+  | `export REQUESTS_CA_BUNDLE=...` in a shell | no | shell-local |
+
 - `run_infer.py` already has an `env_setup_commands` hook, applied run-wide in
   `prepare_workspace` via `workspace.execute_command(cmd)`
   (`get_mirror_env_commands() + ["export PIP_CACHE_DIR=~/.cache/pip"]`).
@@ -74,37 +91,46 @@ Relevant facts confirmed:
 
 ### 1. Shared helper: `benchmarks/utils/httpbin_fix.py`
 
-New module exposing `make_httpbin_setup_commands() -> list[str]`, ported
-verbatim (hardened version) from
-`thirdparty/SWE-bench/swebench/harness/test_spec/python.py`:
+New module exposing `make_httpbin_setup_commands() -> list[str]`, adapted from
+the hardened version in
+`thirdparty/SWE-bench/swebench/harness/test_spec/python.py`. **Key difference
+from the offline-harness version:** that version runs as root, so it needs no
+`sudo`. The inference workspace runs as the non-root `openhands` user, so every
+privileged step here is wrapped in `sudo` (passwordless sudo is available in the
+agent-server image).
 
-1. `pip install 'httpbin[mainapp]==0.10.2' 'pytest-httpbin==2.1.0'`
+1. `sudo -E <testbed_python> -m pip install 'httpbin[mainapp]==0.10.2' 'pytest-httpbin==2.1.0'`
+   — installed into the **testbed** conda env (root-owned), targeting its
+   interpreter explicitly rather than relying on the active `python`.
 2. Generate self-signed cert with `subjectAltName=DNS:httpbin.org,DNS:localhost,IP:127.0.0.1`
-   under `/tmp/swebench_httpbin_certs`.
-3. `export REQUESTS_CA_BUNDLE=<cert>` and `export CURL_CA_BUNDLE=<cert>`.
-4. Append the cert to `requests.certs.where()` (covers `Session.send()` which
-   bypasses the env var).
+   under `/tmp/swebench_httpbin_certs` (no sudo — `/tmp` is writable by `openhands`).
+3. `export REQUESTS_CA_BUNDLE=<cert>` and `export CURL_CA_BUNDLE=<cert>` (shell-local).
+4. Append the cert to `requests.certs.where()` via `sudo` (root-owned file;
+   covers `Session.send()` which bypasses the env var).
 5. Launch detached gunicorn on `127.0.0.1:80` (HTTP) and `127.0.0.1:443`
-   (HTTPS, `-k gevent`).
+   (HTTPS, `-k gevent`) via `sudo` (privileged ports). Because the server runs
+   under sudo/root it must reference the testbed interpreter's gunicorn
+   explicitly and preserve `REQUESTS_CA_BUNDLE`-relevant paths.
 6. `sleep 2` to let servers bind.
-7. `echo "127.0.0.1    httpbin.org www.google.co.uk" >> /etc/hosts`.
+7. `echo "127.0.0.1    httpbin.org www.google.co.uk" | sudo tee -a /etc/hosts`
+   (root-owned).
 
-**Inference-specific addition:** the helper (or the caller) also persists the
-env exports to `/etc/profile.d/swebench_httpbin.sh` so the agent's separate
-terminal shell inherits `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`. Concretely, the
-command list also writes:
+**Inference-specific addition:** the helper also persists the env exports to
+`/etc/profile.d/swebench_httpbin.sh` (written via `sudo tee`) so the agent's
+separate terminal shell inherits `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`:
 
 ```
-cat > /etc/profile.d/swebench_httpbin.sh <<'EOF'
-export REQUESTS_CA_BUNDLE=/tmp/swebench_httpbin_certs/cert.pem
-export CURL_CA_BUNDLE=/tmp/swebench_httpbin_certs/cert.pem
-EOF
+printf '%s\n' \
+  'export REQUESTS_CA_BUNDLE=/tmp/swebench_httpbin_certs/cert.pem' \
+  'export CURL_CA_BUNDLE=/tmp/swebench_httpbin_certs/cert.pem' \
+  | sudo tee /etc/profile.d/swebench_httpbin.sh
 ```
 
 Re-implemented in-repo (rather than importing from the `swebench` package) so
-`run_infer.py` takes no hard runtime dependency on `swebench` internals. The two
-definitions are intentionally kept in sync; the module docstring points at
-`thirdparty/SWE-bench` as the source of truth.
+`run_infer.py` takes no hard runtime dependency on `swebench` internals, and
+because the inference version diverges (sudo wrapping, explicit testbed
+interpreter, profile.d persistence) from the root-context offline version. The
+module docstring points at `thirdparty/SWE-bench` as the origin of the approach.
 
 ### 2. Injection point: `prepare_workspace` in `run_infer.py`
 
@@ -145,14 +171,18 @@ of `run_infer.py`, alongside the existing
 ## Verification
 
 1. `python -m py_compile benchmarks/utils/httpbin_fix.py benchmarks/swebench/run_infer.py`.
-2. Manual container check on a `psf/requests` image (e.g.
-   `sweb.eval.x86_64.psf__requests-2317`): run the ported commands, confirm
-   gunicorn binds 80/443, `/etc/hosts` is updated, and a fresh `bash -lc 'echo
-   $REQUESTS_CA_BUNDLE'` shows the cert path via `/etc/profile.d`.
+2. Manual container check on the **agent-server** image for a `psf/requests`
+   instance (run as the `openhands` user, not root): run the generated commands,
+   confirm the `sudo`-wrapped steps succeed, `gunicorn` binds 80/443, `/etc/hosts`
+   is updated, and a fresh `bash -lc 'echo $REQUESTS_CA_BUNDLE'` shows the cert
+   path via `/etc/profile.d`. (Confirmed during design: `openhands` uid 10001 has
+   passwordless sudo; `/etc/hosts`, `/etc/profile.d`, and the root-owned testbed
+   env are all reachable via `sudo`.)
 3. Unit test `benchmarks/utils/test_httpbin_fix.py` asserting the command list
    contains the critical lines (SAN cert with `DNS:httpbin.org`, both
    `REQUESTS_CA_BUNDLE` and the `requests.certs.where()` append, the `/etc/hosts`
-   redirect including `www.google.co.uk`, and the `/etc/profile.d` persistence).
+   redirect including `www.google.co.uk`, the `/etc/profile.d` persistence, and
+   that every privileged step is `sudo`-wrapped).
 
 ## Files touched
 
