@@ -92,6 +92,9 @@ checker (no tool execution, no filesystem access) with two layers, invoked from
    - `file_editor` / `str_replace_editor`
    - `terminal` / `execute_bash`
    - `task_tracker`
+   - `finish` / `think` (SDK builtins) — e.g. `finish` called with only a
+     `summary` and no required `message` field, which otherwise surfaces as a
+     pydantic `Field required` error at agent-side validation time.
 
    Calls for any other tool clear the generic gate and are otherwise left alone.
 
@@ -120,4 +123,5 @@ existing `LLM_RETRY_EXCEPTIONS` boundary, respecting `num_retries` /
 - Submodule: `36f5144` - feat: add guardrail to detect and retry malformed tool calls
 - Submodule: `70a524d` - feat: add static tool-call parameter validation guardrail
 - Submodule: `b169437` - feat: add generic JSON gate + task_tracker schema check to toolcall guardrail
+- Submodule: `ae13fc2` - feat: add finish/think builtin schema checks to toolcall guardrail
 - Parent: `6e396ce` - feat: update submodule with malformed tool call retry guardrail
