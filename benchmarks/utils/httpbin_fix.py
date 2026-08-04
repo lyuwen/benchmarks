@@ -42,7 +42,10 @@ def make_httpbin_setup_commands() -> list[str]:
         f"-keyout {KEY} -out {CERT} -days 3650 "
         "-subj '/CN=httpbin.org' "
         "-addext 'subjectAltName=DNS:httpbin.org,DNS:localhost,IP:127.0.0.1'",
-        # 3. Trust it for env-var-aware requests calls (shell-local export).
+        # 3. Belt-and-suspenders shell-local exports. Each command runs in its
+        #    own fresh shell, so these have no consumer within this setup
+        #    sequence; persistence to the agent's shell is carried by the
+        #    /etc/profile.d write (step 8) and the cacert append (step 4).
         f"export REQUESTS_CA_BUNDLE={CERT}",
         f"export CURL_CA_BUNDLE={CERT}",
         # 4. Trust it for Session.send() which bypasses the env var: append to
@@ -55,10 +58,19 @@ def make_httpbin_setup_commands() -> list[str]:
         f"sudo bash -c '(nohup {TESTBED_PY} -m gunicorn -b 127.0.0.1:443 "
         f"--certfile={CERT} --keyfile={KEY} -k gevent httpbin:app "
         "> /dev/null 2>&1 &)'",
-        # 6. Let gunicorn bind before tests race it.
-        "sleep 2",
-        # 7. Redirect the external hosts to the local server.
-        'echo "127.0.0.1    httpbin.org www.google.co.uk" | sudo tee -a /etc/hosts',
+        # 6. Poll the local server, and ONLY write the /etc/hosts redirect once
+        #    it responds. The gunicorn launches above are backgrounded and
+        #    always exit 0, so a fixed sleep + unconditional redirect would
+        #    point httpbin.org at a dead local port (connection-refused) if the
+        #    server never bound -- worse than the flaky-external baseline. On
+        #    timeout this returns non-zero (call site logs a warning) and leaves
+        #    httpbin.org resolving externally.
+        "sudo bash -c 'URL=http://127.0.0.1:80/get; "
+        "for i in $(seq 1 15); do "
+        f'{TESTBED_PY} -c "import sys,urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)" "$URL" >/dev/null 2>&1 '
+        '&& { echo "127.0.0.1    httpbin.org www.google.co.uk" >> /etc/hosts; exit 0; }; '
+        "sleep 1; done; "
+        "echo httpbin-local-server-did-not-start >&2; exit 1'",
         # 8. Persist exports so the agent's SEPARATE login shell inherits them.
         "printf '%s\\n' "
         f"'export REQUESTS_CA_BUNDLE={CERT}' "

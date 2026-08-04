@@ -44,9 +44,31 @@ def test_trusts_cert_both_paths():
 
 def test_hosts_and_profile_redirect():
     joined = "\n".join(httpbin_fix.make_httpbin_setup_commands())
-    assert "httpbin.org www.google.co.uk" in joined
+    # Exact hosts line, including the four-space separator.
+    assert "127.0.0.1    httpbin.org www.google.co.uk" in joined
     assert "/etc/hosts" in joined
     assert "/etc/profile.d/swebench_httpbin.sh" in joined
+
+
+def test_gunicorn_targets_testbed_python():
+    cmds = httpbin_fix.make_httpbin_setup_commands()
+    gunicorn_cmds = [c for c in cmds if "gunicorn" in c]
+    assert len(gunicorn_cmds) >= 2, gunicorn_cmds
+    for c in gunicorn_cmds:
+        assert "/opt/miniconda3/envs/testbed/bin/python" in c, c
+
+
+def test_hosts_redirect_is_gated_on_server_health():
+    # Regression: the /etc/hosts redirect must be written by the SAME command
+    # that polls the local server, so it is never left pointing at a dead port
+    # when gunicorn failed to bind.
+    cmds = httpbin_fix.make_httpbin_setup_commands()
+    hosts_cmds = [c for c in cmds if "/etc/hosts" in c]
+    assert hosts_cmds, "no command writes /etc/hosts"
+    for c in hosts_cmds:
+        assert "urlopen" in c or "seq 1 15" in c, (
+            f"/etc/hosts written without a server-health poll: {c!r}"
+        )
 
 
 def test_cacert_append_has_no_broken_escaped_quotes():
