@@ -49,6 +49,24 @@ def test_hosts_and_profile_redirect():
     assert "/etc/profile.d/swebench_httpbin.sh" in joined
 
 
+def test_cacert_append_has_no_broken_escaped_quotes():
+    # Regression: the cacert-append command previously ran under
+    # `sudo bash -c '...'` with backslash-escaped double quotes INSIDE the
+    # single-quoted script, leaving them as literal `\"` characters. That made
+    # the `$(...)` command substitution malformed and the command exited 1,
+    # silently breaking the Session.send() CA-trust path.
+    cmds = httpbin_fix.make_httpbin_setup_commands()
+    matches = [c for c in cmds if "requests.certs.where()" in c]
+    assert matches, "no command contains requests.certs.where()"
+    cacert_cmd = matches[0]
+    # The two-character backslash-doublequote sequence must be absent.
+    assert '\\"' not in cacert_cmd, (
+        f"cacert-append command has broken escaped quotes: {cacert_cmd!r}"
+    )
+    assert "requests.certs.where()" in cacert_cmd
+    assert "sudo" in cacert_cmd
+
+
 def test_privileged_steps_are_sudo_wrapped():
     cmds = httpbin_fix.make_httpbin_setup_commands()
     joined = "\n".join(cmds)

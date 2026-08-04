@@ -47,8 +47,8 @@ def make_httpbin_setup_commands() -> list[str]:
         f"export CURL_CA_BUNDLE={CERT}",
         # 4. Trust it for Session.send() which bypasses the env var: append to
         #    the root-owned bundle that requests.certs.where() resolves to.
-        f"sudo bash -c 'cat {CERT} >> "
-        f'"$({TESTBED_PY} -c \\"import requests; print(requests.certs.where())\\")"\'',
+        f"sudo bash -c 'DST=$({TESTBED_PY} -c \"import requests; print(requests.certs.where())\"); "
+        f'cat {CERT} >> "$DST"\'',
         # 5. Launch detached gunicorn: HTTP on :80, HTTPS on :443 (privileged).
         f"sudo bash -c '(nohup {TESTBED_PY} -m gunicorn -b 127.0.0.1:80 "
         "-k gevent httpbin:app > /dev/null 2>&1 &)'",
