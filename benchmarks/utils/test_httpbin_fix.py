@@ -54,6 +54,22 @@ def test_privileged_steps_are_sudo_wrapped():
     joined = "\n".join(cmds)
     # gunicorn on privileged ports, hosts, profile.d, cacert append, pip -> sudo
     assert "sudo" in joined
-    for c in cmds:
-        if "/etc/hosts" in c or "/etc/profile.d" in c:
+
+    def _find(substr):
+        matches = [c for c in cmds if substr in c]
+        assert matches, f"no command contains {substr!r}"
+        return matches
+
+    # Single-command privileged steps: exactly the command(s) carrying the
+    # privileged operation must also be sudo-wrapped.
+    for substr in ("-m pip install", "requests.certs.where()",
+                   "/etc/hosts", "/etc/profile.d"):
+        for c in _find(substr):
             assert "sudo" in c, f"privileged step not sudo-wrapped: {c!r}"
+
+    # Both gunicorn launches bind privileged ports: every gunicorn command
+    # must be sudo-wrapped.
+    gunicorn_cmds = _find("gunicorn")
+    assert len(gunicorn_cmds) >= 2, f"expected >=2 gunicorn launches: {gunicorn_cmds!r}"
+    for c in gunicorn_cmds:
+        assert "sudo" in c, f"gunicorn launch not sudo-wrapped: {c!r}"
