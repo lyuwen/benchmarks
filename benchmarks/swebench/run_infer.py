@@ -15,6 +15,7 @@ from benchmarks.swebench.build_images import (
 )
 from benchmarks.utils.args_parser import get_parser
 from benchmarks.utils.mirror_config import get_mirror_env_commands
+from benchmarks.utils.httpbin_fix import make_httpbin_setup_commands
 from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
@@ -271,6 +272,22 @@ class SWEBenchEvaluation(Evaluation):
                     f"Failed to run env setup command '{cmd}': {res.stderr}"
                 )
             logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
+
+        # psf/requests tests hit the flaky public httpbin.org; stand up a local
+        # httpbin so the agent's own test runs are deterministic. Non-fatal:
+        # on failure we degrade to external httpbin rather than losing the
+        # instance. See benchmarks/utils/httpbin_fix.py.
+        if instance.data.get("repo") == "psf/requests":
+            for cmd in make_httpbin_setup_commands():
+                res = workspace.execute_command(cmd)
+                if res.exit_code != 0:
+                    logger.warning(
+                        "httpbin setup command failed (continuing): %r: %s",
+                        cmd,
+                        res.stderr,
+                    )
+                else:
+                    logger.debug("Ran httpbin setup command '%s': %s", cmd, res.stdout)
         return workspace
 
     # ---- Hook: evaluate one instance ---------------------------------------------
