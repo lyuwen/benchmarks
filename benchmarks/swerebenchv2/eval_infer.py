@@ -170,9 +170,11 @@ def evaluate_instance(
     pass_to_pass = spec.get("PASS_TO_PASS", [])
     if isinstance(pass_to_pass, str):
         pass_to_pass = json.loads(pass_to_pass)
+    pass_to_pass = list(pass_to_pass)
     fail_to_pass_raw = spec.get("FAIL_TO_PASS", [])
     if isinstance(fail_to_pass_raw, str):
         fail_to_pass_raw = json.loads(fail_to_pass_raw)
+    fail_to_pass_raw = list(fail_to_pass_raw)
 
     expected_passed = sorted(
         _normalize_test_name(n)
