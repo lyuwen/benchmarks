@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import Field
+from unidiff import PatchSet
 
 from benchmarks.utils.execution_judge import ExecutionBasedJudge, register_judge
 
@@ -40,6 +41,51 @@ def _normalize_test_name(name: str) -> str:
     for pattern in _TIMING_NORMALIZE_RES:
         name = pattern.sub("", name)
     return name.strip()
+
+
+def _normalize_path(path: str) -> str | None:
+    if path == "/dev/null":
+        return None
+    return path.removeprefix("a/").removeprefix("b/")
+
+
+def _get_patch_files(patch: str) -> set[str]:
+    files: set[str] = set()
+    for f in PatchSet(patch):
+        for path in (f.source_file, f.target_file):
+            if path := _normalize_path(path):
+                files.add(path)
+    return files
+
+
+def _strip_test_files(fix_patch: str, test_patch: str) -> tuple[str, list[str]]:
+    """Drop from the fix patch any file also touched by the test patch.
+
+    Keeps the candidate solution from smuggling edits to the test files that
+    the ground-truth test patch owns. Returns the filtered fix patch plus the
+    sorted list of stripped file paths.
+    """
+    test_files = _get_patch_files(test_patch)
+
+    kept: list[str] = []
+    stripped: list[str] = []
+
+    for f in PatchSet(fix_patch):
+        touched = {
+            path
+            for path in (
+                _normalize_path(f.source_file),
+                _normalize_path(f.target_file),
+            )
+            if path
+        }
+        overlap = touched & test_files
+        if overlap:
+            stripped.extend(overlap)
+        else:
+            kept.append(str(f))
+
+    return "".join(kept), sorted(set(stripped))
 
 
 def _resolve_image_name(image_name: str, prefix: str | None = None) -> str:
@@ -158,9 +204,20 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
 
         workdir = f"/{repo.split('/')[-1]}"
 
+        clean_patch, stripped_files = _strip_test_files(
+            fix_patch=git_patch,
+            test_patch=test_patch,
+        )
+        if stripped_files:
+            logger.info(
+                "Instance %s: stripped test-file edits from candidate patch: %s",
+                instance_id,
+                stripped_files,
+            )
+
         with tempfile.TemporaryDirectory(prefix="judge_patches_") as tmp:
             patch_dir = Path(tmp)
-            (patch_dir / "patch.diff").write_text(git_patch, encoding="utf-8")
+            (patch_dir / "patch.diff").write_text(clean_patch, encoding="utf-8")
             (patch_dir / "test_patch.diff").write_text(test_patch, encoding="utf-8")
 
             cmd_lines = [

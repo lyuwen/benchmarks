@@ -304,7 +304,8 @@ class SWERebenchV2Evaluation(Evaluation):
         source_repo_path = f"/{repo_name}"
         logger.info("repo_path: %s (source: %s)", repo_path, source_repo_path)
         cp_repo = workspace.execute_command(
-            f"mkdir -p {repo_path} ; cp -r {source_repo_path}/. {repo_path}"
+            f"mkdir -p {repo_path} ; cp -r {source_repo_path}/. {repo_path}",
+            timeout=120,
         )
         assert cp_repo.exit_code == 0, (
             f"cp repo failed: {cp_repo.stderr}"
@@ -318,7 +319,8 @@ class SWERebenchV2Evaluation(Evaluation):
         # ensures any path-based edit lands in the single tracked repo.
         rp_no_slash = repo_path.rstrip("/")
         link_repo = workspace.execute_command(
-            f"rm -rf {source_repo_path} ; ln -s {rp_no_slash} {source_repo_path}"
+            f"rm -rf {source_repo_path} ; ln -s {rp_no_slash} {source_repo_path}",
+            timeout=120,
         )
         assert link_repo.exit_code == 0, (
             f"symlink repo failed: {link_repo.stderr}"
