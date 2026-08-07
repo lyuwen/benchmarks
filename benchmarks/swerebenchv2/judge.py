@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -215,6 +216,12 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
                 stripped_files,
             )
 
+        # Unique container name so we can force-kill it on timeout: since
+        # subprocess.run's timeout only kills the docker *client*, the --rm
+        # container would otherwise keep running (and holding the image).
+        container_name = f"judge_{instance_id}_{uuid.uuid4().hex[:8]}"
+        timed_out = False
+
         with tempfile.TemporaryDirectory(prefix="judge_patches_") as tmp:
             patch_dir = Path(tmp)
             (patch_dir / "patch.diff").write_text(clean_patch, encoding="utf-8")
@@ -232,6 +239,7 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
 
             docker_cmd = [
                 "docker", "run", "--rm",
+                "--name", container_name,
                 "--network", "host",
                 "-e", "_JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false",
                 "-v", f"{patch_dir}:/patches:ro",
@@ -240,14 +248,41 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
                 "/bin/bash", "-c", script,
             ]
 
-            result = subprocess.run(
-                docker_cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
-            output = (result.stdout or "") + (result.stderr or "")
+            try:
+                result = subprocess.run(
+                    docker_cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                )
+                output = (result.stdout or "") + (result.stderr or "")
+                exit_code = result.returncode
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                # Capture whatever partial output was produced before the kill.
+                # exc.stdout/stderr may be bytes even in text mode.
+                def _as_text(chunk: object) -> str:
+                    if chunk is None:
+                        return ""
+                    if isinstance(chunk, bytes):
+                        return chunk.decode("utf-8", errors="replace")
+                    return str(chunk)
+
+                output = _as_text(exc.stdout) + _as_text(exc.stderr)
+                exit_code = -1
+                logger.warning(
+                    "SWERebenchV2Judge %s: test run timed out after %ss; killing container %s",
+                    instance_id,
+                    self.timeout,
+                    container_name,
+                )
+                # Force-kill the still-running container (--rm cleans it up).
+                subprocess.run(
+                    ["docker", "kill", container_name],
+                    check=False,
+                    capture_output=True,
+                )
 
         if self.rm_image:
             subprocess.run(
@@ -255,6 +290,9 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
                 check=False,
                 capture_output=True,
             )
+
+        if timed_out:
+            return False
 
         parsed = parser(output)
         parsed = {_normalize_test_name(k): v for k, v in parsed.items()}
@@ -285,6 +323,6 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
             resolved,
             len(f2p_passed),
             len(fail_to_pass),
-            result.returncode,
+            exit_code,
         )
         return resolved
