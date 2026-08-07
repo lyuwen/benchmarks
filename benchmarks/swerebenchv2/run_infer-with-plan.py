@@ -82,10 +82,14 @@ def get_instruction(
 def load_plan_from_history(plan_dir: str, instance_id: str) -> str:
     """Extract the finalized plan for an instance from a phase-1 run.
 
-    The exploration-and-planning pass (prompts/explore-and-plan.j2) ends by
-    calling the ``finish`` tool with the finalized plan as its ``message``.
-    That conversation is dumped to ``{plan_dir}/{instance_id}.history.json``.
-    This reads back the last ``finish`` tool call's ``message`` argument.
+    The exploration-and-planning pass ideally ends by calling the ``finish``
+    tool with the finalized plan as its ``message``; that conversation is dumped
+    to ``{plan_dir}/{instance_id}.history.json``. This reads back the last
+    ``finish`` tool call's ``message``.
+
+    Fallback: some trajectories end with the agent emitting the plan as a plain
+    assistant message (no tool call) instead of calling ``finish``. In that case
+    the final assistant message is treated as the plan.
 
     Raises FileNotFoundError / ValueError if no plan can be recovered, so the
     run fails fast rather than silently fixing without a plan.
@@ -99,8 +103,11 @@ def load_plan_from_history(plan_dir: str, instance_id: str) -> str:
     with open(history_file) as f:
         data = json.load(f)
 
+    messages = data.get("messages", [])
+
+    # Primary: last finish tool call's message.
     plan: str | None = None
-    for msg in data.get("messages", []):
+    for msg in messages:
         for tool_call in msg.get("tool_calls") or []:
             if tool_call.get("function", {}).get("name") != "finish":
                 continue
@@ -114,13 +121,30 @@ def load_plan_from_history(plan_dir: str, instance_id: str) -> str:
                 # Keep the last finish call, in case the agent finished
                 # more than once across attempts.
                 plan = message
+    if plan:
+        return plan
 
-    if not plan:
-        raise ValueError(
-            f"No finish-tool plan message found in {history_file} for "
-            f"instance {instance_id}"
-        )
-    return plan
+    # Fallback: last assistant message with no tool call carries the plan.
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        if msg.get("tool_calls"):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            # Chat content can be a list of parts; concatenate text parts.
+            content = "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
+            )
+        if content and content.strip():
+            return content
+
+    raise ValueError(
+        f"No finish-tool plan message or final assistant message found in "
+        f"{history_file} for instance {instance_id}"
+    )
 
 
 
