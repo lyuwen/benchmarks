@@ -152,7 +152,7 @@ Termination reasons: `user_finish`, `turn_cap`, `agent_error`, `agent_stuck`,
 - `--user-llm-config-path PATH` (default: same as `--llm-config-path`).
 - `--mode {plan|auto}` (default: `plan`).
 - `--user-tools {none|readonly}` (default: `none`).
-- `--max-user-turns INT` (default: e.g. 15).
+- `--max-user-turns INT` (default: 20).
 - File-injection caps: `--inject-max-files`, `--inject-max-bytes` (sensible
   defaults; may be constants initially).
 
