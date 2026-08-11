@@ -18,6 +18,25 @@ def test_extract_paths_from_prose_and_backticks_and_lineref():
     assert paths == list(dict.fromkeys(paths))
 
 
+def test_github_blob_url_is_not_extracted():
+    text = "See https://github.com/org/repo/blob/main/src/foo.py for context"
+    paths = extract_file_paths(text)
+    assert "com/org/repo/blob/main/src/foo.py" not in paths
+    assert all(not p.endswith("foo.py") for p in paths)
+
+
+def test_plain_http_url_yields_no_paths():
+    assert extract_file_paths("http://example.com/a/b/c.py") == []
+
+
+def test_version_string_yields_no_paths():
+    assert extract_file_paths("upgrade to 1.2.3 today") == []
+
+
+def test_dotted_attribute_without_slash_yields_no_paths():
+    assert extract_file_paths("call module.attr here") == []
+
+
 class _FakeWS:
     def __init__(self, files):
         self._files = files

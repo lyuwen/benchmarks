@@ -13,6 +13,10 @@ class InjectedFile(TypedDict):
     skipped: str | None  # None | "too_large" | "not_found" | "count_cap"
 
 
+# scheme://host/path... URL spans, stripped before path extraction so that no
+# token inside a URL (regardless of domain length) is ever emitted as a path.
+_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S+")
+
 # path-like tokens: a/b/c.ext optionally followed by :line
 _PATH_RE = re.compile(
     r"(?<![\w/])"                     # not preceded by word char or slash
@@ -25,13 +29,13 @@ _PATH_RE = re.compile(
 def extract_file_paths(text: str) -> list[str]:
     if not text:
         return []
+    # Remove URL spans structurally first, replacing each with a space so
+    # adjacent tokens don't fuse. Paths inside URLs then can't be matched.
+    cleaned = _URL_RE.sub(" ", text)
     out: list[str] = []
-    for m in _PATH_RE.finditer(text):
+    for m in _PATH_RE.finditer(cleaned):
         path = m.group(1)
-        # skip URLs
-        start = m.start()
-        prefix = text[max(0, start - 8):start]
-        if "://" in prefix or path.startswith(("http", "www.")):
+        if path.startswith(("http", "www.")):
             continue
         out.append(path)
     return list(dict.fromkeys(out))  # de-dupe, keep order
