@@ -52,22 +52,33 @@ def _truncate(s: str) -> str:
 def execute_readonly_tool(workspace, repo_path: str, name: str, arguments: dict) -> str:
     base = repo_path.rstrip("/")
     if name == "read_file":
-        p = f"{base}/{arguments['path']}"
+        path = arguments.get("path")
+        if path is None:
+            return f"ERROR: missing required argument 'path' for tool '{name}'"
+        p = f"{base}/{path}"
         res = workspace.execute_command(f"cat -- {shlex.quote(p)}")
         return _truncate(res.stdout if res.exit_code == 0 else res.stderr)
     if name == "grep":
+        pattern = arguments.get("pattern")
+        if pattern is None:
+            return f"ERROR: missing required argument 'pattern' for tool '{name}'"
         path = arguments.get("path", ".")
         p = f"{base}/{path}"
-        cmd = f"grep -rn -- {shlex.quote(arguments['pattern'])} {shlex.quote(p)}"
+        cmd = f"grep -rn -- {shlex.quote(pattern)} {shlex.quote(p)}"
         res = workspace.execute_command(cmd)
         return _truncate(res.stdout or res.stderr or "(no matches)")
     if name == "glob":
+        pattern = arguments.get("pattern")
+        if pattern is None:
+            return f"ERROR: missing required argument 'pattern' for tool '{name}'"
         cmd = (f"cd {shlex.quote(base)} && "
-               f"find . -path {shlex.quote('./' + arguments['pattern'])}")
+               f"find . -path {shlex.quote('./' + pattern)}")
         res = workspace.execute_command(cmd)
         return _truncate(res.stdout or "(no matches)")
     if name == "run_readonly_bash":
-        command = arguments["command"]
+        command = arguments.get("command")
+        if command is None:
+            return f"ERROR: missing required argument 'command' for tool '{name}'"
         if not is_readonly_command(command):
             return ("ERROR: command rejected — only read-only commands are "
                     "allowed for the user agent.")

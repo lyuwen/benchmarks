@@ -43,3 +43,35 @@ def test_read_file_uses_cat_within_repo():
     ws = _WS()
     execute_readonly_tool(ws, "/repo", "read_file", {"path": "pkg/m.py"})
     assert ws.ran and "/repo/pkg/m.py" in ws.ran[0] and ws.ran[0].startswith("cat")
+
+
+def test_read_file_missing_path_returns_error():
+    ws = _WS()
+    out = execute_readonly_tool(ws, "/repo", "read_file", {})
+    assert "missing required argument" in out
+    assert "path" in out
+    assert ws.ran == []
+
+
+def test_grep_missing_pattern_returns_error():
+    ws = _WS()
+    out = execute_readonly_tool(ws, "/repo", "grep", {})
+    assert "missing required argument" in out
+    assert "pattern" in out
+    assert ws.ran == []
+
+
+def test_glob_missing_pattern_returns_error():
+    ws = _WS()
+    out = execute_readonly_tool(ws, "/repo", "glob", {})
+    assert "missing required argument" in out
+    assert "pattern" in out
+    assert ws.ran == []
+
+
+def test_run_readonly_bash_missing_command_returns_error():
+    ws = _WS()
+    out = execute_readonly_tool(ws, "/repo", "run_readonly_bash", {})
+    assert "missing required argument" in out
+    assert "command" in out
+    assert ws.ran == []
