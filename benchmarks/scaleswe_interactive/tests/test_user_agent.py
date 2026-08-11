@@ -82,6 +82,33 @@ def test_file_injection_happens_in_none_mode():
     assert any(f["path"] == "a/b.py" for f in turn.injected_files)
 
 
+def test_agent_passes_real_tool_definitions_to_llm():
+    """The tools handed to LLM.completion must be real ToolDefinition objects
+    whose to_openai_tool() works (the stub LLM would otherwise hide dict tools
+    that crash real LLM.completion)."""
+    from openhands.sdk.tool import ToolDefinition
+    llm = _StubLLM([_Msg(text="ok")])
+    _agent(llm, user_tools="readonly").take_turn(
+        dialogue=[{"speaker": "coding", "text": "hi"}], user_turns=0)
+    _messages, tools = llm.calls[0]
+    assert tools, "readonly mode must pass tools"
+    for t in tools:
+        assert isinstance(t, ToolDefinition)
+        assert t.to_openai_tool()["function"]["name"] == t.name
+
+
+def test_agent_finish_only_mode_passes_real_finish_tool():
+    from openhands.sdk.tool import ToolDefinition
+    from benchmarks.scaleswe_interactive.user_tools import FINISH_TOOL_NAME
+    llm = _StubLLM([_Msg(text="ok")])
+    _agent(llm, user_tools="none").take_turn(
+        dialogue=[{"speaker": "coding", "text": "hi"}], user_turns=0)
+    _messages, tools = llm.calls[0]
+    assert tools and all(isinstance(t, ToolDefinition) for t in tools)
+    assert FINISH_TOOL_NAME in {t.to_openai_tool()["function"]["name"]
+                                for t in tools}
+
+
 def test_llm_error_returns_error_turn():
     class _BoomLLM:
         def completion(self, messages, tools=None, **kwargs):

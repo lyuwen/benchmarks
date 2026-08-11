@@ -18,9 +18,21 @@ class _WS:
 
 
 def test_finish_tool_present():
-    names = {t["function"]["name"] for t in USER_READONLY_TOOLS}
+    names = {t.name for t in USER_READONLY_TOOLS}
     assert FINISH_TOOL_NAME in names
     assert {"read_file", "grep", "glob", "run_readonly_bash"} <= names
+
+
+def test_tools_serialize_via_to_openai_tool():
+    """Exercises the REAL path LLM.completion uses (a stub LLM hides it)."""
+    for tool in USER_READONLY_TOOLS:
+        oai = tool.to_openai_tool()
+        assert oai["type"] == "function"
+        assert oai["function"]["name"] == tool.name
+        assert "parameters" in oai["function"]
+    names = {t.to_openai_tool()["function"]["name"] for t in USER_READONLY_TOOLS}
+    assert {"read_file", "grep", "glob", "run_readonly_bash",
+            FINISH_TOOL_NAME} == names
 
 
 def test_run_readonly_bash_rejects_writer_without_executing():

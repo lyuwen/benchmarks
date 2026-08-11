@@ -82,6 +82,28 @@ def test_rejects_writers(cmd):
     "git branch --force x y",
     # 6. newline as segment separator
     "cat a\nrm b",
+    # 7. single '&' as a background/segment separator (not '&&')
+    "grep x f & rm y",
+    "cat a & rm b",
+    # 8. allowlisted readers that write via flags
+    "sort -o out in",
+    "sort --output=out in",
+    "sed -n 'w /tmp/x' a",
+    "sed 's/a/b/w f' a",
+    "sed 'W f' a",
 ])
 def test_rejects_bypasses(cmd):
     assert is_readonly_command(cmd) is False
+
+
+@pytest.mark.parametrize("cmd", [
+    "sed -n '1,5p' a",   # read-only sed
+    "sort a",            # read-only sort
+    "a && b",            # both segments split cleanly (non-writer, non-reader)
+])
+def test_readonly_sed_sort_still_pass(cmd):
+    # a && b: 'a'/'b' are not allowlisted, so overall False; assert it does not
+    # crash and that clean read-only sed/sort remain allowed.
+    result = is_readonly_command(cmd)
+    if cmd.startswith("sed") or cmd.startswith("sort"):
+        assert result is True

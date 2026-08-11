@@ -1,7 +1,18 @@
-"""Read-only tools offered to the user agent in --user-tools readonly mode."""
+"""Read-only tools offered to the user agent in --user-tools readonly mode.
+
+The tools are real SDK ``ToolDefinition`` objects (not raw OpenAI dicts) so
+that ``LLM.completion`` can serialize them via ``to_openai_tool()``. The user
+agent executes them manually (see ``execute_readonly_tool``); the tools do not
+carry executors and their ``.call()`` path is never invoked.
+"""
 from __future__ import annotations
 
 import shlex
+from collections.abc import Sequence
+
+from pydantic import Field
+
+from openhands.sdk.tool import Action, ToolAnnotations, ToolDefinition
 
 from benchmarks.scaleswe_interactive.readonly_guard import is_readonly_command
 
@@ -9,39 +20,94 @@ FINISH_TOOL_NAME = "finish"
 
 _MAX_TOOL_OUTPUT = 10000
 
-
-def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        },
-    }
+_READONLY_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True,
+    openWorldHint=False)
 
 
-USER_READONLY_TOOLS: list[dict] = [
-    _tool("read_file", "Read a file from the repository (read-only).",
-          {"path": {"type": "string", "description": "Repo-relative path."}},
-          ["path"]),
-    _tool("grep", "Search file contents with grep (read-only).",
-          {"pattern": {"type": "string"},
-           "path": {"type": "string", "description": "Repo-relative dir/file."}},
-          ["pattern"]),
-    _tool("glob", "List files matching a glob under the repo (read-only).",
-          {"pattern": {"type": "string"}}, ["pattern"]),
-    _tool("run_readonly_bash",
-          "Run a strictly read-only shell command in the repo. "
-          "Write/mutating commands are rejected.",
-          {"command": {"type": "string"}}, ["command"]),
-    _tool(FINISH_TOOL_NAME,
-          "End the session because the problem is solved (user only).",
-          {"reason": {"type": "string"}}, ["reason"]),
+class UserReadFileAction(Action):
+    path: str = Field(description="Repo-relative path.")
+
+
+class UserGrepAction(Action):
+    pattern: str = Field(description="Pattern to search for.")
+    path: str | None = Field(
+        default=None, description="Repo-relative dir/file.")
+
+
+class UserGlobAction(Action):
+    pattern: str = Field(description="Glob pattern under the repo.")
+
+
+class UserRunReadonlyBashAction(Action):
+    command: str = Field(description="Read-only shell command to run.")
+
+
+class UserFinishAction(Action):
+    reason: str = Field(description="Why the session can end.")
+
+
+class UserReadFileTool(ToolDefinition[UserReadFileAction, None]):
+    name = "read_file"
+
+    @classmethod
+    def create(cls, *args, **kwargs) -> Sequence["UserReadFileTool"]:
+        return [cls(description="Read a file from the repository (read-only).",
+                    action_type=UserReadFileAction,
+                    annotations=_READONLY_ANNOTATIONS)]
+
+
+class UserGrepTool(ToolDefinition[UserGrepAction, None]):
+    name = "grep"
+
+    @classmethod
+    def create(cls, *args, **kwargs) -> Sequence["UserGrepTool"]:
+        return [cls(description="Search file contents with grep (read-only).",
+                    action_type=UserGrepAction,
+                    annotations=_READONLY_ANNOTATIONS)]
+
+
+class UserGlobTool(ToolDefinition[UserGlobAction, None]):
+    name = "glob"
+
+    @classmethod
+    def create(cls, *args, **kwargs) -> Sequence["UserGlobTool"]:
+        return [cls(description="List files matching a glob under the repo "
+                                "(read-only).",
+                    action_type=UserGlobAction,
+                    annotations=_READONLY_ANNOTATIONS)]
+
+
+class UserRunReadonlyBashTool(ToolDefinition[UserRunReadonlyBashAction, None]):
+    name = "run_readonly_bash"
+
+    @classmethod
+    def create(cls, *args, **kwargs) -> Sequence["UserRunReadonlyBashTool"]:
+        return [cls(description="Run a strictly read-only shell command in the "
+                                "repo. Write/mutating commands are rejected.",
+                    action_type=UserRunReadonlyBashAction,
+                    annotations=_READONLY_ANNOTATIONS)]
+
+
+class UserFinishTool(ToolDefinition[UserFinishAction, None]):
+    name = FINISH_TOOL_NAME
+
+    @classmethod
+    def create(cls, *args, **kwargs) -> Sequence["UserFinishTool"]:
+        return [cls(description="End the session because the problem is solved "
+                                "(user only).",
+                    action_type=UserFinishAction,
+                    annotations=_READONLY_ANNOTATIONS)]
+
+
+FINISH_TOOL: ToolDefinition = UserFinishTool.create()[0]
+
+USER_READONLY_TOOLS: list[ToolDefinition] = [
+    UserReadFileTool.create()[0],
+    UserGrepTool.create()[0],
+    UserGlobTool.create()[0],
+    UserRunReadonlyBashTool.create()[0],
+    FINISH_TOOL,
 ]
 
 

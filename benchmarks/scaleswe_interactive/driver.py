@@ -10,6 +10,13 @@ from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import MessageEvent
 
 from benchmarks.scaleswe_interactive.user_agent import UserAgent
+from benchmarks.utils.fake_user_response import _sync_events
+
+
+def _event_key(event):
+    """Stable identity for dedup; _do_full_sync can rebuild event objects."""
+    eid = getattr(event, "id", None)
+    return eid if eid is not None else id(event)
 
 
 class SessionResult(BaseModel):
@@ -35,14 +42,15 @@ def _latest_agent_text(conversation, seen_ids: set) -> str | None:
     """Return concatenated text of new agent MessageEvents since last check."""
     texts = []
     for event in conversation.state.events:
-        if id(event) in seen_ids:
+        key = _event_key(event)
+        if key in seen_ids:
             continue
         if isinstance(event, MessageEvent) and event.source == "agent":
             for c in event.llm_message.content or []:
                 t = getattr(c, "text", None)
                 if t:
                     texts.append(t)
-        seen_ids.add(id(event))
+        seen_ids.add(key)
     return "\n".join(texts).strip() if texts else None
 
 
@@ -53,7 +61,7 @@ def run_interactive_session(conversation, user_agent: UserAgent,
     seen_ids: set = set()
     # Mark pre-existing events as seen (e.g., the injected instruction message).
     for event in conversation.state.events:
-        seen_ids.add(id(event))
+        seen_ids.add(_event_key(event))
 
     conversation.send_message(initial_instruction)
     user_turns = 0
@@ -71,6 +79,7 @@ def run_interactive_session(conversation, user_agent: UserAgent,
                                  termination_reason="agent_stuck",
                                  user_turns=user_turns)
 
+        _sync_events(conversation)
         agent_text = _latest_agent_text(conversation, seen_ids)
         if agent_text:
             dialogue.append({"speaker": "coding", "text": agent_text})

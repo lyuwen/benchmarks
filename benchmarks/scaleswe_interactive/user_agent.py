@@ -14,6 +14,7 @@ from benchmarks.scaleswe_interactive.file_reference import (
     inject_files,
 )
 from benchmarks.scaleswe_interactive.user_tools import (
+    FINISH_TOOL,
     FINISH_TOOL_NAME,
     USER_READONLY_TOOLS,
     execute_readonly_tool,
@@ -111,7 +112,7 @@ class UserAgent:
             messages.append(inject_msg)
 
         tools = USER_READONLY_TOOLS if self.user_tools == "readonly" else \
-            [t for t in USER_READONLY_TOOLS if t["function"]["name"] == FINISH_TOOL_NAME]
+            [FINISH_TOOL]
 
         tool_traces: list[dict] = []
         for _ in range(self.max_tool_iters + 1):

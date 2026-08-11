@@ -85,3 +85,74 @@ def test_user_error_terminates():
     ua = _ScriptedUserAgent([UserTurn(error="boom")])
     res = run_interactive_session(conv, ua, "P", max_user_turns=20)
     assert res.termination_reason == "user_error"
+
+
+class _SyncEventList(list):
+    """Event list whose agent message only lands when _do_full_sync() runs.
+
+    Mimics RemoteConversation's WebSocket race: run() does not append the
+    agent MessageEvent to the local cache; only a forced sync pulls it in.
+    """
+    def __init__(self):
+        super().__init__()
+        self.sync_calls = 0
+        self._pending = []
+
+    def stage(self, event):
+        self._pending.append(event)
+
+    def _do_full_sync(self):
+        self.sync_calls += 1
+        while self._pending:
+            self.append(self._pending.pop(0))
+
+
+class _SyncFakeConversation:
+    """Agent replies are only visible after _do_full_sync is invoked."""
+    def __init__(self):
+        events = _SyncEventList()
+        self.state = SimpleNamespace(
+            events=events, execution_status=ConversationExecutionStatus.FINISHED)
+        self.sent = []
+        self._replies = ["Plan ready.", "All done."]
+
+    def send_message(self, message):
+        self.sent.append(message)
+
+    def run(self, timeout=None):
+        text = self._replies.pop(0) if self._replies else "still working"
+        self.state.events.stage(_agent_msg(text))  # not visible until sync
+
+
+def test_driver_syncs_events_before_reading_agent_text():
+    conv = _SyncFakeConversation()
+    captured = []
+
+    class _Recorder:
+        def take_turn(self, dialogue, user_turns):
+            captured.append(list(dialogue))
+            # First turn approves, second finishes.
+            if user_turns == 0:
+                return UserTurn(message="approve")
+            return UserTurn(finished=True, finish_reason="solved")
+
+    res = run_interactive_session(conv, _Recorder(), "P", max_user_turns=20)
+    assert res.termination_reason == "user_finish"
+    assert conv.state.events.sync_calls >= 1  # sync was forced
+    # The staged-only agent text still reached the dialogue via sync.
+    assert any(d["speaker"] == "coding" and "Plan ready." in d["text"]
+               for d in res.dialogue)
+
+
+def test_latest_agent_text_dedups_by_stable_id():
+    from benchmarks.scaleswe_interactive.driver import _latest_agent_text
+    conv = _FakeConversation()
+    ev = _agent_msg("hello")
+    conv.state.events.append(ev)
+    seen = set()
+    assert _latest_agent_text(conv, seen) == "hello"
+    # A rebuilt object with the SAME .id must be treated as already seen.
+    ev2 = _agent_msg("hello")
+    object.__setattr__(ev2, "id", ev.id)
+    conv.state.events.append(ev2)
+    assert _latest_agent_text(conv, seen) is None

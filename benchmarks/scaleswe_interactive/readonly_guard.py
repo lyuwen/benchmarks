@@ -19,8 +19,16 @@ _WRITE_OPERATORS = re.compile(r"(>>|>|\btee\b)")
 # Git subcommands that are read-only.
 _GIT_READONLY_SUB = {"log", "diff", "show", "status", "blame", "ls-files",
                      "cat-file", "rev-parse", "branch", "describe", "grep"}
-# sed/awk in-place or program flags that write.
+# sed in-place flags that write.
 _SED_WRITE = re.compile(r"-i\b|--in-place")
+# sed program constructs that write to a file: a standalone `w`/`W` command,
+# or an `s///w file` write flag. Conservative: match `w`/`W` when it begins a
+# command clause (after start, `;`, `{`, or whitespace) or appears as the
+# substitution write flag (`/w ` / `/W `). This can over-reject exotic regexes
+# but keeps read-only usages like `sed -n '1,5p'` passing.
+_SED_PROGRAM_WRITE = re.compile(r"(^|[;{\s])[wW]\b|/[wW][ \t]")
+# sort write flag: -o/--output redirect output to a file.
+_SORT_OUTPUT_FLAGS = {"-o", "--output"}
 # Command substitution / process substitution / backtick / var-expansion
 # constructs that can smuggle arbitrary execution into an otherwise
 # read-looking segment.
@@ -89,7 +97,19 @@ def _segment_is_readonly(seg: str) -> bool:
             return _git_branch_is_readonly(rest[sub_idx + 1:])
         return True
     if exe == "sed":
-        return not _SED_WRITE.search(seg)
+        if _SED_WRITE.search(seg):
+            return False
+        # Reject sed programs that write to a file via `w`/`W` command or
+        # `s///w` flag. Inspect the program tokens (not filenames).
+        if any(_SED_PROGRAM_WRITE.search(tok) for tok in tokens[1:]):
+            return False
+        return True
+    if exe == "sort":
+        for tok in tokens[1:]:
+            if tok in _SORT_OUTPUT_FLAGS or tok.startswith("--output") \
+                    or tok.startswith("-o"):
+                return False
+        return True
     return exe in _READONLY_CMDS
 
 
@@ -97,5 +117,9 @@ def is_readonly_command(cmd: str) -> bool:
     """Return True only if every chained segment is read-only."""
     # Split on chaining/pipe operators and newlines; every part must be
     # read-only. Newlines act as command separators in shells too.
-    parts = re.split(r"&&|\|\||;|\||\n", cmd)
+    # `&&` and `&` are both listed; `&&` comes first so a background `&`
+    # (single) is only matched when it is not part of `&&`. An empty middle
+    # segment from `a && b` splitting is harmless: _segment_is_readonly("")
+    # returns True.
+    parts = re.split(r"&&|\|\||;|\||&|\n", cmd)
     return all(_segment_is_readonly(p) for p in parts)
