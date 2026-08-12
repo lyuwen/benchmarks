@@ -1,0 +1,77 @@
+I have access to a python code repository in the directory {{ instance.repo_path }} . You can explore and read files using the available tools. Consider the following issue description:
+
+<issue_description>
+{{ instance.problem_statement }}
+</issue_description>
+{% if instance.interface %}
+
+The following interfaces of the affected functions/methods/classes are provided to help you understand the intended API surface. Use them to orient your exploration and planning:
+
+<interface>
+{{ instance.interface }}
+</interface>
+{% endif %}
+
+Your task is EXPLORATION AND PLANNING ONLY. You must NOT edit any source code, create, delete, or modify any files in the repository. Do not apply any fix. Your sole deliverable is a thorough, well-reasoned plan for how the issue would be resolved.
+
+The development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+
+Follow these phases. Remember: you may read files, search the codebase, and run tests or exploratory commands to understand behavior, but you must NOT modify the codebase or write any files.
+
+Phase 1. READING: read the problem and reword it in clearer terms
+   1.1 If there are code or config snippets, express in words any best practices or conventions in them.
+   1.2 Highlight message errors, method names, variables, file names, stack traces, and technical details.
+   1.3 Explain the problem in clear terms.
+   1.4 Enumerate the steps to reproduce the problem.
+   1.5 Highlight any best practices to take into account when testing and fixing the issue.
+
+Phase 2. UNDERSTANDING THE PROJECT: explore the codebase and learn how it works
+   2.1 Map the overall project structure and identify the packages/modules relevant to the issue.
+   2.2 Read the source of the affected functions/methods/classes and understand how they are called and how data flows through them.
+   2.3 Identify related helpers, abstractions, and conventions the fix would need to respect.
+
+Phase 3. TEST DISCOVERY: understand how the tests are structured and run
+   3.1 First look for an existing Python environment. Prefer common conda locations like /opt/miniconda3, ./opt/miniconda3, or /opt/conda; then check /usr/local/bin; then check for .venv or venv inside {{ instance.repo_path }}.
+   3.2 Check for pytest.ini, setup.cfg, pyproject.toml, or tox.ini for test configuration, and follow the README for any project-specific test instructions.
+   3.3 Run the relevant existing tests (with `pytest` or the project's configured test runner) to observe the current state.
+   3.4 Locate the existing test files that cover the affected code, and understand their format and conventions so a reproduction test would fit in naturally.
+
+Phase 4. LOCATING THE PROBLEM: find the files and code that would need to change
+   4.1 Use `grep` to search for relevant methods, classes, keywords, and error messages.
+   4.2 Identify all files related to the problem statement.
+   4.3 Determine the most likely location(s) where the fix belongs and explain why.
+
+Phase 5. PLANNING: produce a concrete, actionable plan (do NOT implement it). The plan must cover:
+   5.1 REPRODUCTION TESTS: how you would create a test that reproduces the core issue — which test file it belongs in, the exact scenario it sets up, what it would assert, and how it fails today (the observed vs. expected behavior).
+   5.2 FIX IMPLEMENTATION: precisely what changes you would make and where (files, functions, methods), and why this approach is correct and minimal.
+       5.2.1 EXECUTION-PATH TRACING: do not stop at the first function that looks responsible. For each distinct category of input the issue and your test cases cover (e.g. same-type vs. mixed-type operands, direct vs. reflected/flipped operators, scalar vs. container, empty vs. non-empty, fast-path vs. broadcast/alignment/fallback branch), trace the ACTUAL code path that input takes from the public entry point down to where the fix must act. Inputs that look similar often dispatch through different helpers — a common-looking function may be bypassed entirely by a specialized branch (a broadcast helper, a reflected-operator handler, a reindex/align path, a type-specific override).
+       5.2.2 PER-PATH COVERAGE: list every distinct code path you found, and for each one state the specific edit that makes it correct. A single change to a shared helper does NOT automatically fix paths that never reach that helper — each such path needs its own verified change. Explicitly note any path you are choosing NOT to modify and why it is already correct.
+   5.3 TEST STRATEGY: design a thorough test plan that goes well beyond the single reproduction case. This is the most important part of the plan — be specific and exhaustive. It must cover:
+       5.3.1 CASE ENUMERATION: systematically enumerate the input/behavior space of the affected code and list the concrete cases worth testing. Explicitly work through these categories and state which apply:
+             - Happy-path / typical cases that must keep working.
+             - Boundary values: empty inputs, single-element inputs, zero, negative numbers, maximum/minimum values, off-by-one edges, first/last elements, thresholds where behavior changes.
+             - Special / degenerate values: null/None, NaN/inf, empty string, whitespace, zero-length collections, duplicate or unsorted data, unicode/encoding edges.
+             - Type and shape variations relevant to the affected API (e.g. different dtypes, nested vs. flat, mixed types).
+             - Error and failure modes: invalid inputs that should raise, and the exact exception type/message expected.
+             - Interaction/regression cases: nearby behaviors or call sites that could be affected by the fix and must be shown NOT to regress.
+       5.3.2 CASE-TO-TEST MAPPING: for each case above that you would test, specify the concrete test (name, the file it belongs in, the input it constructs, and the exact assertion / expected output), and the code path from 5.2.1 it exercises. Prefer table-driven or parametrized tests where the framework supports them, following the repository's existing conventions. If any enumerated case exercises a code path that no planned edit touches, that is a coverage gap — go back to 5.2 and add the missing change.
+       5.3.3 EXPECTED OUTCOMES: for every case, state the expected result BEFORE the fix (which fail, which already pass) and AFTER the fix (all pass), so the tests unambiguously demonstrate the fix.
+       5.3.4 EXECUTION PLAN: the exact commands to run these tests (test runner, selection flags, specific test paths/ids), the order to run them in, and how to interpret pass/fail. Include both the new tests and the existing related tests that guard against regressions.
+   5.4 RISKS AND EDGE CASES: call out the trickiest edge cases from 5.3, any cases you are unsure how the code should behave for (and how you would resolve that ambiguity), and any risks or trade-offs in the fix.
+   5.5 TIME ESTIMATE: estimate the total development effort needed to carry out this plan — writing the reproduction and boundary-case tests, implementing the fix, and verifying it. The plan above is the justification, so give a single number only. Emit this section in EXACTLY the following machine-parseable format, on its own line, so it can be extracted programmatically later. Report the duration in hours as a plain decimal number (no units, no range — a single best-estimate number):
+
+```
+### TIME_ESTIMATE
+total_hours: <number>
+```
+
+Phase 6. SELF-REVIEW: critically review your own plan.
+   6.1 Re-read the problem description and check the plan fully addresses every requirement.
+   6.2 Look for gaps, incorrect assumptions, missed files, or steps that would not actually work.
+   6.3 Scrutinize the TEST STRATEGY specifically: are there boundary or special-value cases you skipped? Would the tests actually fail before the fix and pass after? Are the expected outcomes correct? Add any missing cases.
+   6.4 Verify EXECUTION-PATH COVERAGE: for every case in the test strategy, confirm you actually traced its code path (5.2.1) rather than assuming it reuses the main one. Mixed-type, reflected/flipped-operator, broadcast/alignment, empty-input, and type-specific-override paths are the usual blind spots — a fix that only covers the common path silently fails the cases that bypass it. If any case's path was assumed but not traced, trace it now and add the edit it needs.
+   6.5 Revise and iterate on the plan as many times as needed until you are confident it is solid, complete, and correct.
+
+When — and only when — you are confident the plan is solid, call the `finish` tool. Pass the finalized plan as the message, organized clearly into the reproduction tests, fix implementation, test strategy (with its enumerated boundary cases, case-to-test mapping, expected outcomes, and execution plan), risks/edge-cases, and time-estimate sections described above. The message MUST include the `### TIME_ESTIMATE` block verbatim in the exact key/value format specified in Phase 5.5 so it can be parsed programmatically.
+
+Be thorough in your exploration, reasoning, and planning. It's fine if your process is lengthy — quality and completeness of the plan are what matter. Do NOT edit the codebase or create any files.
