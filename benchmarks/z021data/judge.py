@@ -44,15 +44,28 @@ _CORE_DIR = Path(__file__).resolve().parent / "core"
 F2P_TEST_FILE = "test_f2p_generated.py"
 
 
+def _has_registry_host(image_url: str) -> bool:
+    """True if ``image_url`` already carries a registry host component.
+
+    Docker's rule: the first '/'-separated component is a registry host when it
+    contains a '.' or ':' or equals 'localhost'. Otherwise the reference is a
+    bare ``namespace/repo`` on the default registry and a prefix may be added.
+    """
+    head, sep, _ = image_url.partition("/")
+    if not sep:
+        return False
+    return "." in head or ":" in head or head == "localhost"
+
+
 def _resolve_image_url(image_url: str, prefix: str | None = None) -> str:
     """Prepend a registry/namespace prefix to a bare ``image_url``.
 
-    Matches the offline validator's image resolution:
-    ``f"{prefix}/{image_url}".lower()``. When no prefix is given the URL is
-    used as-is (still lowercased, since Docker tags are case-sensitive and the
-    images are published lowercase).
+    When no prefix is given, or when ``image_url`` already carries a registry
+    host (e.g. ``myregistry.com/ns/repo:tag``), the URL is returned unchanged
+    (still lowercased, since the images are published lowercase). Otherwise the
+    prefix is prepended, matching the offline validator's ``f"{prefix}/{url}"``.
     """
-    if not prefix:
+    if not prefix or _has_registry_host(image_url):
         return image_url.lower()
     return f"{prefix.rstrip('/')}/{image_url}".lower()
 
@@ -81,8 +94,8 @@ class Z021DataJudge(ExecutionBasedJudge):
     """
 
     docker_image_prefix: str | None = Field(
-        default="021harbor.zero2x.org",
-        description="Registry/namespace prefix prepended to the image_url",
+        default=None,
+        description="Registry/namespace prefix prepended to a bare image_url",
     )
     rm_image: bool = Field(
         default=False,

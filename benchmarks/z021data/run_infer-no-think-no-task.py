@@ -46,26 +46,42 @@ from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspa
 
 logger = get_logger(__name__)
 
-# Default registry/namespace prefix prepended to each instance's bare image_url
-# (e.g. 'swe_pr_agent/python_images:foo' -> '021harbor.zero2x.org/swe_pr_agent/...').
-DEFAULT_DOCKER_IMAGE_PREFIX = "021harbor.zero2x.org"
+# Registry/namespace prefix prepended to each instance's bare image_url.
+# Left unset by default; supply your own registry via --docker-image-prefix.
+DEFAULT_DOCKER_IMAGE_PREFIX = None
+
+
+def _has_registry_host(image_url: str) -> bool:
+    """True if ``image_url`` already carries a registry host component.
+
+    Docker's rule: the first '/'-separated component is a registry host when it
+    contains a '.' or ':' or equals 'localhost'. Otherwise the reference is a
+    bare ``namespace/repo`` on the default registry and a prefix may be added.
+    """
+    head, sep, _ = image_url.partition("/")
+    if not sep:
+        return False
+    return "." in head or ":" in head or head == "localhost"
 
 
 def resolve_image_url(image_url: str, prefix: str | None = None) -> str:
     """Resolve Docker image URL with an optional namespace/registry prefix.
 
     Unlike Scale-SWE (which *replaces* everything before the last '/'), z021data
-    images are published as bare ``swe_pr_agent/python_images:<instance>`` names
-    that must be *prepended* with the registry prefix, mirroring the offline
-    validator's ``f"{prefix}/{image_url}".lower()`` resolution.
+    images are published as bare ``namespace/repo:<instance>`` names that are
+    *prepended* with the registry prefix. When no prefix is given, or when the
+    URL already carries a registry host (e.g. ``myregistry.com/ns/repo:tag``),
+    it is returned unchanged (lowercased, as the images are published lowercase).
 
     Examples:
-        resolve_image_url("swe_pr_agent/python_images:foo", None)
-            -> "swe_pr_agent/python_images:foo"
-        resolve_image_url("swe_pr_agent/python_images:foo", "021harbor.zero2x.org")
-            -> "021harbor.zero2x.org/swe_pr_agent/python_images:foo"
+        resolve_image_url("ns/repo:foo", None)
+            -> "ns/repo:foo"
+        resolve_image_url("ns/repo:foo", "myregistry.com")
+            -> "myregistry.com/ns/repo:foo"
+        resolve_image_url("myregistry.com/ns/repo:foo", "other.com")
+            -> "myregistry.com/ns/repo:foo"   # existing registry preserved
     """
-    if not prefix:
+    if not prefix or _has_registry_host(image_url):
         return image_url.lower()
     return f"{prefix.rstrip('/')}/{image_url}".lower()
 
@@ -144,7 +160,8 @@ class Z021DataEvaluation(Evaluation):
 
     Key differences from SWEBenchEvaluation:
     - Docker images come from the dataset's ``image_url`` field (pre-built),
-      *prepended* with ``docker_image_prefix`` (default 021harbor.zero2x.org).
+      optionally *prepended* with ``docker_image_prefix`` when the URL has no
+      registry host of its own.
     - Repo is already at ``workdir`` (default /app; no /testbed copy needed).
     - Uses ``parent_commit`` as the base commit and checks it out before the
       agent starts, so the git diff base is the pre-fix state.
@@ -538,9 +555,9 @@ def main() -> None:
         default=DEFAULT_DOCKER_IMAGE_PREFIX,
         help=(
             "Registry/namespace prefix prepended to the dataset's bare "
-            "image_url. E.g. '021harbor.zero2x.org' turns "
-            "'swe_pr_agent/python_images:foo' into "
-            "'021harbor.zero2x.org/swe_pr_agent/python_images:foo'."
+            "image_url. E.g. 'myregistry.com' turns "
+            "'ns/repo:foo' into 'myregistry.com/ns/repo:foo'. Ignored when "
+            "the image_url already includes a registry host."
         ),
     )
     add_judge_args(parser, default_judge="z021data")

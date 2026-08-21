@@ -515,7 +515,7 @@ def load_test_data_from_jsonl(jsonl_file: Path) -> List[Dict]:
     return test_data_list
 
 
-def pull_docker_image(client: docker.DockerClient, image_name: str, registry_prefix: str = "021harbor.zero2x.org", max_retries: int = 3) -> bool:
+def pull_docker_image(client: docker.DockerClient, image_name: str, registry_prefix: str = "", max_retries: int = 3) -> bool:
     """Pull Docker image from remote registry with retry mechanism.
 
     Args:
@@ -1222,8 +1222,8 @@ def main():
     parser.add_argument(
         "--docker-image-prefix",
         type=str,
-        default="021harbor.zero2x.org",
-        help="Docker registry prefix (default: 021harbor.zero2x.org)"
+        default="",
+        help="Docker registry prefix prepended to bare image_url values"
     )
     parser.add_argument(
         "--all",
