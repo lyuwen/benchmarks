@@ -188,7 +188,7 @@ class Z021DataJudge(ExecutionBasedJudge):
         test_command = (
             instance_data.get("test_command")
             or (parsed.get("command") if isinstance(parsed, dict) else "")
-            or instance_data.get("pre_commands")
+            # or instance_data.get("pre_commands")
             or ""
         ).strip()
         runner = core.detect_runner(test_command)
@@ -254,6 +254,7 @@ class Z021DataJudge(ExecutionBasedJudge):
             if base_commit:
                 exec_cmd(f"git checkout {base_commit} -f", "Checkout base commit")
                 exec_cmd("git checkout .", "Clean working directory")
+                exec_cmd("git clean -fd", "Clean working directory")
 
             # Step 2/3: apply ground-truth test patch + f2p_patch.
             core.apply_patch(

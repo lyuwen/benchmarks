@@ -81,6 +81,7 @@ def resolve_image_url(image_url: str, prefix: str | None = None) -> str:
         resolve_image_url("myregistry.com/ns/repo:foo", "other.com")
             -> "myregistry.com/ns/repo:foo"   # existing registry preserved
     """
+    # image_url already has registry url prefix
     if not prefix or _has_registry_host(image_url):
         return image_url.lower()
     return f"{prefix.rstrip('/')}/{image_url}".lower()
@@ -402,7 +403,7 @@ class Z021DataEvaluation(Evaluation):
         if base_commit:
             logger.info("Checking out base commit %s for %s", base_commit, instance.id)
             checkout = workspace.execute_command(
-                f"cd {repo_path} && git checkout {base_commit} -f && git checkout ."
+                f"cd {repo_path} && git checkout {base_commit} -f && git checkout . && git clean -fd"
             )
             if checkout.exit_code != 0:
                 logger.warning(
