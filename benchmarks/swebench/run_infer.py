@@ -16,6 +16,7 @@ from benchmarks.swebench.build_images import (
 from benchmarks.utils.args_parser import get_parser
 from benchmarks.utils.mirror_config import get_mirror_env_commands
 from benchmarks.utils.httpbin_fix import make_httpbin_setup_commands
+from benchmarks.utils.network_isolation import maybe_disable_network
 from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
@@ -288,6 +289,8 @@ class SWEBenchEvaluation(Evaluation):
                     )
                 else:
                     logger.debug("Ran httpbin setup command '%s': %s", cmd, res.stdout)
+
+        maybe_disable_network(workspace)
         return workspace
 
     # ---- Hook: evaluate one instance ---------------------------------------------
