@@ -1,0 +1,12 @@
+{# benchmarks/scaleswe_interactive/prompts/initial_instruction.j2 #}
+I need help solving a problem in the repository located at {{ actual_workspace_path }} (repo directory: {{ workspace_dir_name }}).
+
+Here is the problem statement:
+
+{{ instance.problem_statement }}
+
+{% if mode == "plan" -%}
+Please start by exploring the repo to understand the issue, then present a plan for my approval before making changes.
+{% else -%}
+Please explore the repo, implement a fix, and verify it with tests. Check in with me if you need input.
+{% endif -%}
