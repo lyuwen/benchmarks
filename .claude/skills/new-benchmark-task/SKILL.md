@@ -139,6 +139,20 @@ These are the mistakes that are easy to make and expensive to miss:
 - **The dataset `.gitignore` may ignore everything** (`*`). `git add` respects
   it so the large dataset stays out of commits — confirm with `git add -n`
   before committing, and commit only the code files.
+- **Scrub git history when the image is built AHEAD of the base commit.** If the
+  pre-built image sits at the *fix* state (e.g. z021data at `pr_commit`) and
+  inference checks out *backwards* to the base commit, the gold fix and
+  test-generation commits stay reachable via branches, tags, remote-tracking
+  refs, and the reflog — the agent can inspect the solution (`git log --all`,
+  `git show <fix>`) and stray refs pollute the final `git diff base HEAD`. After
+  checkout, pin one branch at the base commit and delete every other
+  branch/tag/remote, then `git reflog expire --expire=now --all` and
+  `git gc --prune=now` so the base is the sole reachable tip. Verify with a
+  local git simulation that `git show <fix>` returns "bad object" and
+  `git diff base HEAD` still works after committing. The judge is unaffected —
+  it runs in a fresh container from the image with full history. (Tasks like
+  swebench/swerebench that start at HEAD=base don't need this — a plain
+  `git reset --hard` suffices.)
 - **Empty patch → `False`; missing docker/env → `None`.** A judge must never
   crash the run.
 
