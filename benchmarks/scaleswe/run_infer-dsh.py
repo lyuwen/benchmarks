@@ -295,6 +295,7 @@ class ScaleSWEDSHEvaluation(Evaluation):
             llm=self.metadata.llm,
             tools=tools,
             system_prompt_kwargs={"cli_mode": True},
+            include_default_tools=["FinishTool"],
         )
 
         assert isinstance(workspace, RemoteWorkspace)
