@@ -2,7 +2,7 @@ import os
 import json
 import inspect
 from pathlib import Path
-from typing import List
+from typing import List, Literal
 
 from jinja2 import Environment, FileSystemLoader
 from pydantic import Field
@@ -41,13 +41,25 @@ from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
 
-# Import DeepSeek minimal preset — also triggers tool registration.
-from openhands.tools.deepseek.preset import get_deepseek_minimal_tools
-from openhands.tools.deepseek.bash.definition import DeepSeekBashTool  # noqa: F401
-from openhands.tools.deepseek.str_replace_editor.definition import DeepSeekStrReplaceEditorTool  # noqa: F401
+# Import DSH presets — also triggers tool registration.
+from openhands.tools.deepseek.preset import (  # noqa: F401
+    get_deepseek_minimal_tools,
+    get_deepseek_standard_tools,
+)
 
 
 logger = get_logger(__name__)
+
+DSH_TOOL_SETS = ("minimal", "standard")
+
+
+def get_dsh_tools(tool_set: str) -> list:
+    """Return the DSH tool list for the given tool_set name."""
+    if tool_set == "minimal":
+        return get_deepseek_minimal_tools()
+    if tool_set == "standard":
+        return get_deepseek_standard_tools()
+    raise ValueError(f"Unknown DSH tool set '{tool_set}'. Choose from: {DSH_TOOL_SETS}")
 
 
 def resolve_image_url(image_url: str, prefix: str | None = None) -> str:
@@ -100,15 +112,18 @@ def get_instruction(
 
 class ScaleSWEDSHEvaluation(Evaluation):
     """
-    Scale-SWE evaluation using the DeepSeek-harness minimum tool set
-    (bash + str_replace_editor, no think/task/finish, no fake user messages).
+    Scale-SWE evaluation using a DeepSeek-harness-compatible tool set.
+    No fake user messages are injected; the conversation runs once to completion.
 
-    Key differences from ScaleSWEEvaluation:
-    - Uses DeepSeek-compatible bash and str_replace_editor tools only.
-    - Conversation runs once to completion; no fake user responses are injected.
-    - No use_legacy_tools option.
+    Two tool sets are available via --dsh-tool-set:
+      minimal   bash + str_replace_editor  (default)
+      standard  bash + read + write + edit + glob + grep
     """
 
+    dsh_tool_set: Literal["minimal", "standard"] = Field(
+        default="minimal",
+        description="DSH tool set to use: 'minimal' (bash+str_replace_editor) or 'standard' (bash+read+write+edit+glob+grep)",
+    )
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
     )
@@ -270,10 +285,11 @@ class ScaleSWEDSHEvaluation(Evaluation):
         """
         Create conversation, run agent to completion, collect history and git patch.
 
-        Uses the DeepSeek minimum tool set (bash + str_replace_editor).
+        Uses the selected DSH tool set (minimal or standard).
         The conversation runs once without fake user message injection.
         """
-        tools = get_deepseek_minimal_tools()
+        tools = get_dsh_tools(self.dsh_tool_set)
+        logger.info("Using DSH tool set: %s", self.dsh_tool_set)
 
         agent = Agent(
             llm=self.metadata.llm,
@@ -461,6 +477,18 @@ def main() -> None:
         help="Path to prompt template file",
     )
     parser.add_argument(
+        "--dsh-tool-set",
+        type=str,
+        default="minimal",
+        choices=list(DSH_TOOL_SETS),
+        help=(
+            "DSH tool set to use. "
+            "'minimal': bash + str_replace_editor. "
+            "'standard': bash + read + write + edit + glob + grep. "
+            "Default: minimal."
+        ),
+    )
+    parser.add_argument(
         "--bind-dev-sdk",
         action="store_true",
         help="Bind SDK paths for dev features",
@@ -531,6 +559,7 @@ def main() -> None:
     evaluator = ScaleSWEDSHEvaluation(
         metadata=metadata,
         num_workers=args.num_workers,
+        dsh_tool_set=args.dsh_tool_set,
         bind_dev_sdk=args.bind_dev_sdk,
         docker_image_prefix=args.docker_image_prefix,
         judge=judge,
