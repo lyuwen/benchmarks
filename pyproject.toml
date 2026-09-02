@@ -117,3 +117,11 @@ members = [
   "vendor/software-agent-sdk/openhands-workspace",
   "vendor/software-agent-sdk/openhands-agent-server",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "benchmarks"]
+python_files = ["test_*.py"]
+markers = [
+    "docker: requires a working Docker daemon (excluded by default; run with -m docker)",
+]
+addopts = "-m 'not docker'"
