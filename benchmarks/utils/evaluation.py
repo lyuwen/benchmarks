@@ -53,6 +53,21 @@ class Evaluation(ABC, BaseModel):
         # Ensure output directory exists
         os.makedirs(self.metadata.eval_output_dir, exist_ok=True)
 
+        # Resolve and persist the egress policy before writing metadata.json.
+        # Resolution must happen here (not in prepare_workspace) because
+        # metadata.json is written below and prepare_workspace runs much later.
+        from benchmarks.utils.workspace_network import resolve_network_policy
+        from openhands.workspace.docker.nftables_renderer import (
+            policy_digest,
+            render_rules,
+        )
+
+        policy = resolve_network_policy(self.metadata.workspace_type)
+        self.metadata.network_mode = policy.mode
+        self.metadata.network_policy_digest = (
+            policy_digest(render_rules(policy)) if policy.requires_sidecar else None
+        )
+
         # Save metadata to JSON file
         metadata_file = os.path.join(self.metadata.eval_output_dir, "metadata.json")
         with open(metadata_file, "w", encoding="utf-8") as f:
