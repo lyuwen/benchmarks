@@ -481,7 +481,7 @@ class Evaluation(ABC, BaseModel):
         pool: ProcessPoolExecutor,
         futures: list,
         wait: bool = False,
-        grace_seconds: float = 5.0,
+        grace_seconds: float = 30.0,
     ) -> None:
         """Clean up pool by canceling futures, terminating workers, and shutting down.
 
@@ -490,14 +490,17 @@ class Evaluation(ABC, BaseModel):
             futures: List of futures to cancel
             wait: Whether to wait for workers to finish (True) or terminate immediately (False)
             grace_seconds: Seconds to wait for workers to exit after SIGTERM
-                before SIGKILL. Deliberately 5.0 rather than the 30s the design
-                spec suggested: forked workers inherit non-daemon Laminar SDK
-                threads that keep the process alive past the end of its own
-                work, so a longer grace period only delays the inevitable
-                SIGKILL. tests/test_keyboard_interrupt.py also allows the parent
-                only 10s to exit, which a 30s grace would blow past. 5.0s is
-                ample for the worker's finally block (workspace.__exit__, which
-                issues Docker stop/rm) to finish. Callers needing a longer
+                before SIGKILL. Must comfortably exceed the container stops a
+                worker performs sequentially in its cleanup ``finally``
+                (``workspace.__exit__``): each Docker stop uses a 10s stop
+                timeout, and normal cleanup stops the main workspace container
+                and then the egress sidecar, so a short window risks SIGKILL
+                landing mid-cleanup and orphaning Docker resources. 30.0s
+                covers both stops plus margin. Note that forked workers inherit
+                non-daemon Laminar SDK threads that keep the process alive past
+                the end of its own work, so some workers will still need the
+                SIGKILL at the deadline: the grace period protects cleanup, it
+                does not guarantee a clean exit. Callers needing a different
                 window can pass grace_seconds explicitly.
         """
         # Cancel all pending futures

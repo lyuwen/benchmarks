@@ -188,7 +188,7 @@ def test_keyboard_interrupt_cleanup():
 
         # Wait for process to exit
         try:
-            process.wait(timeout=10)
+            process.wait(timeout=45)
             print(f"Process exited with code: {process.returncode}")
         except subprocess.TimeoutExpired:
             print("Process did not exit in time, force killing")
@@ -262,7 +262,7 @@ def test_keyboard_interrupt_immediate():
 
         # Wait for cleanup
         try:
-            process.wait(timeout=10)
+            process.wait(timeout=45)
         except subprocess.TimeoutExpired:
             process.kill()
 
