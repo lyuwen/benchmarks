@@ -96,6 +96,22 @@ class Evaluation(ABC, BaseModel):
             f.write(self.metadata.model_dump_json(indent=2))
         logger.info(f"Saved metadata to {metadata_file}")
 
+        # A previous run killed by SIGKILL or a host failure cannot have run
+        # cleanup, so reclaim its leftovers before this run starts. Never let
+        # a reconciliation problem prevent the evaluation from starting.
+        try:
+            from openhands.workspace.docker.egress_runtime import reconcile_orphans
+
+            reclaimed = reconcile_orphans()
+            if reclaimed:
+                logger.info(
+                    "Reclaimed %d orphaned egress workspace(s): %s",
+                    len(reclaimed),
+                    ", ".join(reclaimed),
+                )
+        except Exception as exc:  # noqa: BLE001 - never block startup
+            logger.warning("Orphan reconciliation skipped: %s", exc)
+
     @property
     def output_path(self) -> str:
         return os.path.join(self.metadata.eval_output_dir, OUTPUT_FILENAME)
