@@ -3,6 +3,7 @@ Evaluation orchestrator.
 """
 
 import json
+import math
 import os
 import signal
 import sys
@@ -37,6 +38,44 @@ from openhands.workspace import APIRemoteWorkspace
 
 
 logger = get_logger(__name__)
+
+SHUTDOWN_GRACE_SECONDS_ENV_VAR = "OH_SHUTDOWN_GRACE_SECONDS"
+DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
+
+
+def resolve_shutdown_grace_seconds() -> float:
+    """Resolve the worker shutdown grace period from the environment.
+
+    Reads ``OH_SHUTDOWN_GRACE_SECONDS`` and falls back to
+    ``DEFAULT_SHUTDOWN_GRACE_SECONDS`` (30.0) when it is unset, unparseable,
+    or not a positive finite number. A malformed value is logged as a warning
+    rather than raised, so a bad host setting never breaks a shutdown path.
+    """
+    raw = os.environ.get(SHUTDOWN_GRACE_SECONDS_ENV_VAR)
+    if raw is None or raw.strip() == "":
+        return DEFAULT_SHUTDOWN_GRACE_SECONDS
+
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a number; using default %.1fs",
+            SHUTDOWN_GRACE_SECONDS_ENV_VAR,
+            raw,
+            DEFAULT_SHUTDOWN_GRACE_SECONDS,
+        )
+        return DEFAULT_SHUTDOWN_GRACE_SECONDS
+
+    if not math.isfinite(value) or value <= 0:
+        logger.warning(
+            "%s=%r must be a positive finite number; using default %.1fs",
+            SHUTDOWN_GRACE_SECONDS_ENV_VAR,
+            raw,
+            DEFAULT_SHUTDOWN_GRACE_SECONDS,
+        )
+        return DEFAULT_SHUTDOWN_GRACE_SECONDS
+
+    return value
 
 
 def install_worker_signal_handlers() -> None:
@@ -481,7 +520,7 @@ class Evaluation(ABC, BaseModel):
         pool: ProcessPoolExecutor,
         futures: list,
         wait: bool = False,
-        grace_seconds: float = 30.0,
+        grace_seconds: float | None = None,
     ) -> None:
         """Clean up pool by canceling futures, terminating workers, and shutting down.
 
@@ -490,8 +529,12 @@ class Evaluation(ABC, BaseModel):
             futures: List of futures to cancel
             wait: Whether to wait for workers to finish (True) or terminate immediately (False)
             grace_seconds: Seconds to wait for workers to exit after SIGTERM
-                before SIGKILL. Must comfortably exceed the container stops a
-                worker performs sequentially in its cleanup ``finally``
+                before SIGKILL. When None (the default) the value is read from
+                the ``OH_SHUTDOWN_GRACE_SECONDS`` environment variable, a
+                host-operator setting, falling back to 30.0s; an explicit
+                argument always wins over the environment. The value must
+                comfortably exceed the container stops a worker performs
+                sequentially in its cleanup ``finally``
                 (``workspace.__exit__``): each Docker stop uses a 10s stop
                 timeout, and normal cleanup stops the main workspace container
                 and then the egress sidecar, so a short window risks SIGKILL
@@ -500,9 +543,12 @@ class Evaluation(ABC, BaseModel):
                 non-daemon Laminar SDK threads that keep the process alive past
                 the end of its own work, so some workers will still need the
                 SIGKILL at the deadline: the grace period protects cleanup, it
-                does not guarantee a clean exit. Callers needing a different
-                window can pass grace_seconds explicitly.
+                does not guarantee a clean exit.
         """
+        if grace_seconds is None:
+            grace_seconds = resolve_shutdown_grace_seconds()
+        logger.info("Worker shutdown grace period: %.1fs", grace_seconds)
+
         # Cancel all pending futures
         for fut in futures:
             fut.cancel()

@@ -91,6 +91,20 @@ if __name__ == "__main__":
 """
 
 
+def subprocess_env() -> dict:
+    """Environment for the spawned evaluation, with a short shutdown grace.
+
+    Production defaults to 30s (see OH_SHUTDOWN_GRACE_SECONDS in
+    benchmarks.utils.evaluation); the workers here inherit non-daemon Laminar
+    threads via fork and can only exit at the SIGKILL deadline, so the full
+    window would just be dead wait. The default itself is covered cheaply in
+    tests/test_worker_shutdown.py.
+    """
+    env = os.environ.copy()
+    env["OH_SHUTDOWN_GRACE_SECONDS"] = "3"
+    return env
+
+
 def get_child_processes(parent_pid: int) -> list:
     """Get all child processes of a parent process recursively."""
     try:
@@ -120,6 +134,7 @@ def test_keyboard_interrupt_cleanup():
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=subprocess_env(),
         )
 
         # Wait for the process to start and get its PID
@@ -188,7 +203,7 @@ def test_keyboard_interrupt_cleanup():
 
         # Wait for process to exit
         try:
-            process.wait(timeout=45)
+            process.wait(timeout=15)
             print(f"Process exited with code: {process.returncode}")
         except subprocess.TimeoutExpired:
             print("Process did not exit in time, force killing")
@@ -239,6 +254,7 @@ def test_keyboard_interrupt_immediate():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=subprocess_env(),
         )
 
         # Get PID
@@ -262,7 +278,7 @@ def test_keyboard_interrupt_immediate():
 
         # Wait for cleanup
         try:
-            process.wait(timeout=45)
+            process.wait(timeout=15)
         except subprocess.TimeoutExpired:
             process.kill()
 
