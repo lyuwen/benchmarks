@@ -4,7 +4,9 @@ Evaluation orchestrator.
 
 import json
 import os
+import signal
 import sys
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -35,6 +37,26 @@ from openhands.workspace import APIRemoteWorkspace
 
 
 logger = get_logger(__name__)
+
+
+def install_worker_signal_handlers() -> None:
+    """Make SIGTERM/SIGINT raise so the worker's cleanup `finally` runs.
+
+    ProcessPoolExecutor shutdown sends SIGTERM. Under the default disposition
+    the process dies immediately and the `finally` that calls
+    workspace.__exit__ never executes, orphaning containers and networks.
+    Raising KeyboardInterrupt routes termination through normal unwinding.
+
+    The handler only raises: no Docker or other I/O work happens inside an
+    asynchronous signal handler.
+    """
+
+    def _raise_on_signal(signum, frame):  # type: ignore[no-untyped-def]
+        raise KeyboardInterrupt(f"worker received signal {signum}")
+
+    signal.signal(signal.SIGTERM, _raise_on_signal)
+    signal.signal(signal.SIGINT, _raise_on_signal)
+
 
 OnResult = Callable[[EvalInstance, EvalOutput], None]
 
@@ -443,6 +465,7 @@ class Evaluation(ABC, BaseModel):
         pool: ProcessPoolExecutor,
         futures: list,
         wait: bool = False,
+        grace_seconds: float = 5.0,
     ) -> None:
         """Clean up pool by canceling futures, terminating workers, and shutting down.
 
@@ -450,6 +473,7 @@ class Evaluation(ABC, BaseModel):
             pool: The ProcessPoolExecutor to clean up
             futures: List of futures to cancel
             wait: Whether to wait for workers to finish (True) or terminate immediately (False)
+            grace_seconds: Seconds to wait for workers to exit after SIGTERM before SIGKILL
         """
         # Cancel all pending futures
         for fut in futures:
@@ -457,14 +481,44 @@ class Evaluation(ABC, BaseModel):
 
         # Forcefully terminate all worker processes if not waiting
         if not wait and hasattr(pool, "_processes") and pool._processes:
-            for process in pool._processes.values():
+            processes = list(pool._processes.values())
+
+            # Shut down the executor first so the management thread stops
+            # scheduling new futures to workers that are about to be
+            # interrupted.  cancel_futures=True drains the pending call
+            # queue; workers that just finished a KBI exception will receive
+            # a poison pill instead of a fresh work item.
+            pool.shutdown(wait=False, cancel_futures=True)
+
+            # SIGTERM: gives each worker a chance to run its cleanup finally
+            # block (workspace.__exit__) before we SIGKILL.
+            for process in processes:
                 try:
                     process.terminate()
                 except Exception:
                     pass
 
-        # Shutdown the pool
-        pool.shutdown(wait=wait, cancel_futures=True)
+            # Wait for workers to exit gracefully before escalating
+            deadline = time.time() + grace_seconds
+            while time.time() < deadline:
+                if not any(p.is_alive() for p in processes):
+                    break
+                time.sleep(0.1)
+
+            # SIGKILL any stragglers that survived the grace period
+            for process in processes:
+                try:
+                    if process.is_alive():
+                        logger.warning(
+                            "Worker %s did not exit within %.1fs; sending SIGKILL",
+                            getattr(process, "pid", "?"),
+                            grace_seconds,
+                        )
+                        process.kill()
+                except Exception:
+                    pass
+        else:
+            pool.shutdown(wait=wait, cancel_futures=True)
 
     def _calculate_resource_factor(self, runtime_failure_count: int) -> int:
         """Calculate the resource factor based on runtime failure count.
@@ -496,6 +550,10 @@ class Evaluation(ABC, BaseModel):
         - Ensures proper context-managed cleanup
         - Returns (instance, output) so the parent can stream results
         """
+        # Convert SIGTERM/SIGINT to KeyboardInterrupt so the finally block that
+        # calls workspace.__exit__ runs when ProcessPoolExecutor terminates us.
+        install_worker_signal_handlers()
+
         # Set up instance-specific logging
         log_dir = os.path.join(self.metadata.eval_output_dir, "logs")
         reset_logger_for_multiprocessing(log_dir, instance.id)
