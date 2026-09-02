@@ -26,8 +26,10 @@ def test_handler_installed_for_sigint_too():
     originals = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
     try:
         install_worker_signal_handlers()
+        handler = signal.getsignal(signal.SIGINT)
+        assert callable(handler)
         with pytest.raises(KeyboardInterrupt):
-            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            handler(signal.SIGINT, None)
     finally:
         signal.signal(signal.SIGTERM, originals[0])
         signal.signal(signal.SIGINT, originals[1])
