@@ -1,11 +1,11 @@
-import os
 import json
+import os
 from pathlib import Path
 from typing import List
 
 from jinja2 import Environment, FileSystemLoader
-from pydantic import Field
 from omegaconf import OmegaConf
+from pydantic import Field
 
 from benchmarks.swebench.build_images import (
     extract_custom_tag,
@@ -13,40 +13,38 @@ from benchmarks.swebench.build_images import (
     should_wrap_instance_id,
     wrap_image,
 )
+
+# Import judge to trigger registration
+from benchmarks.swebench.judge import SWEBenchJudge  # noqa: F401
 from benchmarks.utils.args_parser import get_parser
-from benchmarks.utils.mirror_config import get_mirror_env_commands
-from benchmarks.utils.httpbin_fix import make_httpbin_setup_commands
 from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
-from benchmarks.utils.execution_judge import (
-    ExecutionBasedJudge,
-    add_judge_args,
-    create_judge,
-)
 from benchmarks.utils.dataset import get_dataset
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
     construct_eval_output_dir,
     get_default_on_result_writer,
 )
+from benchmarks.utils.execution_judge import (
+    ExecutionBasedJudge,
+    add_judge_args,
+    create_judge,
+)
 from benchmarks.utils.fake_user_response import run_conversation_with_fake_user_response
+from benchmarks.utils.httpbin_fix import make_httpbin_setup_commands
 from benchmarks.utils.image_utils import image_exists
+from benchmarks.utils.mirror_config import get_mirror_env_commands
 from benchmarks.utils.models import (
     EvalInstance,
     EvalMetadata,
     EvalOutput,
 )
 from benchmarks.utils.version import SDK_SHORT_SHA
-
-# Import judge to trigger registration
-from benchmarks.swebench.judge import SWEBenchJudge  # noqa: F401
-
 from openhands.sdk import LLM, Agent, Conversation, get_logger
 from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
-from openhands.sdk.llm.message import Message
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
@@ -258,7 +256,6 @@ class SWEBenchEvaluation(Evaluation):
                 forward_env=forward_env or [],
                 resource_factor=resource_factor,
                 init_timeout=startup_timeout,
-                startup_wait_timeout=startup_timeout,
             )
         else:
             raise ValueError(
