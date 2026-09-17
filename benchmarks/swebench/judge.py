@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import logging
 import traceback
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 import docker
@@ -37,6 +39,10 @@ class SWEBenchJudge(ExecutionBasedJudge):
         default=False,
         description="Remove Docker image after evaluation",
     )
+    evaluation_log_dir: str | None = Field(
+        default=None,
+        description="Directory in which SWE-bench stores judge logs and reports",
+    )
 
     def judge(
         self,
@@ -49,12 +55,12 @@ class SWEBenchJudge(ExecutionBasedJudge):
             return False
 
         try:
+            from swebench.harness import run_evaluation
             from swebench.harness.constants import (
                 KEY_INSTANCE_ID,
                 KEY_MODEL,
                 KEY_PREDICTION,
             )
-            from swebench.harness.run_evaluation import run_instance
             from swebench.harness.test_spec.test_spec import make_test_spec
         except (ImportError, ModuleNotFoundError) as e:
             logger.warning(
@@ -74,13 +80,19 @@ class SWEBenchJudge(ExecutionBasedJudge):
 
             client = docker.from_env(timeout=600)
 
-            result = run_instance(
+            if self.evaluation_log_dir is not None:
+                run_evaluation.RUN_EVALUATION_LOG_DIR = Path(
+                    self.evaluation_log_dir
+                ).resolve()
+
+            patch_digest = sha256(git_patch.encode()).hexdigest()[:16]
+            result = run_evaluation.run_instance(
                 test_spec=test_spec,
                 pred=pred,
                 rm_image=self.rm_image,
                 force_rebuild=self.force_rebuild,
                 client=client,
-                run_id="judge",
+                run_id=f"judge-{patch_digest}",
                 timeout=self.timeout,
             )
 

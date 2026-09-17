@@ -42,7 +42,7 @@ from benchmarks.utils.models import (
 from benchmarks.utils.version import SDK_SHORT_SHA
 
 # Import judge to trigger registration
-from benchmarks.swebench.judge import SWEBenchJudge  # noqa: F401
+from benchmarks.swebench.judge import SWEBenchJudge
 
 from openhands.sdk import LLM, Agent, Conversation, get_logger
 from openhands.sdk.event.base import LLMConvertibleEvent
@@ -518,6 +518,8 @@ def main() -> None:
 
     judge = create_judge(args)
     if judge is not None:
+        if isinstance(judge, SWEBenchJudge):
+            judge.evaluation_log_dir = str(Path(structured_output_dir) / "judge_logs")
         logger.info(f"Using judge: {type(judge).__name__}")
 
     metadata = EvalMetadata(
