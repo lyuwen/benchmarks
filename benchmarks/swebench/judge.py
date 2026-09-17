@@ -12,12 +12,13 @@ import logging
 import traceback
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import docker
 from pydantic import Field
 
 from benchmarks.utils.execution_judge import ExecutionBasedJudge, register_judge
+
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class SWEBenchJudge(ExecutionBasedJudge):
                 KEY_INSTANCE_ID,
                 KEY_MODEL,
                 KEY_PREDICTION,
+                SWEbenchInstance,
             )
             from swebench.harness.test_spec.test_spec import make_test_spec
         except (ImportError, ModuleNotFoundError) as e:
@@ -70,7 +72,7 @@ class SWEBenchJudge(ExecutionBasedJudge):
             return None
 
         try:
-            test_spec = make_test_spec(instance_data)
+            test_spec = make_test_spec(cast(SWEbenchInstance, instance_data))
 
             pred = {
                 KEY_INSTANCE_ID: instance_id,

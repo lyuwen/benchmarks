@@ -76,6 +76,17 @@ class EvalMetadata(BaseModel):
         default=None,
         description="Timeout in seconds for each conversation.run() call",
     )
+    network_mode: str = Field(
+        default="public",
+        description=(
+            "Resolved workspace egress mode (from OH_NETWORK_MODE). Persisted "
+            "so historical runs do not depend on a changing implicit value."
+        ),
+    )
+    network_policy_digest: str | None = Field(
+        default=None,
+        description="SHA-256 of the rendered nftables policy, if any.",
+    )
 
 
 EvalInstanceID = str
