@@ -135,6 +135,25 @@ def _reconcile_event_cache(event_list: object) -> None:
         cached_event_ids.update(e.id for e in cached_events)
 
 
+def _sync_events(conversation: "BaseConversation") -> None:
+    """Force a REST sync of the local event cache when supported.
+
+    For RemoteConversation the local ``state.events`` cache is populated
+    asynchronously via WebSocket; a full sync pulls any events the socket
+    hasn't delivered yet. No-op (never raises) when the event list does not
+    expose ``_do_full_sync`` (e.g. LocalConversation or test fakes without it).
+    """
+    event_list = getattr(conversation.state, "events", None)
+    sync_fn = getattr(event_list, "_do_full_sync", None)
+    if sync_fn is None:
+        return
+    try:
+        sync_fn()
+        _reconcile_event_cache(event_list)
+    except Exception:  # pragma: no cover - defensive; sync must never crash caller
+        logger.debug("event sync failed", exc_info=True)
+
+
 def _ensure_user_message_synced(
     conversation: "BaseConversation",
     max_retries: int = 30,
