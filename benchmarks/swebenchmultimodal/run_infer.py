@@ -10,6 +10,7 @@ from benchmarks.swebenchmultimodal.build_images import (
     get_official_docker_image,
 )
 from benchmarks.utils.args_parser import get_parser
+from benchmarks.utils.condenser import get_condenser
 from benchmarks.utils.mirror_config import get_mirror_env_commands
 from benchmarks.utils.build_utils import build_image
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
@@ -228,11 +229,13 @@ class SWEBenchEvaluation(Evaluation):
             llm=self.metadata.llm,
             tools=tools,
             system_prompt_kwargs={"cli_mode": True},
-            # TODO: we can enable condenser and security analyzer later
-            # and have them configurable via EvalMetadata
-            # condenser=get_default_condenser(
-            #     llm=self.metadata.llm.model_copy(update={"service_id": "condenser"})
-            # ),
+            condenser=get_condenser(
+                self.metadata.condenser,
+                self.metadata.llm,
+                self.metadata.condenser_config,
+            ),
+            # TODO: enable the security analyzer and make it configurable via
+            # EvalMetadata.
             # security_analyzer=LLMSecurityAnalyzer(),
         )
 
@@ -439,6 +442,8 @@ def main() -> None:
         max_retries=args.max_retries,
         workspace_type=args.workspace,
         conversation_timeout=args.conversation_timeout,
+        condenser=args.condenser,
+        condenser_config=args.condenser_config,
     )
 
     # Run orchestrator with a simple JSONL writer

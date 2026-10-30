@@ -3,6 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from benchmarks.utils.condenser import CondenserKind
 from benchmarks.utils.laminar import LaminarEvalMetadata
 from openhands.sdk import LLM, Event, get_logger
 from openhands.sdk.critic import CriticBase
@@ -75,6 +76,20 @@ class EvalMetadata(BaseModel):
     conversation_timeout: int | None = Field(
         default=None,
         description="Timeout in seconds for each conversation.run() call",
+    )
+    condenser: CondenserKind = Field(
+        default="none",
+        description=(
+            "Conversation condenser backend from --condenser: 'none' disables "
+            "condensation, 'legacy' uses LLMSummarizingCondenser, 'replay' uses "
+            "ReplaySummarizingCondenser."
+        ),
+    )
+    condenser_config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Extra keyword arguments forwarded to the selected condenser backend."
+        ),
     )
 
 

@@ -4,6 +4,7 @@ Argument parsing utilities for SWE-bench benchmarks.
 
 import argparse
 
+from benchmarks.utils.condenser import add_condenser_args
 from benchmarks.utils.critics import add_critic_args
 
 
@@ -59,6 +60,9 @@ def get_parser(add_llm_config: bool = True) -> argparse.ArgumentParser:
         default=3,
         help="Maximum number of attempts for iterative mode (default: 3, min: 1)",
     )
+
+    # Add condenser arguments
+    add_condenser_args(parser)
 
     # Add critic arguments
     add_critic_args(parser)
