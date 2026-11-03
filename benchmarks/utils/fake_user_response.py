@@ -187,7 +187,10 @@ def _llm_judges_finished(llm: "LLM", assistant_message: str) -> bool | None:
     ]
 
     try:
-        response = llm.completion(messages)
+        # Classification is a synchronous auxiliary call with no token callback;
+        # a streaming agent LLM would raise before reaching the API.
+        classifier_llm = llm.model_copy(update={"stream": False})
+        response = classifier_llm.completion(messages)
     except Exception:
         logger.warning(
             "Finish classification LLM call failed; falling back to the regular "

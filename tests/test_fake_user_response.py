@@ -31,12 +31,28 @@ def _message_event(
 class _FakeLLM:
     """Minimal stand-in for openhands.sdk LLM used as the classifier."""
 
-    def __init__(self, answer: str = "YES", error: Exception | None = None):
+    def __init__(
+        self,
+        answer: str = "YES",
+        error: Exception | None = None,
+        stream: bool = True,
+    ):
         self.answer = answer
         self.error = error
+        self.stream = stream
         self.calls: list[list[Message]] = []
+        self.completion_streams: list[bool] = []
+
+    def model_copy(self, *, update: dict | None = None) -> "_FakeLLM":
+        copied = _FakeLLM(self.answer, self.error, self.stream)
+        copied.calls = self.calls
+        copied.completion_streams = self.completion_streams
+        for key, value in (update or {}).items():
+            setattr(copied, key, value)
+        return copied
 
     def completion(self, messages: list[Message]) -> SimpleNamespace:
+        self.completion_streams.append(self.stream)
         self.calls.append(messages)
         if self.error is not None:
             raise self.error
@@ -201,3 +217,13 @@ def test_smart_runner_delegates_to_regular_runner(monkeypatch: pytest.MonkeyPatc
     assert isinstance(response_fn, partial)
     assert response_fn.func is smart_fake_user_response
     assert response_fn.keywords == {"encapsulate_solution": False}
+
+
+def test_classifier_call_is_not_streaming():
+    llm = _FakeLLM("YES", stream=True)
+    conversation = _make_conversation([_message_event("done")], llm)
+
+    response = smart_fake_user_response(conversation)
+
+    assert response  # the classification still ran through the copy
+    assert llm.completion_streams == [False]
