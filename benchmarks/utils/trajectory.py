@@ -1,10 +1,17 @@
-"""Export the model-view trajectory for one evaluation instance.
+"""Export the model-facing history for one evaluation instance.
 
-The per-instance ``*.history.json`` written by ``run_infer.py`` keeps ``messages``
-as the full event-dump transcript (unpruned, pre-condensation events included).
-This module derives the complementary ``trajectories`` view: the exact message
-lists the model saw, split at every condensation boundary, with the compaction
-request/response records in between:
+The per-instance ``*.history.json`` written by ``run_infer.py`` has two
+complementary views, both derived here:
+
+- ``messages``: the full event-dump transcript (forgotten events included). When
+  the features are on it carries two export-only annotations: tool results
+  pruned by the tool-result pruner keep their full text in ``original_content``,
+  and every ``Condensation`` event appears as a ``role="context"`` marker at the
+  point where it was triggered. With pruning and condensation off, this is byte
+  identical to the historical dump.
+- ``trajectories``: the exact message lists the model saw, split at every
+  condensation boundary, with the compaction request/response records in
+  between:
 
     segment 0 (before compaction 1)
     compaction 1 (trigger events, summarizer input, summarizer output, result)
@@ -14,18 +21,17 @@ request/response records in between:
 
 Each segment entry holds the accumulated model view at the end of that segment,
 so every earlier request from the segment is a prefix of the same message list.
-When tool-result pruning is enabled, pruned tool messages carry the removed
-content in ``original_content``. The pruning policy is read from the policy the
-agent recorded on its ``SystemPromptEvent`` at conversation start, so it cannot
-diverge from what the model actually saw.
+The pruning policy is read from the policy the agent recorded on its
+``SystemPromptEvent`` at conversation start, so it cannot diverge from what the
+model actually saw.
 
 Rollout:
-Only ``benchmarks/swebench/run_infer.py`` emits ``trajectories`` today. To adopt
-another task once this has been validated, mirror its three-line wiring: import
-``resolve_pruning_config`` / ``build_trajectories`` / ``pruning_metadata``, then
-after the conversation finishes resolve the policy and add ``trajectories`` and
-(conditionally) ``pruning`` to that task's ``dump_data`` before writing
-``{instance.id}.history.json``. ``messages`` stays unchanged in every task.
+Only ``benchmarks/swebench/run_infer.py`` uses this module today. To adopt another
+task once this has been validated, mirror its wiring: import
+``resolve_pruning_config`` / ``build_messages`` / ``build_trajectories`` /
+``pruning_metadata``, resolve the policy after the conversation finishes, then
+replace the manual event-to-messages dump with ``build_messages`` and add
+``trajectories`` and (conditionally) ``pruning`` to that task's ``dump_data``.
 """
 
 from collections.abc import Sequence
@@ -46,6 +52,7 @@ from openhands.sdk.event import Condensation, CondensationRequest, SystemPromptE
 
 TRAJECTORY = "trajectory"
 COMPACTION = "compaction"
+CONTEXT_ROLE = "context"
 
 
 def resolve_pruning_config(events: Sequence[Event]) -> ToolResultPruneConfig | None:
@@ -103,6 +110,48 @@ def pruning_metadata(config: ToolResultPruneConfig | None) -> dict[str, Any] | N
         "tail_chars": config.tail_chars,
         "marker": PRUNE_MARKER,
     }
+
+
+def build_messages(
+    events: Sequence[Event],
+    pruning_config: ToolResultPruneConfig | None = None,
+) -> list[dict[str, Any]]:
+    """Render the flat ``messages`` transcript with export annotations.
+
+    Args:
+        events: The conversation's append-only event log, in order.
+        pruning_config: Resolved pruning policy. Defaults to resolving it from
+            the event log.
+
+    Returns:
+        Chat-format messages for every LLM-convertible event, with pruned tool
+        results carrying ``original_content`` and a ``role="context"`` entry at
+        each ``Condensation`` event's position in the log.
+    """
+    config = (
+        pruning_config if pruning_config is not None else resolve_pruning_config(events)
+    )
+    messages: list[dict[str, Any]] = []
+    buffer: list[LLMConvertibleEvent] = []
+
+    def flush() -> None:
+        if not buffer:
+            return
+        messages.extend(
+            _render_messages(
+                LLMConvertibleEvent.events_to_messages(list(buffer)), config
+            )
+        )
+        buffer.clear()
+
+    for event in events:
+        if isinstance(event, Condensation):
+            flush()
+            messages.append(_condensation_message(event))
+        elif isinstance(event, LLMConvertibleEvent):
+            buffer.append(event)
+    flush()
+    return messages
 
 
 def build_trajectories(
@@ -167,11 +216,17 @@ def _render_model_view(
 
     The view applies condensation (forgetting plus summary insertion) and
     unmatched-tool-call filtering, so the result matches what the agent sent to
-    the LLM. Pruned tool messages keep their original text in
-    ``original_content``.
+    the LLM.
     """
     view = View.from_events(events)
-    messages = LLMConvertibleEvent.events_to_messages(view.events)
+    return _render_messages(LLMConvertibleEvent.events_to_messages(view.events), config)
+
+
+def _render_messages(
+    messages: Sequence[Message],
+    config: ToolResultPruneConfig | None,
+) -> list[dict[str, Any]]:
+    """Serialize messages, keeping the removed text of pruned tool results."""
     if config is None:
         return [_message_to_chat_dict(message) for message in messages]
 
@@ -183,6 +238,21 @@ def _render_model_view(
             chat_dict["original_content"] = _message_to_chat_dict(original)["content"]
         rendered.append(chat_dict)
     return rendered
+
+
+def _condensation_message(condensation: Condensation) -> dict[str, Any]:
+    """Render a condensation as a role="context" marker in the flat transcript."""
+    return {
+        "role": CONTEXT_ROLE,
+        "content": condensation.summary,
+        "kind": "Condensation",
+        "id": condensation.id,
+        "timestamp": condensation.timestamp,
+        "source": condensation.source,
+        "summary_offset": condensation.summary_offset,
+        "forgotten_event_ids": condensation.forgotten_event_ids,
+        "llm_response_id": condensation.llm_response_id,
+    }
 
 
 def _compaction_entry(

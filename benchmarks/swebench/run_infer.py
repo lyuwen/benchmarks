@@ -44,13 +44,13 @@ from benchmarks.utils.models import (
 )
 from benchmarks.utils.network_isolation import maybe_disable_network
 from benchmarks.utils.trajectory import (
+    build_messages,
     build_trajectories,
     pruning_metadata,
     resolve_pruning_config,
 )
 from benchmarks.utils.version import SDK_SHORT_SHA
 from openhands.sdk import LLM, Agent, Conversation, get_logger
-from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
@@ -407,19 +407,15 @@ class SWEBenchEvaluation(Evaluation):
                 logger.error("Judge failed for %s: %s", instance.id, e)
                 evaluation_result = None
 
-        # Dump conversation history
-        messages = []
+        # Dump conversation history. `messages` is the full event-dump transcript
+        # (as before) with two export-only annotations when the features are on:
+        # pruned tool messages keep `original_content`, and every Condensation
+        # appears as a role="context" marker where it was triggered. The pruning
+        # policy is read from the event log (recorded by the agent), not from
+        # this process's env.
+        pruning_config = resolve_pruning_config(conversation.state.events)
+        messages = build_messages(conversation.state.events, pruning_config)
         tools_list = []
-
-        # Convert events to messages
-        convertible_events = [
-            e for e in conversation.state.events if isinstance(e, LLMConvertibleEvent)
-        ]
-        msgs = LLMConvertibleEvent.events_to_messages(convertible_events)
-
-        for msg in msgs:
-            msg_copy = msg.model_copy(update={"send_reasoning_content": True})
-            messages.append(msg_copy.to_chat_dict())
 
         for event in conversation.state.events:
             if isinstance(event, SystemPromptEvent):
@@ -447,10 +443,7 @@ class SWEBenchEvaluation(Evaluation):
 
         # Model-view trajectories: the message lists the model actually saw,
         # split at condensation boundaries and including each compaction's
-        # summarizer request/response. `messages` above stays the full,
-        # unpruned event-dump transcript. The pruning policy is read from the
-        # event log (recorded by the agent), not from this process's env.
-        pruning_config = resolve_pruning_config(conversation.state.events)
+        # summarizer request/response.
         dump_data["trajectories"] = build_trajectories(
             conversation.state.events, pruning_config
         )

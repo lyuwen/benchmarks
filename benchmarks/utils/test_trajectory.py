@@ -6,12 +6,14 @@ import pytest
 
 from benchmarks.utils.trajectory import (
     COMPACTION,
+    CONTEXT_ROLE,
     TRAJECTORY,
+    build_messages,
     build_trajectories,
     pruning_metadata,
     resolve_pruning_config,
 )
-from openhands.sdk import Event
+from openhands.sdk import Event, LLMConvertibleEvent
 from openhands.sdk.context.tool_result_pruner import (
     ENV_ENABLED,
     ENV_HEAD_CHARS,
@@ -367,3 +369,99 @@ def test_pruning_applies_to_every_segment():
             assert tool_message["content"].endswith(
                 PRUNE_MARKER + tool_message["original_content"][-1]
             )
+
+
+# ---------------------------------------------------------------------------
+# Flat `messages` transcript
+# ---------------------------------------------------------------------------
+
+
+def _plain_messages(events: Sequence[Event]) -> list[dict]:
+    convertible = [event for event in events if isinstance(event, LLMConvertibleEvent)]
+    return [
+        message.model_copy(update={"send_reasoning_content": True}).to_chat_dict()
+        for message in LLMConvertibleEvent.events_to_messages(convertible)
+    ]
+
+
+def test_build_messages_matches_plain_dump_without_features():
+    events = [
+        _message_event("first"),
+        _action_event(),
+        _observation_event(text="tool output"),
+    ]
+
+    assert build_messages(events) == _plain_messages(events)
+
+
+def test_build_messages_prunes_and_keeps_original():
+    original_output = "x" * 100
+    events = [
+        _system_event(SMALL_PRUNING),
+        _action_event(),
+        _observation_event(text=original_output),
+    ]
+
+    messages = build_messages(events)
+
+    tool_messages = [message for message in messages if message["role"] == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0]["content"] == f"x{PRUNE_MARKER}x"
+    assert tool_messages[0]["original_content"] == original_output
+    # The flat transcript renders pruning exactly like the model-view segments.
+    assert tool_messages[0] == _tool_messages(build_trajectories(events)[0])[0]
+
+
+def test_build_messages_inserts_context_marker_at_trigger():
+    first = _message_event("first")
+    request = CondensationRequest()
+    condensation = _condensation(forgotten_ids=[first.id])
+    last = _message_event("after")
+
+    messages = build_messages([first, request, condensation, last])
+
+    assert [message["role"] for message in messages] == [
+        "user",
+        CONTEXT_ROLE,
+        "user",
+    ]
+    context = messages[1]
+    assert context["content"] == "a summary"
+    assert context["kind"] == "Condensation"
+    assert context["forgotten_event_ids"] == [first.id]
+
+
+def test_build_messages_marks_each_condensation_in_order():
+    first, second = _message_event("first"), _message_event("second")
+    events = [
+        first,
+        _condensation(forgotten_ids=[first.id]),
+        second,
+        _condensation(forgotten_ids=[second.id]),
+    ]
+
+    messages = build_messages(events)
+
+    assert [message["role"] for message in messages] == [
+        "user",
+        CONTEXT_ROLE,
+        "user",
+        CONTEXT_ROLE,
+    ]
+
+
+def test_build_messages_ignores_condensation_requests():
+    messages = build_messages([_message_event("first"), CondensationRequest()])
+
+    assert [message["role"] for message in messages] == ["user"]
+
+
+def test_build_messages_without_pruning_keeps_full_content():
+    original_output = "x" * 100
+    events = [_action_event(), _observation_event(text=original_output)]
+
+    messages = build_messages(events)
+
+    tool_message = [message for message in messages if message["role"] == "tool"][0]
+    assert tool_message["content"] == original_output
+    assert "original_content" not in tool_message
