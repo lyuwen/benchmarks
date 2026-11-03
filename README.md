@@ -254,6 +254,7 @@ If this command returns output, that benchmarks commit requires an SDK version w
 
 ## Links
 
+- **Condenser wiring, tool-result pruning, and history export**: [docs/condenser-wiring.md](docs/condenser-wiring.md)
 - **Original OpenHands**: https://github.com/OpenHands/OpenHands/
 - **Agent SDK**: https://github.com/OpenHands/software-agent-sdk
 - **SWE-Bench**: https://www.swebench.com/

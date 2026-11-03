@@ -25,6 +25,9 @@ The pruning policy is read from the policy the agent recorded on its
 ``SystemPromptEvent`` at conversation start, so it cannot diverge from what the
 model actually saw.
 
+The user-facing contract, defaults, and adoption steps for other tasks are
+documented in ``docs/condenser-wiring.md``.
+
 Rollout:
 Only ``benchmarks/swebench/run_infer.py`` uses this module today. To adopt another
 task once this has been validated, mirror its wiring: import
