@@ -109,8 +109,11 @@ def get_condenser(
         raise ValueError(f"Unknown condenser kind: {kind!r}")
 
     kwargs = dict(config or {})
+    # Condenser completions are synchronous: they provide no token callback, so
+    # inheriting streaming from the agent LLM would fail with
+    # "Streaming requires an on_token callback".
     condenser_llm = llm.model_copy(
-        update={"usage_id": CONDENSER_LLM_USAGE_ID}, deep=True
+        update={"usage_id": CONDENSER_LLM_USAGE_ID, "stream": False}, deep=True
     )
     if kind == "legacy":
         return LLMSummarizingCondenser(
