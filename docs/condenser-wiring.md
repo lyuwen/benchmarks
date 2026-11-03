@@ -173,6 +173,65 @@ from the recorded policy:
 - **Corpus caveat:** keeping `original_content` and pre-compaction events makes
   files larger when the features are on (accepted by design).
 
+## Migration from the inline export
+
+Before this branch each `run_infer*.py` built the history dump inline:
+
+```python
+# old shape, still used by the not-yet-migrated tasks
+convertible_events = [
+    e for e in conversation.state.events if isinstance(e, LLMConvertibleEvent)
+]
+msgs = LLMConvertibleEvent.events_to_messages(convertible_events)
+messages = [
+    m.model_copy(update={"send_reasoning_content": True}).to_chat_dict()
+    for m in msgs
+]
+dump_data = {"instance_id": instance.id, "messages": messages, ...}
+```
+
+`benchmarks/swebench/run_infer.py` now delegates to the shared helper:
+
+```python
+# new shape (swebench)
+pruning_config = resolve_pruning_config(conversation.state.events)
+messages = build_messages(conversation.state.events, pruning_config)
+...
+dump_data = {
+    ...,
+    "messages": messages,
+    "trajectories": build_trajectories(conversation.state.events, pruning_config),
+}
+pruning = pruning_metadata(pruning_config)
+if pruning is not None:
+    dump_data["pruning"] = pruning
+```
+
+`build_messages` is a drop-in replacement for the inline loop: with pruning and
+condensation off it produces exactly the inline output (covered by
+`test_build_messages_matches_plain_dump_without_features`), while the
+`trajectories` key is additive.
+
+Adoption status in this branch:
+
+| Task file | Export |
+|---|---|
+| `benchmarks/swebench/run_infer.py` | migrated to `benchmarks/utils/trajectory.py` |
+| `benchmarks/scaleswe/run_infer.py` | inline |
+| `benchmarks/scaleswe/run_infer-dsh.py` | inline |
+| `benchmarks/scaleswe/run_infer-no-think-no-task.py` | inline |
+| `benchmarks/swerebenchv2/run_infer.py` | inline |
+| `benchmarks/swerebenchv2/run_infer-no-think-no-task.py` | inline |
+| `benchmarks/swerebench-leaderboard/run_infer.py` | inline |
+| `benchmarks/swesmith/run_infer.py` | inline |
+| `benchmarks/swebenchpro/run_infer.py` | inline |
+| `benchmarks/z021data/run_infer.py` | inline |
+| `benchmarks/z021data/run_infer-no-think-no-task.py` | inline |
+
+The transition is intentionally spread over separate commits so the migrated task
+can be validated before the rest are converted; the helper is import-only from the
+task scripts and does not change the evaluation pipeline.
+
 ## Rollout to other benchmarks
 
 Only `benchmarks/swebench/run_infer.py` is wired. To adopt another task, mirror its
