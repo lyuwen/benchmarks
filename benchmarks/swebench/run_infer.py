@@ -1,11 +1,11 @@
-import os
 import json
+import os
 from pathlib import Path
 from typing import List
 
 from jinja2 import Environment, FileSystemLoader
-from pydantic import Field
 from omegaconf import OmegaConf
+from pydantic import Field
 
 from benchmarks.swebench.build_images import (
     extract_custom_tag,
@@ -13,42 +13,45 @@ from benchmarks.swebench.build_images import (
     should_wrap_instance_id,
     wrap_image,
 )
+
+# Import judge to trigger registration
+from benchmarks.swebench.judge import SWEBenchJudge
 from benchmarks.utils.args_parser import get_parser
-from benchmarks.utils.condenser import get_condenser
-from benchmarks.utils.mirror_config import get_mirror_env_commands
-from benchmarks.utils.httpbin_fix import make_httpbin_setup_commands
-from benchmarks.utils.network_isolation import maybe_disable_network
 from benchmarks.utils.build_utils import build_image
+from benchmarks.utils.condenser import get_condenser
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
-from benchmarks.utils.execution_judge import (
-    ExecutionBasedJudge,
-    add_judge_args,
-    create_judge,
-)
 from benchmarks.utils.dataset import get_dataset
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
     construct_eval_output_dir,
     get_default_on_result_writer,
 )
+from benchmarks.utils.execution_judge import (
+    ExecutionBasedJudge,
+    add_judge_args,
+    create_judge,
+)
 from benchmarks.utils.fake_user_response import run_conversation_with_fake_user_response
+from benchmarks.utils.httpbin_fix import make_httpbin_setup_commands
 from benchmarks.utils.image_utils import image_exists
+from benchmarks.utils.mirror_config import get_mirror_env_commands
 from benchmarks.utils.models import (
     EvalInstance,
     EvalMetadata,
     EvalOutput,
 )
+from benchmarks.utils.network_isolation import maybe_disable_network
+from benchmarks.utils.trajectory import (
+    build_trajectories,
+    pruning_metadata,
+    resolve_pruning_config,
+)
 from benchmarks.utils.version import SDK_SHORT_SHA
-
-# Import judge to trigger registration
-from benchmarks.swebench.judge import SWEBenchJudge
-
 from openhands.sdk import LLM, Agent, Conversation, get_logger
 from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
-from openhands.sdk.llm.message import Message
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
@@ -194,13 +197,15 @@ class SWEBenchEvaluation(Evaluation):
 
             bind_volumes = []
             if self.bind_dev_sdk:
-                sdk_base = Path(__file__).parent.parent.parent / "vendor/software-agent-sdk"
+                sdk_base = (
+                    Path(__file__).parent.parent.parent / "vendor/software-agent-sdk"
+                )
                 for module in ["tools", "sdk", "agent-server", "workspace"]:
                     bind_volumes.append(
                         f"{sdk_base}/openhands-{module}/openhands/{module.replace('-', '_')}:"
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
                         ":ro"
-                        )
+                    )
             workspace = DockerWorkspace(
                 server_image=agent_server_image,
                 working_dir="/workspace",
@@ -397,9 +402,7 @@ class SWEBenchEvaluation(Evaluation):
                     git_patch=git_patch,
                     instance_data=instance.data,
                 )
-                logger.info(
-                    "Judge result for %s: %s", instance.id, evaluation_result
-                )
+                logger.info("Judge result for %s: %s", instance.id, evaluation_result)
             except Exception as e:
                 logger.error("Judge failed for %s: %s", instance.id, e)
                 evaluation_result = None
@@ -407,26 +410,28 @@ class SWEBenchEvaluation(Evaluation):
         # Dump conversation history
         messages = []
         tools_list = []
-        
+
         # Convert events to messages
-        convertible_events = [e for e in conversation.state.events if isinstance(e, LLMConvertibleEvent)]
+        convertible_events = [
+            e for e in conversation.state.events if isinstance(e, LLMConvertibleEvent)
+        ]
         msgs = LLMConvertibleEvent.events_to_messages(convertible_events)
-        
+
         for msg in msgs:
             msg_copy = msg.model_copy(update={"send_reasoning_content": True})
             messages.append(msg_copy.to_chat_dict())
-            
+
         for event in conversation.state.events:
             if isinstance(event, SystemPromptEvent):
                 for tool in event.tools:
                     if isinstance(tool, ToolDefinition):
                         tools_list.append(tool.to_openai_tool())
-        
+
         if not tools_list and tools:
             # Fallback to initial tools if not found in events
             for tool in tools:
-                 if isinstance(tool, ToolDefinition):
-                     tools_list.append(tool.to_openai_tool())
+                if isinstance(tool, ToolDefinition):
+                    tools_list.append(tool.to_openai_tool())
 
         dump_data = {
             "instance_id": instance.id,
@@ -440,7 +445,22 @@ class SWEBenchEvaluation(Evaluation):
         if self.judge is not None:
             dump_data["evaluation"] = evaluation_result
 
-        history_file = os.path.join(self.metadata.eval_output_dir, f"{instance.id}.history.json")
+        # Model-view trajectories: the message lists the model actually saw,
+        # split at condensation boundaries and including each compaction's
+        # summarizer request/response. `messages` above stays the full,
+        # unpruned event-dump transcript. The pruning policy is read from the
+        # event log (recorded by the agent), not from this process's env.
+        pruning_config = resolve_pruning_config(conversation.state.events)
+        dump_data["trajectories"] = build_trajectories(
+            conversation.state.events, pruning_config
+        )
+        pruning = pruning_metadata(pruning_config)
+        if pruning is not None:
+            dump_data["pruning"] = pruning
+
+        history_file = os.path.join(
+            self.metadata.eval_output_dir, f"{instance.id}.history.json"
+        )
         with open(history_file, "w") as f:
             json.dump(dump_data, f, indent=2)
         logger.info(f"Dumped conversation history to {history_file}")
@@ -499,7 +519,9 @@ def main() -> None:
     with open(llm_config_path, "r") as f:
         llm_config = f.read()
     # use omegaconf to resolve environment variables, and then serialize back to JSON
-    llm_config = json.dumps(OmegaConf.to_container(OmegaConf.load(llm_config_path), resolve=True))
+    llm_config = json.dumps(
+        OmegaConf.to_container(OmegaConf.load(llm_config_path), resolve=True)
+    )
     llm = LLM.model_validate_json(llm_config)
     logger.info("Using LLM config: %s", llm.model_dump_json(indent=2))
 
@@ -534,7 +556,8 @@ def main() -> None:
         details={},
         prompt_path=args.prompt_path,
         eval_limit=args.n_limit,
-        env_setup_commands=get_mirror_env_commands() + ["export PIP_CACHE_DIR=~/.cache/pip"],
+        env_setup_commands=get_mirror_env_commands()
+        + ["export PIP_CACHE_DIR=~/.cache/pip"],
         max_attempts=args.max_attempts,
         critic=critic,
         selected_instances_file=args.select,
