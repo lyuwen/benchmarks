@@ -33,7 +33,10 @@ from benchmarks.utils.execution_judge import (
     add_judge_args,
     create_judge,
 )
-from benchmarks.utils.fake_user_response import run_conversation_with_fake_user_response
+from benchmarks.utils.fake_user_response import (
+    run_conversation_with_fake_user_response,
+    run_conversation_with_smart_fake_user_response,
+)
 from benchmarks.utils.httpbin_fix import make_httpbin_setup_commands
 from benchmarks.utils.image_utils import image_exists
 from benchmarks.utils.mirror_config import get_mirror_env_commands
@@ -108,6 +111,10 @@ class SWEBenchEvaluation(Evaluation):
     )
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
+    )
+    smart_fake_user: int = Field(
+        default=False,
+        description="Use the LLM-classified smart fake user response",
     )
     judge: ExecutionBasedJudge | None = Field(
         default=None, description="Optional execution-based judge"
@@ -368,9 +375,14 @@ class SWEBenchEvaluation(Evaluation):
         )
         conversation.send_message(instruction)
         # Run conversation with fake user responses to handle agent messages
-        run_conversation_with_fake_user_response(
-            conversation, timeout=self.metadata.conversation_timeout
-        )
+        if self.smart_fake_user:
+            run_conversation_with_smart_fake_user_response(
+                conversation, timeout=self.metadata.conversation_timeout
+            )
+        else:
+            run_conversation_with_fake_user_response(
+                conversation, timeout=self.metadata.conversation_timeout
+            )
 
         # git add
         workspace.execute_command(f"cd {repo_path} ; git add -A")
@@ -499,6 +511,14 @@ def main() -> None:
         action="store_true",
         help="Bind SDK paths for dev features",
     )
+    parser.add_argument(
+        "--smart-fake-user",
+        action="store_true",
+        help=(
+            "Use the LLM-classified smart fake user response: when the agent's "
+            "last message says the work is done, ask it to call the finish tool"
+        ),
+    )
     add_judge_args(parser, default_judge="swebench")
     args = parser.parse_args()
 
@@ -567,6 +587,7 @@ def main() -> None:
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
+        smart_fake_user=args.smart_fake_user,
         judge=judge,
     )
 
