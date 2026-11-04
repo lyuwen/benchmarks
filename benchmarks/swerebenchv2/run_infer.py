@@ -167,8 +167,8 @@ class SWERebenchV2Evaluation(Evaluation):
                 )
                 for module in ["tools", "sdk", "agent-server", "workspace"]:
                     bind_volumes.append(
-                        f"{sdk_base}/openhands-{module}/openhands/{module}:"
-                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                        f"{sdk_base}/openhands-{module}/openhands/{module.replace('-', '_')}:"
+                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
                         ":ro"
                     )
             workspace = FlexWorkspace(
@@ -216,8 +216,8 @@ class SWERebenchV2Evaluation(Evaluation):
                 )
                 for module in ["tools", "sdk", "agent-server", "workspace"]:
                     bind_volumes.append(
-                        f"{sdk_base}/openhands-{module}/openhands/{module}:"
-                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module}"
+                        f"{sdk_base}/openhands-{module}/openhands/{module.replace('-', '_')}:"
+                        f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
                     )
             workspace = DockerWorkspace(
                 server_image=agent_server_image,
