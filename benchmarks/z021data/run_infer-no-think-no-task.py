@@ -1,46 +1,59 @@
-import os
 import json
+import os
 from pathlib import Path
 from typing import List
 
 from jinja2 import Environment, FileSystemLoader
-from pydantic import Field
 from omegaconf import OmegaConf
+from pydantic import Field
 
 from benchmarks.utils.args_parser import get_parser
-from benchmarks.utils.mirror_config import get_mirror_env_commands
+from benchmarks.utils.condenser import get_condenser
 from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
-from benchmarks.utils.execution_judge import (
-    ExecutionBasedJudge,
-    add_judge_args,
-    create_judge,
-)
 from benchmarks.utils.dataset import get_dataset
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
     construct_eval_output_dir,
     get_default_on_result_writer,
 )
-from benchmarks.utils.fake_user_response import run_conversation_with_fake_user_response
+from benchmarks.utils.execution_judge import (
+    ExecutionBasedJudge,
+    add_judge_args,
+    create_judge,
+)
+from benchmarks.utils.fake_user_response import (
+    run_conversation_with_fake_user_response,
+    run_conversation_with_smart_fake_user_response,
+)
 from benchmarks.utils.image_utils import image_exists
+from benchmarks.utils.mirror_config import get_mirror_env_commands
 from benchmarks.utils.models import (
     EvalInstance,
     EvalMetadata,
     EvalOutput,
+)
+from benchmarks.utils.trajectory import (
+    build_messages,
+    build_trajectories,
+    pruning_metadata,
+    resolve_pruning_config,
 )
 from benchmarks.utils.version import SDK_SHORT_SHA
 
 # Import judge to trigger registration
 from benchmarks.z021data.judge import Z021DataJudge  # noqa: F401
 from openhands.sdk import LLM, Agent, Conversation, get_logger
-from openhands.sdk.event.base import LLMConvertibleEvent
 from openhands.sdk.event.llm_convertible.system import SystemPromptEvent
 from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
-from openhands.tools.preset.default import get_default_tools
-from openhands.tools.preset.legacy import get_legacy_tools, StrReplaceEditorTool, ExecuteBashTool, register_legacy_tools, Tool
+from openhands.tools.preset.legacy import (
+    ExecuteBashTool,
+    StrReplaceEditorTool,
+    Tool,
+    register_legacy_tools,
+)
 from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
 
 
@@ -179,6 +192,10 @@ class Z021DataEvaluation(Evaluation):
     )
     bind_dev_sdk: int = Field(
         default=False, description="Bind SDK paths for dev features"
+    )
+    smart_fake_user: int = Field(
+        default=False,
+        description="Use the LLM-classified smart fake user response",
     )
     docker_image_prefix: str | None = Field(
         default=DEFAULT_DOCKER_IMAGE_PREFIX,
@@ -353,9 +370,14 @@ class Z021DataEvaluation(Evaluation):
 
         agent = Agent(
             llm=self.metadata.llm,
+            condenser=get_condenser(
+                self.metadata.condenser,
+                self.metadata.llm,
+                self.metadata.condenser_config,
+            ),
             tools=tools,
             system_prompt_kwargs={"cli_mode": True},
-            include_default_tools=['FinishTool'],
+            include_default_tools=["FinishTool"],
         )
 
         assert isinstance(workspace, RemoteWorkspace)
@@ -416,7 +438,9 @@ class Z021DataEvaluation(Evaluation):
         breif_history = workspace.execute_command(
             (f"cd {repo_path} ; git --no-pager log --oneline -10")
         )
-        logger.info(f"Repo status:\n* Current commit: {instance.data['base_commit']}\n* Top 10 history:\n{breif_history.stdout.strip()}")
+        logger.info(
+            f"Repo status:\n* Current commit: {instance.data['base_commit']}\n* Top 10 history:\n{breif_history.stdout.strip()}"
+        )
 
         instruction = get_instruction(
             instance=instance.data,
@@ -424,9 +448,15 @@ class Z021DataEvaluation(Evaluation):
             workspace_path=workspace.working_dir,
         )
         conversation.send_message(instruction)
-        run_conversation_with_fake_user_response(
-            conversation, timeout=self.metadata.conversation_timeout
-        )
+        # Run conversation with fake user responses to handle agent messages
+        if self.smart_fake_user:
+            run_conversation_with_smart_fake_user_response(
+                conversation, timeout=self.metadata.conversation_timeout
+            )
+        else:
+            run_conversation_with_fake_user_response(
+                conversation, timeout=self.metadata.conversation_timeout
+            )
 
         # git add
         workspace.execute_command(f"cd {repo_path} ; git add -A")
@@ -458,25 +488,20 @@ class Z021DataEvaluation(Evaluation):
                     git_patch=git_patch,
                     instance_data=instance.data,
                 )
-                logger.info(
-                    "Judge result for %s: %s", instance.id, evaluation_result
-                )
+                logger.info("Judge result for %s: %s", instance.id, evaluation_result)
             except Exception as e:
                 logger.error("Judge failed for %s: %s", instance.id, e)
                 evaluation_result = None
 
-        # Dump conversation history
-        messages = []
+        # Dump conversation history. `messages` is the full event-dump transcript
+        # (as before) with two export-only annotations when the features are on:
+        # pruned tool messages keep `original_content`, and every Condensation
+        # appears as a role="context" marker where it was triggered. The pruning
+        # policy is read from the event log (recorded by the agent), not from this
+        # process's env.
+        pruning_config = resolve_pruning_config(conversation.state.events)
+        messages = build_messages(conversation.state.events, pruning_config)
         tools_list = []
-
-        convertible_events = [
-            e for e in conversation.state.events if isinstance(e, LLMConvertibleEvent)
-        ]
-        msgs = LLMConvertibleEvent.events_to_messages(convertible_events)
-
-        for msg in msgs:
-            msg_copy = msg.model_copy(update={"send_reasoning_content": True})
-            messages.append(msg_copy.to_chat_dict())
 
         for event in conversation.state.events:
             if isinstance(event, SystemPromptEvent):
@@ -500,6 +525,16 @@ class Z021DataEvaluation(Evaluation):
         }
         if self.judge is not None:
             dump_data["evaluation"] = evaluation_result
+
+        # Model-view trajectories: the message lists the model actually saw,
+        # split at condensation boundaries and including each compaction's
+        # summarizer request/response.
+        dump_data["trajectories"] = build_trajectories(
+            conversation.state.events, pruning_config
+        )
+        pruning = pruning_metadata(pruning_config)
+        if pruning is not None:
+            dump_data["pruning"] = pruning
 
         history_file = os.path.join(
             self.metadata.eval_output_dir, f"{instance.id}.history.json"
@@ -549,6 +584,14 @@ def main() -> None:
         "--bind-dev-sdk",
         action="store_true",
         help="Bind SDK paths for dev features",
+    )
+    parser.add_argument(
+        "--smart-fake-user",
+        action="store_true",
+        help=(
+            "Use the LLM-classified smart fake user response: when the agent's "
+            "last message says the work is done, ask it to call the finish tool"
+        ),
     )
     parser.add_argument(
         "--docker-image-prefix",
@@ -604,13 +647,16 @@ def main() -> None:
         details={},
         prompt_path=args.prompt_path,
         eval_limit=args.n_limit,
-        env_setup_commands=get_mirror_env_commands() + ["export PIP_CACHE_DIR=~/.cache/pip"],
+        env_setup_commands=get_mirror_env_commands()
+        + ["export PIP_CACHE_DIR=~/.cache/pip"],
         max_attempts=args.max_attempts,
         critic=critic,
         selected_instances_file=args.select,
         max_retries=args.max_retries,
         workspace_type=args.workspace,
         conversation_timeout=args.conversation_timeout,
+        condenser=args.condenser,
+        condenser_config=args.condenser_config,
     )
 
     evaluator = Z021DataEvaluation(
@@ -618,6 +664,7 @@ def main() -> None:
         num_workers=args.num_workers,
         use_legacy_tools=args.use_legacy_tools,
         bind_dev_sdk=args.bind_dev_sdk,
+        smart_fake_user=args.smart_fake_user,
         docker_image_prefix=args.docker_image_prefix,
         judge=judge,
     )

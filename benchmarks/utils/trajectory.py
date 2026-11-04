@@ -29,8 +29,9 @@ The user-facing contract, defaults, and adoption steps for other tasks are
 documented in ``docs/condenser-wiring.md``.
 
 Rollout:
-Only ``benchmarks/swebench/run_infer.py`` uses this module today. To adopt another
-task once this has been validated, mirror its wiring: import
+Used by ``swebench``, ``scaleswe``, ``swerebenchv2`` and ``z021data``
+``run_infer`` entry points (including the no-think variants). To adopt another
+task, mirror the wiring: import
 ``resolve_pruning_config`` / ``build_messages`` / ``build_trajectories`` /
 ``pruning_metadata``, resolve the policy after the conversation finishes, then
 replace the manual event-to-messages dump with ``build_messages`` and add

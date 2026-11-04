@@ -1,8 +1,11 @@
 # Condenser wiring, tool-result pruning, and history export
 
-**Status:** implemented on `feat/condenser-wiring`, currently wired into
-`benchmarks/swebench/run_infer.py` only. The other `run_infer*.py` tasks still use
-the historical pipeline. The SDK side is pinned in `vendor/software-agent-sdk`
+**Status:** implemented on `feat/condenser-wiring` and applied to
+`benchmarks/swebench/run_infer.py`, `benchmarks/scaleswe/run_infer.py` and its
+`run_infer-no-think-no-task.py` variant, `benchmarks/swerebenchv2/run_infer.py` and
+its no-think variant, and `benchmarks/z021data/run_infer.py` and its no-think
+variant. The remaining `run_infer*.py` tasks still use the historical pipeline.
+The SDK side is pinned in `vendor/software-agent-sdk`
 (`feat/replay-summarizing-condenser`, which merges `feat/tool-result-pruner`).
 
 ## Defaults
@@ -217,16 +220,16 @@ Adoption status in this branch:
 | Task file | Export |
 |---|---|
 | `benchmarks/swebench/run_infer.py` | migrated to `benchmarks/utils/trajectory.py` |
-| `benchmarks/scaleswe/run_infer.py` | inline |
-| `benchmarks/scaleswe/run_infer-dsh.py` | inline |
-| `benchmarks/scaleswe/run_infer-no-think-no-task.py` | inline |
-| `benchmarks/swerebenchv2/run_infer.py` | inline |
-| `benchmarks/swerebenchv2/run_infer-no-think-no-task.py` | inline |
+| `benchmarks/scaleswe/run_infer.py` | migrated |
+| `benchmarks/scaleswe/run_infer-no-think-no-task.py` | migrated |
+| `benchmarks/swerebenchv2/run_infer.py` | migrated |
+| `benchmarks/swerebenchv2/run_infer-no-think-no-task.py` | migrated |
+| `benchmarks/z021data/run_infer.py` | migrated |
+| `benchmarks/z021data/run_infer-no-think-no-task.py` | migrated |
+| `benchmarks/scaleswe/run_infer-dsh.py` | inline (no fake-user path by design) |
 | `benchmarks/swerebench-leaderboard/run_infer.py` | inline |
 | `benchmarks/swesmith/run_infer.py` | inline |
 | `benchmarks/swebenchpro/run_infer.py` | inline |
-| `benchmarks/z021data/run_infer.py` | inline |
-| `benchmarks/z021data/run_infer-no-think-no-task.py` | inline |
 
 The transition is intentionally spread over separate commits so the migrated task
 can be validated before the rest are converted; the helper is import-only from the
@@ -234,8 +237,10 @@ task scripts and does not change the evaluation pipeline.
 
 ## Rollout to other benchmarks
 
-Only `benchmarks/swebench/run_infer.py` is wired. To adopt another task, mirror its
-three pieces:
+`benchmarks/swebench/run_infer.py`, `benchmarks/scaleswe/run_infer.py` (and its
+no-think variant), `benchmarks/swerebenchv2/run_infer.py` (and its no-think
+variant), and `benchmarks/z021data/run_infer.py` (and its no-think variant) are
+wired. To adopt another task, mirror the three pieces below:
 
 1. import `resolve_pruning_config`, `build_messages`, `build_trajectories`,
    `pruning_metadata` from `benchmarks.utils.trajectory`;
