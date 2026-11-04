@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import List
 
@@ -358,10 +359,20 @@ class SWEBenchEvaluation(Evaluation):
 
         logger.info("repo_path: %s", repo_path)
         cp_testebed_repo = workspace.execute_command(
-            (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}")
+            (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}"),
+            timeout=60,
         )
         assert cp_testebed_repo.exit_code == 0, (
             f"cp_testebed_repo failed: {cp_testebed_repo.stderr}"
+        )
+
+        logger.info("linking workspace to testbed: %s", repo_path)
+        cp_testebed_repo = workspace.execute_command(
+            (f"sudo rm -rf /testbed ; sudo ln -s {repo_path} /testbed"),
+            timeout=60,
+        )
+        assert cp_testebed_repo.exit_code == 0, (
+            f"ln_testebed_repo failed: {cp_testebed_repo.stderr}"
         )
 
         # git reset
@@ -487,7 +498,8 @@ class SWEBenchEvaluation(Evaluation):
 
 def main() -> None:
     prompt_dir = (Path(__file__).parent / "prompts").resolve()
-    choices = [str(p.relative_to(Path.cwd())) for p in prompt_dir.glob("*.j2")]
+    # choices = [str(p.relative_to(Path.cwd())) for p in prompt_dir.glob("*.j2")]
+    choices = [str(p.resolve()) for p in prompt_dir.glob("*.j2")]
     default_prompt_path = prompt_dir / "default.j2"
     assert default_prompt_path.exists(), (
         f"Default prompt {default_prompt_path} not found"
@@ -498,8 +510,8 @@ def main() -> None:
         "--prompt-path",
         type=str,
         default=str(default_prompt_path),
-        choices=choices,
-        help="Path to prompt template file",
+        # choices=choices,
+        help=f"Path to prompt template file, {choices}",
     )
     parser.add_argument(
         "--use-legacy-tools",
@@ -529,13 +541,21 @@ def main() -> None:
     llm_config_path = args.llm_config_path
     if not os.path.isfile(llm_config_path):
         raise ValueError(f"LLM config file {llm_config_path} does not exist")
-    with open(llm_config_path, "r") as f:
-        llm_config = f.read()
-    # use omegaconf to resolve environment variables, and then serialize back to JSON
-    llm_config = json.dumps(
-        OmegaConf.to_container(OmegaConf.load(llm_config_path), resolve=True)
+    # llm_config = json.dumps(
+    #     OmegaConf.to_container(OmegaConf.load(llm_config_path), resolve=True)
+    # )
+    llm_config = OmegaConf.to_container(OmegaConf.load(llm_config_path), resolve=True)
+    assert isinstance(llm_config, dict), (
+        f"LLM config {llm_config_path} must resolve to a JSON object"
     )
-    llm = LLM.model_validate_json(llm_config)
+    # Extra header for sglang rounting - testing
+    litellm_params = llm_config.get("litellm_params", {})
+    extra_headers = litellm_params.get("extra_headers", {})
+    extra_headers["X-SMG-Routing-Key"] = str(uuid.uuid4())
+    litellm_params["extra_headers"] = extra_headers
+    llm_config["litellm_params"] = litellm_params
+    llm = LLM.model_validate(llm_config)
+    # llm = LLM.model_validate_json(llm_config)
     logger.info("Using LLM config: %s", llm.model_dump_json(indent=2))
 
     dataset_description = (
