@@ -361,6 +361,94 @@ def _ensure_user_message_synced(
     return False
 
 
+def sync_remote_conversation_state(
+    conversation: "BaseConversation",
+    max_attempts: int = 3,
+    interval: float = 0.2,
+) -> bool:
+    """Resync a RemoteConversation's events and state from the agent server.
+
+    The WebSocket event stream is best effort and can silently lose events:
+    the connection can close mid-run (e.g. an oversized frame exceeding the
+    ``websockets`` default ``max_size`` of 1 MiB) or the client can still be
+    subscribing when early events are produced (e.g. the initial user
+    instruction). ``RemoteState`` additionally caches conversation info from
+    streamed state events only, so after a drop it keeps a stale
+    ``execution_status`` and undercounted ``stats``/``token_usages``.
+
+    The agent server's REST event store is authoritative, so resync from it
+    once a run has finished rather than trusting the WebSocket cache. This is
+    a no-op for local conversations, never raises, and returns True only if a
+    remote resync succeeded.
+    """
+    state = getattr(conversation, "state", None)
+    if state is None:
+        return False
+    event_list = getattr(state, "events", None)
+    if event_list is None:
+        return False
+
+    check_api = getattr(conversation, "sync", None)
+    public_sync = check_api if callable(check_api) else None
+    legacy_sync_fn = getattr(event_list, "_do_full_sync", None)
+    if public_sync is not None:
+        sync_callable = public_sync
+    elif legacy_sync_fn is not None:
+        sync_callable = legacy_sync_fn
+    else:
+        # LocalConversation: the local event list is already authoritative.
+        return False
+
+    before_count = len(list(event_list))
+    previous_count = before_count
+    synced = False
+    for attempt in range(max_attempts):
+        try:
+            sync_callable()
+        except Exception as exc:
+            logger.warning(
+                "Remote event resync failed (attempt %d/%d): %s",
+                attempt + 1,
+                max_attempts,
+                exc,
+            )
+            time.sleep(interval)
+            continue
+
+        synced = True
+        if public_sync is None:
+            _reconcile_event_cache(event_list)
+
+        # Repeat only while the server still returns new events (e.g. a state
+        # update from the finished run that had not been persisted yet).
+        current_count = len(list(event_list))
+        if current_count == previous_count:
+            break
+        previous_count = current_count
+        time.sleep(interval)
+
+    if not synced:
+        return False
+
+    if public_sync is None:
+        # Older SDK without RemoteConversation.sync(): drop RemoteState's cached
+        # conversation info so status and stats are refetched from REST instead
+        # of the stale streamed snapshot.
+        state_lock = getattr(state, "_lock", None)
+        if state_lock is not None:
+            with state_lock:
+                setattr(state, "_cached_state", None)
+        else:
+            setattr(state, "_cached_state", None)
+
+    logger.info(
+        "Resynced remote conversation events from server: %d -> %d",
+        before_count,
+        len(list(event_list)),
+    )
+    return True
+
+
 def run_conversation_with_fake_user_response(
     conversation: "BaseConversation",
     fake_user_response_fn: FakeUserResponseFn = fake_user_response,
@@ -410,6 +498,14 @@ def run_conversation_with_fake_user_response(
                 run()
         else:
             run()
+
+        # The WebSocket event stream is best effort: it can drop events without
+        # any error surfacing here (e.g. an oversized frame closing the socket,
+        # or events produced before the client finished subscribing). Resync
+        # from the authoritative REST event store before inspecting events or
+        # status, so the fake-response logic and the later history dump always
+        # see the complete conversation.
+        sync_remote_conversation_state(conversation)
 
         # Check the execution status
         status = conversation.state.execution_status
