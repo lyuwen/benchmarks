@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import time
-from typing import cast
+from typing import Any, cast
 
 import pandas as pd
 from datasets import Dataset, load_dataset
@@ -106,6 +107,39 @@ def _load_hf_dataset_with_retry(dataset_name: str, split: str) -> Dataset:
     raise last_exc
 
 
+def _load_local_jsonl(path: str) -> pd.DataFrame:
+    """Load a local JSONL file into a DataFrame without Arrow schema inference.
+
+    ``datasets.load_dataset("json", ...)`` infers the Arrow schema from the
+    first chunk of the file and then casts every later chunk to that schema.
+    If a nested field is ``null`` everywhere in the first chunk but holds a
+    string further down the file (e.g. the ``docker_specs`` language-version
+    fields of SWE-rebench-V2), the cast fails with ``TypeError: Couldn't cast
+    array of type string to null``, which aborts the whole load with
+    ``DatasetGenerationError``. Reading the JSON lines directly sidesteps that
+    inference and keeps every row exactly as serialized.
+    """
+    rows: list[dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"Expected one JSON object per line in {path}, got "
+                    f"{type(row).__name__} on line {line_no}"
+                )
+            rows.append(row)
+
+    if not rows:
+        raise ValueError(f"Local JSONL dataset is empty: {path}")
+
+    logger.info(f"Loaded local JSONL dataset {path}: {len(rows)} rows")
+    return pd.DataFrame(rows)
+
+
 def get_dataset(
     dataset_name: str,
     split: str,
@@ -115,11 +149,11 @@ def get_dataset(
     """Load and prepare dataset for evaluation."""
     # Check if dataset_name is a local file path
     if os.path.isfile(dataset_name) and dataset_name.endswith(".jsonl"):
-        # Load local JSONL file
-        dataset = load_dataset("json", data_files=dataset_name, split="train")
-        assert isinstance(dataset, Dataset)
-        df = dataset.to_pandas()
-        assert isinstance(df, pd.DataFrame)
+        # Load local JSONL file. Do not route this through
+        # datasets.load_dataset("json", ...): its schema inference from the
+        # first chunk rejects datasets whose nested fields are null in the
+        # first chunk but populated later (see _load_local_jsonl).
+        df = _load_local_jsonl(dataset_name)
     elif os.path.isdir(dataset_name):
         # Load local dataset directory
         try:
@@ -147,7 +181,9 @@ def get_dataset(
             try:
                 dataset = load_dataset(dataset_name, split=split)
             except Exception as e:
-                logger.error(f"Failed to load dataset from directory {dataset_name}: {e}")
+                logger.error(
+                    f"Failed to load dataset from directory {dataset_name}: {e}"
+                )
                 raise
 
         assert isinstance(dataset, Dataset)
