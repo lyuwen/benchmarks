@@ -22,6 +22,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from benchmarks.swerebenchv2.scoring import score_tests
 from benchmarks.utils.dataset import get_dataset
 from openhands.sdk import get_logger
 
@@ -176,28 +177,22 @@ def evaluate_instance(
         fail_to_pass_raw = json.loads(fail_to_pass_raw)
     fail_to_pass_raw = list(fail_to_pass_raw)
 
-    expected_passed = sorted(
-        _normalize_test_name(n)
-        for n in pass_to_pass + fail_to_pass_raw
+    outcome = score_tests(
+        passed=passed,
+        fail_to_pass=(_normalize_test_name(n) for n in fail_to_pass_raw),
+        pass_to_pass=(_normalize_test_name(n) for n in pass_to_pass),
     )
-
-    fail_to_pass_expected = {_normalize_test_name(n) for n in fail_to_pass_raw}
-    pass_to_pass_expected = {_normalize_test_name(n) for n in pass_to_pass}
-    passed_set = set(passed)
-
-    from_fail_to_pass = sorted(passed_set & fail_to_pass_expected)
-    failed_from_pass_to_pass = sorted(pass_to_pass_expected - passed_set)
-
-    resolved = passed == expected_passed
 
     return {
         "instance_id": instance_id,
-        "resolved": resolved,
+        "resolved": outcome.resolved,
         "exit_code": exit_code,
-        "from_fail_to_pass": from_fail_to_pass,
-        "fail_to_pass_total": len(fail_to_pass_expected),
-        "failed_from_pass_to_pass": failed_from_pass_to_pass,
-        "pass_to_pass_total": len(pass_to_pass_expected),
+        "from_fail_to_pass": list(outcome.fail_to_pass_passed),
+        "fail_to_pass_total": len(outcome.fail_to_pass_expected),
+        "failed_from_pass_to_pass": list(outcome.pass_to_pass_failed),
+        "pass_to_pass_total": len(outcome.pass_to_pass_expected),
+        "missing_expected": list(outcome.missing_expected),
+        "extra_passed": list(outcome.extra_passed),
         "error": "",
     }
 
@@ -301,6 +296,22 @@ def main() -> int:
                 iid,
                 result.get("resolved"),
             )
+            if result.get("missing_expected"):
+                logger.warning(
+                    "[%d/%d] %s: expected tests not PASSED: %s",
+                    len(results),
+                    len(specs_by_id),
+                    iid,
+                    result["missing_expected"],
+                )
+            if result.get("extra_passed"):
+                logger.info(
+                    "[%d/%d] %s: extra PASSED tests ignored: %s",
+                    len(results),
+                    len(specs_by_id),
+                    iid,
+                    result["extra_passed"],
+                )
 
     results.sort(key=lambda r: r["instance_id"])
 

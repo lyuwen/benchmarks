@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import Field
 from unidiff import PatchSet
 
+from benchmarks.swerebenchv2.scoring import score_tests
 from benchmarks.utils.execution_judge import ExecutionBasedJudge, register_judge
 
 logger = logging.getLogger(__name__)
@@ -307,22 +308,33 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
             fail_to_pass_list = json.loads(fail_to_pass_list)
         fail_to_pass_list = list(fail_to_pass_list)
 
-        expected_passed = sorted(
-            _normalize_test_name(n)
-            for n in pass_to_pass + fail_to_pass_list
+        outcome = score_tests(
+            passed=passed,
+            fail_to_pass=(_normalize_test_name(n) for n in fail_to_pass_list),
+            pass_to_pass=(_normalize_test_name(n) for n in pass_to_pass),
         )
-
-        resolved = passed == expected_passed
-
-        fail_to_pass = {_normalize_test_name(n) for n in fail_to_pass_list}
-        f2p_passed = sorted(set(passed) & fail_to_pass)
 
         logger.info(
-            "SWERebenchV2Judge %s: resolved=%s, F2P passed %d/%d, exit_code=%d",
+            "SWERebenchV2Judge %s: resolved=%s, F2P passed %d/%d, "
+            "P2P failed %d/%d, exit_code=%d",
             instance_id,
-            resolved,
-            len(f2p_passed),
-            len(fail_to_pass),
+            outcome.resolved,
+            len(outcome.fail_to_pass_passed),
+            len(outcome.fail_to_pass_expected),
+            len(outcome.pass_to_pass_failed),
+            len(outcome.pass_to_pass_expected),
             exit_code,
         )
-        return resolved
+        if outcome.missing_expected:
+            logger.warning(
+                "SWERebenchV2Judge %s: expected tests not PASSED: %s",
+                instance_id,
+                list(outcome.missing_expected),
+            )
+        if outcome.extra_passed:
+            logger.info(
+                "SWERebenchV2Judge %s: extra PASSED tests ignored: %s",
+                instance_id,
+                list(outcome.extra_passed),
+            )
+        return outcome.resolved
