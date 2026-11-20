@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from benchmarks.swerebenchv2.judge import SWERebenchV2Judge
+from benchmarks.swerebenchv2.judge import SWERebenchV2Judge, _normalize_test_name
 
 
 GIT_PATCH = """diff --git a/iolib.go b/iolib.go
@@ -83,3 +84,46 @@ def test_judge_does_not_resolve_when_pass_to_pass_test_is_missing(
     judge = SWERebenchV2Judge()
 
     assert judge.judge("yuin__gopher-lua-427", GIT_PATCH, _instance_data()) is False
+
+
+BINARY_JUNK_PATCH = (
+    GIT_PATCH
+    + """diff --git a/go1.23.0.linux-amd64.tar.gz b/go1.23.0.linux-amd64.tar.gz
+new file mode 100644
+index 0000000..1234567
+Binary files /dev/null and b/go1.23.0.linux-amd64.tar.gz differ
+"""
+)
+
+
+def test_judge_strips_binary_files_before_applying_the_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A binary artifact in the patch must not stop the text changes from applying."""
+    captured_patch: dict[str, str] = {}
+
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        cmd = args[0]
+        mount = cmd[cmd.index("-v") + 1].split(":")[0]
+        captured_patch["text"] = (Path(mount) / "patch.diff").read_text()
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=_go_test_output("TestExisting", "TestFix"),
+            stderr="",
+        )
+
+    monkeypatch.setattr("benchmarks.swerebenchv2.judge.subprocess.run", fake_run)
+
+    judge = SWERebenchV2Judge()
+
+    assert (
+        judge.judge("yuin__gopher-lua-427", BINARY_JUNK_PATCH, _instance_data()) is True
+    )
+    assert "iolib.go" in captured_patch["text"]
+    assert "go1.23.0.linux-amd64.tar.gz" not in captured_patch["text"]
+    assert captured_patch["text"].endswith("\n")
+
+
+def test_normalize_test_name_strips_embedded_durations() -> None:
+    assert _normalize_test_name("Compiled in 0.065s") == "Compiled"

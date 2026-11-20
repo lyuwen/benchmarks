@@ -24,6 +24,7 @@ from pathlib import Path
 
 from benchmarks.swerebenchv2.scoring import score_tests
 from benchmarks.utils.dataset import get_dataset
+from benchmarks.utils.patch_utils import remove_binary_diffs
 from openhands.sdk import get_logger
 
 
@@ -45,6 +46,8 @@ _TIMING_NORMALIZE_RES = [
     re.compile(r"\s*\[\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\]\s*$", re.IGNORECASE),
     re.compile(r"\s+in\s+\d+(?:\.\d+)?\s+(?:msec|sec)\b", re.IGNORECASE),
     re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)\s*$", re.IGNORECASE),
+    # Embedded duration, e.g. "Compiled in 0.065s [...]" or "Re-built 2 templates in 0.84s".
+    re.compile(r"\bin\s+\d+(?:\.\d+)?s\b", re.IGNORECASE),
 ]
 
 
@@ -98,7 +101,6 @@ def run_in_container(
         "docker",
         "run",
         "--rm",
-        "--network", "host",
         "-e", "_JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false",
         "-v", f"{patch_dir}:/patches:ro",
         "-w", workdir,
@@ -149,6 +151,13 @@ def evaluate_instance(
     if not image:
         raise ValueError(f"Task {instance_id} missing image_name.")
 
+    binary_clean_patch = remove_binary_diffs(model_patch)
+    if binary_clean_patch != model_patch:
+        logger.warning(
+            "Task %s: stripped binary file changes from candidate patch", instance_id
+        )
+    model_patch = binary_clean_patch
+
     workdir = f"/{repo.split('/')[-1]}"
 
     with tempfile.TemporaryDirectory(prefix="eval_patches_") as tmp:
@@ -167,6 +176,15 @@ def evaluate_instance(
     parsed = parser(output)
     parsed = {_normalize_test_name(k): v for k, v in parsed.items()}
     passed = sorted(k for k, v in parsed.items() if v == "PASSED")
+
+    if not parsed:
+        logger.warning(
+            "Task %s: no test results parsed (exit_code=%d); the patch may not "
+            "have applied. Output tail:\n%s",
+            instance_id,
+            exit_code,
+            output[-2000:],
+        )
 
     pass_to_pass = spec.get("PASS_TO_PASS", [])
     if isinstance(pass_to_pass, str):

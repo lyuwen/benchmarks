@@ -72,11 +72,22 @@ def remove_files_from_patch(git_patch, files):
 def remove_binary_diffs(patch_text):
     """
     Remove binary file diffs from a git patch.
+
+    A plain ``git diff`` renders binary changes as ``Binary files ... differ``,
+    which ``git apply`` rejects ("cannot apply binary patch ... without full
+    index line"). A ``git diff --binary`` renders them as a ``GIT binary patch``
+    block instead. Both forms are dropped here so that unrelated binary
+    artifacts (downloaded toolchains, compiled objects, archives) cannot make
+    the rest of a patch fail to apply.
+
     Args:
         patch_text (str): The git patch text
     Returns:
         str: The cleaned patch text with binary diffs removed
     """
+    if not patch_text:
+        return patch_text
+
     lines = patch_text.splitlines()
     cleaned_lines = []
     block = []
@@ -88,7 +99,7 @@ def remove_binary_diffs(patch_text):
                 cleaned_lines.extend(block)
             block = [line]
             is_binary_block = False
-        elif "Binary files" in line:
+        elif line.startswith("Binary files ") or line.startswith("GIT binary patch"):
             is_binary_block = True
             block.append(line)
         else:
@@ -96,7 +107,14 @@ def remove_binary_diffs(patch_text):
 
     if block and not is_binary_block:
         cleaned_lines.extend(block)
-    return "\n".join(cleaned_lines)
+    if not cleaned_lines:
+        return ""
+    cleaned = "\n".join(cleaned_lines)
+    # git apply rejects a patch whose final line is not newline-terminated
+    # ("corrupt patch"), so preserve the original trailing newline.
+    if patch_text.endswith("\n"):
+        cleaned += "\n"
+    return cleaned
 
 
 def remove_binary_files_from_git():

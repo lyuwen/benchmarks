@@ -42,6 +42,7 @@ from benchmarks.utils.models import (
     EvalMetadata,
     EvalOutput,
 )
+from benchmarks.utils.patch_utils import remove_files_from_patch
 from benchmarks.utils.trajectory import (
     build_messages,
     build_trajectories,
@@ -351,6 +352,27 @@ class SWERebenchV2Evaluation(Evaluation):
         git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
         assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
 
+        # Some SWE-rebench-V2 images leave untracked build artifacts (e.g. the
+        # Go toolchain tarball downloaded by install_config.install) inside the
+        # repo. Record them now so that `git add -A` at the end does not capture
+        # them into the patch: a binary blob in the patch makes the judge's
+        # `git apply` fail, which silently scores a correct fix as unresolved.
+        untracked = workspace.execute_command(
+            f"cd {repo_path} ; git ls-files --others --exclude-standard"
+        )
+        assert untracked.exit_code == 0, f"git ls-files failed: {untracked.stderr}"
+        baseline_untracked_files = {
+            line.strip()
+            for line in (untracked.stdout or "").splitlines()
+            if line.strip()
+        }
+        if baseline_untracked_files:
+            logger.info(
+                "Excluding %d pre-existing untracked file(s) from the patch: %s",
+                len(baseline_untracked_files),
+                sorted(baseline_untracked_files)[:10],
+            )
+
         base_commit = str(instance.data["base_commit"])
 
         brief_history = workspace.execute_command(
@@ -398,6 +420,17 @@ class SWERebenchV2Evaluation(Evaluation):
             f"git diff failed: {git_patch_result.stderr}"
         )
         git_patch = git_patch_result.stdout
+
+        if baseline_untracked_files:
+            filtered_patch = remove_files_from_patch(
+                git_patch, baseline_untracked_files
+            )
+            if filtered_patch != git_patch:
+                logger.info(
+                    "Removed pre-existing untracked files from the patch "
+                    "(image build artifacts would otherwise break `git apply`)"
+                )
+            git_patch = filtered_patch
 
         # Run execution-based judge if configured
         evaluation_result = None

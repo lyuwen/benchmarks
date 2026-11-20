@@ -25,6 +25,7 @@ from unidiff import PatchSet
 
 from benchmarks.swerebenchv2.scoring import score_tests
 from benchmarks.utils.execution_judge import ExecutionBasedJudge, register_judge
+from benchmarks.utils.patch_utils import remove_binary_diffs
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ _TIMING_NORMALIZE_RES = [
     re.compile(r"\s*\[\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\]\s*$", re.IGNORECASE),
     re.compile(r"\s+in\s+\d+(?:\.\d+)?\s+(?:msec|sec)\b", re.IGNORECASE),
     re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)\s*$", re.IGNORECASE),
+    # Embedded duration, e.g. "Compiled in 0.065s [...]" or "Re-built 2 templates in 0.84s".
+    re.compile(r"\bin\s+\d+(?:\.\d+)?s\b", re.IGNORECASE),
 ]
 
 
@@ -87,7 +90,11 @@ def _strip_test_files(fix_patch: str, test_patch: str) -> tuple[str, list[str]]:
         else:
             kept.append(str(f))
 
-    return "".join(kept), sorted(set(stripped))
+    patched = "".join(kept)
+    # git apply rejects a patch whose final line is not newline-terminated.
+    if patched and fix_patch.endswith("\n") and not patched.endswith("\n"):
+        patched += "\n"
+    return patched, sorted(set(stripped))
 
 
 def _resolve_image_name(image_name: str, prefix: str | None = None) -> str:
@@ -206,8 +213,15 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
 
         workdir = f"/{repo.split('/')[-1]}"
 
+        binary_clean_patch = remove_binary_diffs(git_patch)
+        if binary_clean_patch != git_patch:
+            logger.warning(
+                "Instance %s: stripped binary file changes from candidate patch",
+                instance_id,
+            )
+
         clean_patch, stripped_files = _strip_test_files(
-            fix_patch=git_patch,
+            fix_patch=binary_clean_patch,
             test_patch=test_patch,
         )
         if stripped_files:
@@ -241,7 +255,6 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
             docker_cmd = [
                 "docker", "run", "--rm",
                 "--name", container_name,
-                "--network", "host",
                 "-e", "_JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false",
                 "-v", f"{patch_dir}:/patches:ro",
                 "-w", workdir,
@@ -298,6 +311,15 @@ class SWERebenchV2Judge(ExecutionBasedJudge):
         parsed = parser(output)
         parsed = {_normalize_test_name(k): v for k, v in parsed.items()}
         passed = sorted(k for k, v in parsed.items() if v == "PASSED")
+
+        if not parsed:
+            logger.warning(
+                "SWERebenchV2Judge %s: no test results parsed (exit_code=%d); "
+                "the patch may not have applied. Output tail:\n%s",
+                instance_id,
+                exit_code,
+                output[-2000:],
+            )
 
         pass_to_pass = instance_data.get("PASS_TO_PASS", [])
         if isinstance(pass_to_pass, str):
