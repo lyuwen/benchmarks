@@ -5,15 +5,23 @@ artifacts stripped, subset resolution, no `--network host`), one instance per
 SLURM array task, and write a new histories file with updated `evaluation`
 values. No inference/agent run is repeated — only the judge (Docker test run).
 
-## Quick start (cluster defaults)
+## Quick start (run from the directory holding `histories.jsonl`)
+
+`WORKDIR` defaults to the **current directory** and `HISTORIES` to
+`$WORKDIR/histories.jsonl`, so nothing needs to be moved. The task dataset is
+the only path you must supply:
 
 ```bash
-cd /mnt/users/lfu/llm/projects/openhands/flex-benchmarks-dev-v2
+cd /mnt/users/lfu/llm/projects/openhands/flex-benchmarks-dev-v2/logs/dsv41f1017-high-synth-swerebenchv2-osr-go-notask-wcondense-run1
 
-scripts/swerebenchv2_rescore/submit_rescore.sh
+DATASET=/mnt/users/lfu/llm/datasets/SWE-rebench-V2/openswe-solvable-full/SWE-rebench-V2-go.jsonl \
+  /mnt/users/lfu/llm/projects/openhands/flex-benchmarks-dev-v2/scripts/swerebenchv2_rescore/submit_rescore.sh
 ```
 
-This does three steps:
+Add `DRY_RUN=1` to only run the prepare step and print the `sbatch` commands
+without submitting.
+
+The script then:
 
 1. `prepare_rescore.py` — one pass over `histories.jsonl` + the task JSONL,
    writing `<WORKDIR>/instances/<i>.json`, `<WORKDIR>/tasks/<i>.json`,
@@ -32,27 +40,31 @@ retries, and the merge still runs and lists the indices to re-submit.
 ## Overrides
 
 ```bash
+DATASET=/path/to/SWE-rebench-V2-go.jsonl \
 WORKDIR=/path/to/workdir \
 HISTORIES=/path/to/histories.jsonl \
-DATASET=/path/to/SWE-rebench-V2-go.jsonl \
 DOCKER_IMAGE_PREFIX=cr-ee.../swerebenchv2 \
 CONCURRENCY=32 JUDGE_TIMEOUT=1800 JUDGE_RM_IMAGE=1 ATTEMPTS=2 \
 SLURM_PARTITION=<partition> SLURM_ACCOUNT=<account> \
-  scripts/swerebenchv2_rescore/submit_rescore.sh
+  /path/to/repo/scripts/swerebenchv2_rescore/submit_rescore.sh
 ```
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WORKDIR` | `<repo>/logs/rescore-swerebenchv2-go` | scratch dir for work items/results |
-| `HISTORIES` | cluster `.../openswe-solvable-full/histories.jsonl` | input histories |
-| `DATASET` | cluster `.../SWE-rebench-V2-go.jsonl` | task rows (for test_cmd, F2P/P2P, image) |
+| `DATASET` | **required** | SWE-rebench-V2 task JSONL (test_cmd, F2P/P2P, image) |
+| `WORKDIR` | current directory | scratch/output dir for work items/results |
+| `HISTORIES` | `$WORKDIR/histories.jsonl` | input histories |
 | `DOCKER_IMAGE_PREFIX` | cluster `.../sandbox/swerebenchv2` | same prefix as the inference run |
 | `CONCURRENCY` | `32` | SLURM array `%N` cap |
 | `JUDGE_TIMEOUT` | `1800` | per-instance judge timeout (s) |
 | `JUDGE_RM_IMAGE` | `1` | remove each instance image after judging |
 | `ATTEMPTS` | `2` | retries per instance inside the array task |
-| `OUTPUT_HISTORIES` | `<WORKDIR>/histories.rescored.jsonl` | merge output (never in place) |
-| `REPORT_JSON` | `<WORKDIR>/report.json` | merge report |
+| `OUTPUT_HISTORIES` | `$WORKDIR/histories.rescored.jsonl` | merge output (never in place) |
+| `REPORT_JSON` | `$WORKDIR/report.json` | merge report |
+| `DRY_RUN` | `0` | `1` = prepare + print sbatch commands only |
+
+All relative paths are resolved against the caller's current directory before
+the script `cd`s into the repo.
 
 ## Retrying index(es) without a verdict
 
@@ -71,16 +83,16 @@ WORKDIR=... HISTORIES=... REPO_DIR=... \
 ## Manual steps (equivalent)
 
 ```bash
-export PYTHONPATH=$PWD
-python scripts/swerebenchv2_rescore/prepare_rescore.py \
+export PYTHONPATH=/path/to/repo
+python /path/to/repo/scripts/swerebenchv2_rescore/prepare_rescore.py \
   --histories "$HISTORIES" --dataset "$DATASET" --workdir "$WORKDIR"
 
 N=$(cat "$WORKDIR/count")
 sbatch --array="0-$((N-1))%32" \
-  --export=ALL,WORKDIR="$WORKDIR",REPO_DIR="$PWD",DOCKER_IMAGE_PREFIX="$DOCKER_IMAGE_PREFIX" \
-  scripts/swerebenchv2_rescore/rescore.sbatch
+  --export=ALL,WORKDIR="$WORKDIR",REPO_DIR=/path/to/repo,DOCKER_IMAGE_PREFIX="$DOCKER_IMAGE_PREFIX" \
+  /path/to/repo/scripts/swerebenchv2_rescore/rescore.sbatch
 
-python scripts/swerebenchv2_rescore/merge_rescore.py \
+python /path/to/repo/scripts/swerebenchv2_rescore/merge_rescore.py \
   --workdir "$WORKDIR" --histories "$HISTORIES" \
   --output "$WORKDIR/histories.rescored.jsonl"
 ```

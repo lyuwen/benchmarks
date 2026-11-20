@@ -121,7 +121,7 @@ def prepare_workdir(
             f"e.g. {sorted(missing)[:5]}"
         )
 
-    (workdir / "count").write_text(str(count), encoding="utf-8")
+    (workdir / "count").write_text(f"{count}\n", encoding="utf-8")
     logger.info("prepared %d work items in %s", count, workdir)
     return count
 

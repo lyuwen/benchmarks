@@ -79,7 +79,7 @@ def _prepared(tmp_path: Path) -> tuple[Path, Path, Path]:
 def test_prepare_writes_one_item_per_history_line(tmp_path: Path) -> None:
     histories, _, workdir = _prepared(tmp_path)
 
-    assert (workdir / "count").read_text() == "3"
+    assert (workdir / "count").read_text().strip() == "3"
     manifest = [
         json.loads(line)
         for line in (workdir / "manifest.jsonl").read_text().splitlines()

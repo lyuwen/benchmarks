@@ -36,7 +36,7 @@ def main() -> int:
     print(f"prepared {count} work items in {args.workdir}")
     print(
         "submit the array with:\n"
-        f"  sbatch --array=0-{count - 1}%64 "
+        f"  sbatch --array=0-{count - 1}%<CONCURRENCY> "
         "--export=ALL,WORKDIR=...,REPO_DIR=...,DOCKER_IMAGE_PREFIX=... "
         "scripts/swerebenchv2_rescore/rescore.sbatch"
     )
