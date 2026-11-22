@@ -44,9 +44,18 @@ dependencies = [
     "omegaconf",
 ]
 
+[project.optional-dependencies]
+# mini-swe-agent agent loop, used by the run_infer_miniswe entry points.
+# Install with: uv sync --extra miniswe
+miniswe = [
+    "mini-swe-agent==2.4.6",
+]
+
 [project.scripts]
 validate-cfg = "benchmarks.scripts.validate_cfg:main"
 swebench-infer = "benchmarks.swebench.run_infer:main"
+swebench-infer-miniswe = "benchmarks.swebench.run_infer_miniswe:main"
+scaleswe-infer-miniswe = "benchmarks.scaleswe.run_infer_miniswe:main"
 swtbench-infer = "benchmarks.swtbench.run_infer:main"
 swebench-eval = "benchmarks.swebench.eval_infer:main"
 swtbench-eval = "benchmarks.swtbench.eval_infer:main"

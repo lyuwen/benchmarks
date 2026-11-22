@@ -307,6 +307,41 @@ class SWEBenchEvaluation(Evaluation):
         maybe_disable_network(workspace)
         return workspace
 
+    # ---- Hook: prepare the task checkout ----------------------------------------
+    def prepare_repo(self, workspace: RemoteWorkspace, instance: EvalInstance) -> str:
+        """Copy ``/testbed`` into the workspace repo dir, link it back, and reset.
+
+        Returns the repository path the agent works in. Kept separate from
+        ``evaluate_instance`` so the mini-swe-agent sibling entry point reuses the
+        identical checkout preparation while the OpenHands path keeps its own
+        conversation/history wiring.
+        """
+        repo_path = f"/workspace/{instance.data['repo'].split('/')[-1]}/"
+        instance.data["repo_path"] = repo_path
+        logger.info("repo_path: %s", repo_path)
+
+        cp_testebed_repo = workspace.execute_command(
+            (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}"),
+            timeout=60,
+        )
+        assert cp_testebed_repo.exit_code == 0, (
+            f"cp_testebed_repo failed: {cp_testebed_repo.stderr}"
+        )
+
+        logger.info("linking workspace to testbed: %s", repo_path)
+        cp_testebed_repo = workspace.execute_command(
+            (f"sudo rm -rf /testbed ; sudo ln -s {repo_path} /testbed"),
+            timeout=60,
+        )
+        assert cp_testebed_repo.exit_code == 0, (
+            f"ln_testebed_repo failed: {cp_testebed_repo.stderr}"
+        )
+
+        # git reset
+        git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
+        assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
+        return repo_path
+
     # ---- Hook: evaluate one instance ---------------------------------------------
     def evaluate_instance(
         self, instance: EvalInstance, workspace: RemoteWorkspace
@@ -341,9 +376,6 @@ class SWEBenchEvaluation(Evaluation):
 
         assert isinstance(workspace, RemoteWorkspace)
 
-        repo_path = f"/workspace/{instance.data['repo'].split('/')[-1]}/"
-        instance.data["repo_path"] = repo_path
-
         persist_callback = build_event_persistence_callback(
             run_id=self.metadata.eval_output_dir,
             instance_id=instance.id,
@@ -357,27 +389,10 @@ class SWEBenchEvaluation(Evaluation):
             max_iteration_per_run=self.metadata.max_iterations,
         )
 
-        logger.info("repo_path: %s", repo_path)
-        cp_testebed_repo = workspace.execute_command(
-            (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}"),
-            timeout=60,
-        )
-        assert cp_testebed_repo.exit_code == 0, (
-            f"cp_testebed_repo failed: {cp_testebed_repo.stderr}"
-        )
-
-        logger.info("linking workspace to testbed: %s", repo_path)
-        cp_testebed_repo = workspace.execute_command(
-            (f"sudo rm -rf /testbed ; sudo ln -s {repo_path} /testbed"),
-            timeout=60,
-        )
-        assert cp_testebed_repo.exit_code == 0, (
-            f"ln_testebed_repo failed: {cp_testebed_repo.stderr}"
-        )
-
-        # git reset
-        git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
-        assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
+        # Conversation construction stays before the checkout on purpose: remote
+        # conversations need a moment to attach their event subscription before
+        # the first user message is sent (see CLAUDE.local.md).
+        repo_path = self.prepare_repo(workspace, instance)
 
         instruction = get_instruction(
             instance=instance.data,

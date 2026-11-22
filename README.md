@@ -117,6 +117,21 @@ After setting up the environment and configuring your LLM, see the individual be
 - **[GAIA](benchmarks/gaia/)**: General AI assistant tasks requiring multi-step reasoning  
 - **[OpenAgentSafety](benchmarks/openagentsafety/)**: AI agent safety evaluation in workplace scenarios with NPC interactions
 
+### mini-swe-agent harness
+
+SWE-bench and Scale-SWE also have mini-swe-agent variants that keep the same
+`Evaluation` orchestration and swap in the mini-swe-agent bash loop:
+
+```bash
+uv sync --extra miniswe
+uv run python -m benchmarks.swebench.run_infer_miniswe model.json \
+  --dataset princeton-nlp/SWE-bench_Verified --split test \
+  --workspace docker --n-limit 1 --judge swebench
+```
+
+See **[docs/miniswe.md](docs/miniswe.md)** for CLI mapping, history format,
+patch/submission semantics and the verification matrix.
+
 ## Triggering Cloud Evals from This Repo
 
 This repo exposes a manual GitHub Actions workflow that dispatches the `run-eval.yml` workflow in the Software Agent SDK. It is useful when you want to launch evals from the benchmarks repo without switching to the SDK repo.
