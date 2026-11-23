@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import uuid
 from pathlib import Path
 from typing import List
@@ -308,13 +309,29 @@ class SWEBenchEvaluation(Evaluation):
         return workspace
 
     # ---- Hook: prepare the task checkout ----------------------------------------
-    def prepare_repo(self, workspace: RemoteWorkspace, instance: EvalInstance) -> str:
+    def prepare_repo(
+        self,
+        workspace: RemoteWorkspace,
+        instance: EvalInstance,
+        *,
+        checkout_commit: str | None = None,
+    ) -> str:
         """Copy ``/testbed`` into the workspace repo dir, link it back, and reset.
 
         Returns the repository path the agent works in. Kept separate from
         ``evaluate_instance`` so the mini-swe-agent sibling entry point reuses the
         identical checkout preparation while the OpenHands path keeps its own
         conversation/history wiring.
+
+        Args:
+            checkout_commit: When given, reset the checkout to this baseline.
+                SWE-bench's official instance images are built with
+                ``git reset --hard {base_commit}``, but agent-server images built
+                on other image sources can sit at an environment-setup commit
+                instead. Resetting guarantees the agent edits (and submits its
+                ``git diff``) relative to the same baseline the judge applies the
+                patch to. Defaults to None (keep image HEAD), preserving the
+                legacy OpenHands runner's behavior.
         """
         repo_path = f"/workspace/{instance.data['repo'].split('/')[-1]}/"
         instance.data["repo_path"] = repo_path
@@ -337,9 +354,14 @@ class SWEBenchEvaluation(Evaluation):
             f"ln_testebed_repo failed: {cp_testebed_repo.stderr}"
         )
 
-        # git reset
-        git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
-        assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
+        # git reset (optionally to the dataset baseline)
+        reset_target = f" {shlex.quote(checkout_commit)}" if checkout_commit else ""
+        git_reset = workspace.execute_command(
+            f"cd {repo_path} ; git reset --hard{reset_target}"
+        )
+        assert git_reset.exit_code == 0, (
+            f"git reset --hard{reset_target} failed: {git_reset.stderr}"
+        )
         return repo_path
 
     # ---- Hook: evaluate one instance ---------------------------------------------

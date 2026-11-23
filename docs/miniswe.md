@@ -99,7 +99,14 @@ eval_outputs/<dataset>-<split>/<model>_sdk_<sha>_maxiter_<n>_N_<note>/miniswe/
 Per-task defaults:
 
 - **SWE-bench**: cwd is `/workspace/<repo>/` (existing `/testbed` copy + symlink +
-  reset flow), judge gets the submitted patch, `SWEBenchJudge` log dir unchanged.
+  reset flow), and the checkout is reset to the dataset `base_commit` before the
+  agent starts. Agent-server images can sit at an environment-setup commit rather
+  than the dataset base commit (e.g. a local agent-server image whose HEAD is an
+  env-setup snapshot); resetting guarantees the agent's `git diff` submission and
+  the judge's patch application share one baseline, matching the official
+  `git reset --hard {base_commit}` image build. The inherited OpenHands runner
+  still keeps the image HEAD (legacy behavior). The judge gets the submitted
+  patch and `SWEBenchJudge` log dir is unchanged.
 - **Scale-SWE**: cwd is the image `workdir`, field normalization and
   `pre_commands` run before the first model request, and the checkout is verified
   against `parent_commit` (falling back to `base_commit`) before inference so a
@@ -187,7 +194,11 @@ reports them).
    Override `run()` to call `publish_canonical_histories()` after aggregation.
 5. **Verify**: reuse `benchmarks/utils/tests/` fakes; add a wiring test with a
    scripted model, then run once against a pinned fixture (setup, agent, export,
-   scoring) and feed the history to the real reader.
+   scoring) and feed the history to the real reader. If the task has a dataset
+   base commit, reset the checkout to it before the rollout (see
+   `prepare_repo(checkout_commit=...)` in the SWE-bench path): agent-server images
+   are not guaranteed to sit at that commit, while the judge always applies the
+   patch to it.
 
 ## Verification status
 
@@ -204,7 +215,8 @@ container and/or a real model endpoint.
 | Rollout limits/terminal statuses/metrics/trace redaction | passed (offline + live) | `test_miniswe_rollout.py`; live rollout ended `Submitted` in 1 call (654 prompt / 104 completion tokens, two parallel bash tool calls) with metrics populated and a redacted trace written |
 | Evaluator wiring (history publication, judge candidate, JSONL fields, metrics) | passed (offline) | `benchmarks/swebench/tests/test_run_infer_miniswe.py` |
 | Legacy runner regression (extracted `prepare_repo`) | passed (offline) | `benchmarks/{swebench,scaleswe}/tests/test_prepare_repo*.py`; existing suites `tests/`, `benchmarks/utils/test_*.py` show only the 6 `tests/test_metrics.py` failures that already exist on `dev` |
-| SWE-bench end-to-end in Docker + judge + `swebench-eval` converter | **unverified** | needs a dataset row + judge image build/pull; the environment+model halves are now live-verified separately |
+| SWE-bench baseline checkout (image HEAD -> dataset `base_commit`) | passed (live) | astropy instance image: HEAD was an env-setup commit; `prepare_repo(..., checkout_commit=...)` reset to `base_commit`, `head_matches_commit` True, simulated `git diff` validated by `check_patch_applies` |
+| SWE-bench end-to-end in Docker + judge + `swebench-eval` converter | **unverified** | needs a dataset row + judge image build/pull; the environment, model and baseline halves are now live-verified separately |
 | Scale-SWE end-to-end in Flex + concrete judge verdict | **unverified** | needs image pull, Flex agent-plugin runtime, Docker/AweAgent on the judge host |
 | Parallel batch, interrupt/resume, forced retry, aggregation with earlier attempt winning | **unverified** (aggregation selection unit-tested only) | needs a live batch |
 | Real downstream history readers (`scripts/extract_trajectories_jsonl.py`, training normalizers) | **unverified**; schema follows the shared contract and is fixture-tested | run the real reader on a produced history |
@@ -226,6 +238,13 @@ container and/or a real model endpoint.
     `MiniRolloutSettings(cwd="/testbed", step_limit=8, timeout_seconds=300)`
     → `status=Submitted`, `n_calls=1`, metrics populated, exits excluded from the
     history dump, trace written.
+- Baseline checkout (SWE-bench): on the astropy agent-server image, image HEAD
+  was the env-setup snapshot `e66c5e38 "SWE-bench"` while the dataset base commit
+  was `d16bfe05...`. `prepare_repo(..., checkout_commit=base_commit)` reset HEAD
+  to `d16bfe05`, `head_matches_commit` returned True, a simulated agent `git diff`
+  passed `check_patch_applies` (True), and the validation left the worktree clean.
+  This is why the earlier `Prepared checkout does not match base commit` error
+  appeared; the mini entry point now resets before the first model request.
 - Not run: dataset/judge/converter (SWE-bench) and Flex/pre-commands (Scale-SWE)
   end-to-end.
 

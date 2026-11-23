@@ -129,10 +129,17 @@ def _instance() -> EvalInstance:
 
 
 @pytest.fixture
-def evaluator(tmp_path, monkeypatch) -> SWEBenchMiniEvaluation:
-    evaluation = _evaluator(tmp_path)
+def evaluator_calls() -> list:
+    return []
 
-    def fake_prepare_repo(self, workspace, instance) -> str:
+
+@pytest.fixture
+def evaluator(tmp_path, monkeypatch, evaluator_calls) -> SWEBenchMiniEvaluation:
+    evaluation = _evaluator(tmp_path)
+    calls = evaluator_calls
+
+    def fake_prepare_repo(self, workspace, instance, *, checkout_commit=None) -> str:
+        calls.append(checkout_commit)
         instance.data["repo_path"] = "/workspace/repo/"
         return "/workspace/repo/"
 
@@ -153,8 +160,14 @@ def _evaluate(evaluator: SWEBenchMiniEvaluation) -> EvalOutput:
     return evaluator.evaluate_instance(_instance(), workspace)
 
 
-def test_evaluate_instance_writes_history_and_output(evaluator) -> None:
+def test_evaluate_instance_writes_history_and_output(
+    evaluator, evaluator_calls
+) -> None:
     output = _evaluate(evaluator)
+
+    # The rollout must start from the dataset baseline so the submitted patch and
+    # the judge share one base commit.
+    assert evaluator_calls == ["abc123"]
 
     assert output.test_result == {"git_patch": PATCH}
     assert output.instruction == "fix the bug"
@@ -187,7 +200,7 @@ def test_judge_receives_the_submitted_patch(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         SWEBenchMiniEvaluation,
         "prepare_repo",
-        lambda self, workspace, instance: "/workspace/repo/",
+        lambda self, workspace, instance, **kwargs: "/workspace/repo/",
     )
     monkeypatch.setattr(run_infer_miniswe, "head_matches_commit", lambda **kwargs: True)
     monkeypatch.setattr(

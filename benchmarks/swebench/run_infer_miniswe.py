@@ -40,6 +40,7 @@ from benchmarks.utils.miniswe import (
     MiniRolloutSettings,
     build_history_dump,
     check_patch_applies,
+    get_head_commit,
     head_matches_commit,
     publish_canonical_histories,
     run_mini_rollout,
@@ -92,16 +93,21 @@ class SWEBenchMiniEvaluation(SWEBenchEvaluation):
         self, instance: EvalInstance, workspace: RemoteWorkspace
     ) -> EvalOutput:
         assert self.metadata.prompt_path is not None
-        repo_path = self.prepare_repo(workspace, instance)
         base_commit = instance.data["base_commit"]
+        # Agent-server images can sit at an environment-setup commit instead of
+        # the dataset base commit. Reset first so the agent's `git diff` and the
+        # judge (which applies the patch to base_commit) share one baseline.
+        repo_path = self.prepare_repo(workspace, instance, checkout_commit=base_commit)
 
         matches = head_matches_commit(
             workspace=workspace, repo_path=repo_path, commit=base_commit
         )
         if matches is False:
+            head = get_head_commit(workspace=workspace, repo_path=repo_path)
             raise RuntimeError(
-                f"Prepared checkout does not match base commit {base_commit} "
-                f"for {instance.id}"
+                f"Prepared checkout at {head} does not match base commit "
+                f"{base_commit} for {instance.id}; the image may be built for a "
+                "different dataset version"
             )
 
         instruction = get_instruction(
