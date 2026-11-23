@@ -25,6 +25,7 @@ from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
 from benchmarks.utils.dataset import get_dataset
+from benchmarks.utils.docker_workspace import BenchDockerWorkspace
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
     construct_eval_output_dir,
@@ -61,7 +62,7 @@ from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.legacy import get_legacy_tools
-from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
+from openhands.workspace import APIRemoteWorkspace, FlexWorkspace
 
 
 logger = get_logger(__name__)
@@ -215,7 +216,7 @@ class SWEBenchEvaluation(Evaluation):
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
                         ":ro"
                     )
-            workspace = DockerWorkspace(
+            workspace = BenchDockerWorkspace(
                 server_image=agent_server_image,
                 working_dir="/workspace",
                 forward_env=forward_env or [],
@@ -281,31 +282,40 @@ class SWEBenchEvaluation(Evaluation):
                 f"Unsupported workspace_type: {self.metadata.workspace_type}"
             )
 
-        for cmd in self.metadata.env_setup_commands or []:
-            res = workspace.execute_command(cmd)
-            if res.exit_code != 0:
-                raise RuntimeError(
-                    f"Failed to run env setup command '{cmd}': {res.stderr}"
-                )
-            logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
-
-        # psf/requests tests hit the flaky public httpbin.org; stand up a local
-        # httpbin so the agent's own test runs are deterministic. Non-fatal:
-        # on failure we degrade to external httpbin rather than losing the
-        # instance. See benchmarks/utils/httpbin_fix.py.
-        if instance.data.get("repo") == "psf/requests":
-            for cmd in make_httpbin_setup_commands():
+        try:
+            for cmd in self.metadata.env_setup_commands or []:
                 res = workspace.execute_command(cmd)
                 if res.exit_code != 0:
-                    logger.warning(
-                        "httpbin setup command failed (continuing): %r: %s",
-                        cmd,
-                        res.stderr,
+                    raise RuntimeError(
+                        f"Failed to run env setup command '{cmd}': {res.stderr}"
                     )
-                else:
-                    logger.debug("Ran httpbin setup command '%s': %s", cmd, res.stdout)
+                logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
 
-        maybe_disable_network(workspace)
+            # psf/requests tests hit the flaky public httpbin.org; stand up a
+            # local httpbin so the agent's own test runs are deterministic.
+            # Non-fatal: on failure we degrade to external httpbin rather than
+            # losing the instance. See benchmarks/utils/httpbin_fix.py.
+            if instance.data.get("repo") == "psf/requests":
+                for cmd in make_httpbin_setup_commands():
+                    res = workspace.execute_command(cmd)
+                    if res.exit_code != 0:
+                        logger.warning(
+                            "httpbin setup command failed (continuing): %r: %s",
+                            cmd,
+                            res.stderr,
+                        )
+                    else:
+                        logger.debug(
+                            "Ran httpbin setup command '%s': %s", cmd, res.stdout
+                        )
+
+            maybe_disable_network(workspace)
+        except Exception:
+            # Release the freshly created workspace: Evaluation only sees
+            # workspaces returned from this method, so a raised setup failure
+            # would otherwise leak the container/remote runtime.
+            workspace.__exit__(None, None, None)
+            raise
         return workspace
 
     # ---- Hook: prepare the task checkout ----------------------------------------

@@ -240,6 +240,41 @@ reports them).
    are not guaranteed to sit at that commit, while the judge always applies the
    patch to it.
 
+## Troubleshooting: "Container failed to become healthy in time"
+
+The SDK's `DockerWorkspace` waits a **hardcoded 120 s** for the agent server to
+answer `/health`. Large task images can need considerably longer on a busy or
+slow-disk host (a scikit-learn SWE-bench agent-server image was observed taking
+**213 s** from container start to "Application startup complete"). When the wait
+expires, the SDK raises and — because its docker-log streaming thread keeps a
+reference to the workspace — never cleans up the container. `Evaluation` then
+retries, and every retry fails at the same 120 s mark while leaking one more
+container, so the cascade gets worse.
+
+`swebench` and `scaleswe` now provision the `docker` backend with
+[`benchmarks/utils/docker_workspace.py`](benchmarks/utils/docker_workspace.py)
+(`BenchDockerWorkspace`):
+
+- startup budget `OH_WORKSPACE_STARTUP_TIMEOUT` seconds (default **600**;
+  e.g. `OH_WORKSPACE_STARTUP_TIMEOUT=900 uv run python -m ...`);
+- a failed start stops/removes its container before re-raising, so retries do
+  not leak;
+- the failure message includes the last 20 container log lines, so a crash loop
+  (broken image) is distinguishable from a slow start;
+- a failure while running setup commands after the workspace is created also
+  releases the workspace.
+
+If a previous run was interrupted or failed this way, clean up its containers
+(only when no run is active):
+
+```bash
+docker ps -a --filter name=agent-server-        # inspect
+docker rm -f $(docker ps -aq --filter name=agent-server-)
+```
+
+`--workspace flex`/`remote` are unaffected. Other benchmarks can switch one line
+(`DockerWorkspace(...)` -> `BenchDockerWorkspace(...)`) to get the same behavior.
+
 ## Verification status
 
 Matrix rows required by the porting plan. "Offline" means pytest with fakes/stubs,
@@ -253,6 +288,7 @@ container and/or a real model endpoint.
 | Submission marker (first line, payload, nonzero exit, stderr exclusion, 1 MiB rejection) | passed (offline + live) | `test_miniswe_environment.py`; live smoke transfers a patch exactly, with stderr excluded |
 | Model config translation (alias, api base/key, sampling, token limit, headers, routing key, redaction, cost-tracking fallback) | passed (offline + live) | `test_miniswe_model.py`; live `openai/deepseek-flash` via `https://api.deepseek.com/v1` emitted a `bash` tool call using the translated kwargs. Live run exposed mini aborting on LiteLLM's missing price entry for the alias, fixed with non-fatal `cost_tracking` |
 | Rollout limits/terminal statuses/metrics/trace redaction | passed (offline + live) | `test_miniswe_rollout.py`; live rollout ended `Submitted` in 1 call (654 prompt / 104 completion tokens, two parallel bash tool calls) with metrics populated and a redacted trace written |
+| Docker workspace startup (`BenchDockerWorkspace`) | passed (live) | scikit-learn agent-server image: succeeded under the 600s budget (84s in an idle window; 213s was observed while several containers were starting, which the SDK's hardcoded 120s cannot survive), the workspace ran a command as the `openhands` user, and cleanup removed the container |
 | Live progress (per-instance log, console mirror, truncation, interrupts/format errors) | passed (offline + live) | `benchmarks/utils/tests/test_miniswe_progress.py`; a live rollout produced `rollout_start`/`model_call`/`action`/`observation`/`interrupt`/`rollout_end` lines in both the `.mini.log` and the console |
 | Evaluator wiring (history publication, judge candidate, JSONL fields, metrics) | passed (offline) | `benchmarks/swebench/tests/test_run_infer_miniswe.py` |
 | Legacy runner regression (extracted `prepare_repo`) | passed (offline) | `benchmarks/{swebench,scaleswe}/tests/test_prepare_repo*.py`; existing suites `tests/`, `benchmarks/utils/test_*.py` show only the 6 `tests/test_metrics.py` failures that already exist on `dev` |
