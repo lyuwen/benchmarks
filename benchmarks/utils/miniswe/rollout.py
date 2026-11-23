@@ -28,6 +28,11 @@ from benchmarks.utils.miniswe.environment import (
 )
 from benchmarks.utils.miniswe.history import redact_secrets
 from benchmarks.utils.miniswe.model import MiniModelSpec, build_mini_model
+from benchmarks.utils.miniswe.progress import (
+    LoggingEnvironment,
+    LoggingModel,
+    MiniProgress,
+)
 from benchmarks.utils.miniswe.templates import SYSTEM_TEMPLATE
 from openhands.sdk import LLM, get_logger
 from openhands.sdk.llm import Metrics
@@ -74,6 +79,23 @@ class MiniRolloutSettings(BaseModel):
     )
     trace_path: str | None = Field(
         default=None, description="Path of the redacted native mini trace"
+    )
+    progress_path: str | None = Field(
+        default=None,
+        description=(
+            "Dedicated human-readable progress log (tail -f). Progress lines are "
+            "also mirrored to the per-instance framework log"
+        ),
+    )
+    progress_console: bool = Field(
+        default=False,
+        description="Also print progress lines to the real console (sys.__stdout__)",
+    )
+    instance_id: str | None = Field(
+        default=None, description="Instance label for progress lines"
+    )
+    attempt: int | None = Field(
+        default=None, description="Attempt label for progress lines"
     )
 
 
@@ -160,6 +182,14 @@ def run_mini_rollout(
             )
         )
 
+    progress = MiniProgress(
+        path=settings.progress_path,
+        console=settings.progress_console,
+        label=_progress_label(settings),
+    )
+    env = LoggingEnvironment(env, progress)
+    model = LoggingModel(model, progress)
+
     agent = DefaultAgent(
         model=model,
         env=env,
@@ -171,9 +201,18 @@ def run_mini_rollout(
         output_path=None,
     )
 
+    progress.rollout_start(
+        model=spec.model_name,
+        cwd=settings.cwd,
+        step_limit=settings.step_limit,
+        command_timeout=settings.command_timeout,
+        timeout_seconds=settings.timeout_seconds,
+    )
     try:
         exit_info = agent.run(task=instruction)
     except Exception as exc:
+        duration = time.monotonic() - started
+        progress.rollout_error(exc, duration_seconds=duration)
         _write_trace(
             path=settings.trace_path,
             agent=agent,
@@ -183,42 +222,60 @@ def run_mini_rollout(
             status=TERMINAL_EXCEPTION,
             submission="",
             error=f"{type(exc).__name__}: {exc}",
-            duration_seconds=time.monotonic() - started,
+            duration_seconds=duration,
         )
         raise
-
-    duration = time.monotonic() - started
-    status = _exit_status(exit_info)
-    submission = str(exit_info.get("submission") or "")
-    messages = list(agent.messages)
-    result = MiniRolloutResult(
-        status=status,
-        submission=submission,
-        messages=messages,
-        tools=tools,
-        model=spec,
-        metrics=build_metrics(
-            model_name=spec.model_name,
+    else:
+        duration = time.monotonic() - started
+        status = _exit_status(exit_info)
+        submission = str(exit_info.get("submission") or "")
+        messages = list(agent.messages)
+        result = MiniRolloutResult(
+            status=status,
+            submission=submission,
             messages=messages,
+            tools=tools,
+            model=spec,
+            metrics=build_metrics(
+                model_name=spec.model_name,
+                messages=messages,
+                cost=agent.cost,
+            ),
+            n_calls=agent.n_calls,
             cost=agent.cost,
-        ),
-        n_calls=agent.n_calls,
-        cost=agent.cost,
-        duration_seconds=duration,
-        trace_path=settings.trace_path,
-    )
-    _write_trace(
-        path=settings.trace_path,
-        agent=agent,
-        env=env,
-        minisweagent=minisweagent,
-        spec=spec,
-        status=status,
-        submission=submission,
-        error=None,
-        duration_seconds=duration,
-    )
-    return result
+            duration_seconds=duration,
+            trace_path=settings.trace_path,
+        )
+        _write_trace(
+            path=settings.trace_path,
+            agent=agent,
+            env=env,
+            minisweagent=minisweagent,
+            spec=spec,
+            status=status,
+            submission=submission,
+            error=None,
+            duration_seconds=duration,
+        )
+        progress.rollout_end(
+            status=status,
+            n_calls=agent.n_calls,
+            cost=agent.cost,
+            duration_seconds=duration,
+            submission_chars=len(submission),
+        )
+        return result
+    finally:
+        progress.close()
+
+
+def _progress_label(settings: MiniRolloutSettings) -> str:
+    parts: list[str] = []
+    if settings.instance_id:
+        parts.append(f"instance={settings.instance_id}")
+    if settings.attempt is not None:
+        parts.append(f"attempt={settings.attempt}")
+    return " ".join(parts)
 
 
 def build_metrics(
@@ -292,7 +349,7 @@ def _write_trace(
     *,
     path: str | None,
     agent: Any,
-    env: WorkspaceEnvironment,
+    env: Any,
     minisweagent: Any,
     spec: MiniModelSpec,
     status: str,

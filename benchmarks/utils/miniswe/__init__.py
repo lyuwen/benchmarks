@@ -43,6 +43,11 @@ from benchmarks.utils.miniswe.model import (
     build_mini_model,
     litellm_model_kwargs,
 )
+from benchmarks.utils.miniswe.progress import (
+    LoggingEnvironment,
+    LoggingModel,
+    MiniProgress,
+)
 from benchmarks.utils.miniswe.rollout import (
     MiniRolloutResult,
     MiniRolloutSettings,
@@ -62,6 +67,9 @@ __all__ = [
     "MINISWE_VERSION",
     "SUBMISSION_MARKER",
     "MiniModelSpec",
+    "LoggingEnvironment",
+    "LoggingModel",
+    "MiniProgress",
     "MiniRolloutResult",
     "MiniRolloutSettings",
     "SubmissionTruncatedError",

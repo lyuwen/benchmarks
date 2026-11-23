@@ -15,7 +15,7 @@ import os
 import uuid
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from omegaconf import OmegaConf
 from pydantic import Field
@@ -72,6 +72,15 @@ class ScaleSWEMiniEvaluation(ScaleSWEEvaluation):
         ),
     )
 
+    mini_progress: Literal["console", "file", "none"] = Field(
+        default="console",
+        description=(
+            "Live rollout progress: 'console' writes a per-instance progress file "
+            "and mirrors lines to the console, 'file' writes the file only, "
+            "'none' disables progress output"
+        ),
+    )
+
     def _capture_conversation_archive(
         self, workspace: RemoteWorkspace, instance: EvalInstance
     ) -> None:
@@ -111,6 +120,13 @@ class ScaleSWEMiniEvaluation(ScaleSWEEvaluation):
             "miniswe_traces",
             f"{instance.id}.attempt{self.current_attempt}.{uuid.uuid4().hex[:8]}.json",
         )
+        progress_path = None
+        if self.mini_progress != "none":
+            progress_path = os.path.join(
+                self.metadata.eval_output_dir,
+                "logs",
+                f"instance_{instance.id}.mini.log",
+            )
         settings = MiniRolloutSettings(
             cwd=repo_path,
             step_limit=self.metadata.max_iterations,
@@ -119,6 +135,10 @@ class ScaleSWEMiniEvaluation(ScaleSWEEvaluation):
             command_timeout=self.mini_command_timeout,
             bash_env_file=self.mini_bash_env_file or None,
             trace_path=trace_path,
+            progress_path=progress_path,
+            progress_console=self.mini_progress == "console",
+            instance_id=instance.id,
+            attempt=self.current_attempt,
         )
         rollout = run_mini_rollout(
             llm=self.metadata.llm,
@@ -243,6 +263,16 @@ def main() -> None:
         help="Per-command timeout in seconds (default: 60)",
     )
     parser.add_argument(
+        "--mini-progress",
+        choices=["console", "file", "none"],
+        default="console",
+        help=(
+            "Live rollout progress: 'console' (default) writes a tail-able "
+            "per-instance progress file and mirrors one-line events to the "
+            "console, 'file' writes the file only, 'none' disables it"
+        ),
+    )
+    parser.add_argument(
         "--mini-bash-env-file",
         type=str,
         default=None,
@@ -322,6 +352,7 @@ def main() -> None:
         mini_cost_limit=args.mini_cost_limit,
         mini_command_timeout=args.mini_command_timeout,
         mini_bash_env_file=bash_env_file,
+        mini_progress=args.mini_progress,
     )
 
     evaluator.run(on_result=get_default_on_result_writer(evaluator.output_path))

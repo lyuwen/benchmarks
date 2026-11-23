@@ -84,6 +84,45 @@ eval_outputs/<dataset>-<split>/<model>_sdk_<sha>_maxiter_<n>_N_<note>/miniswe/
 | `--mini-command-timeout` | per-bash-command timeout inside the container (default 60 s) |
 | `--mini-bash-env-file` | optional `BASH_ENV` file for non-login `bash` (off by default: agent-server images already put the task environment on `PATH`, and `/root/.bashrc` is unreadable to the non-root agent user; example override: `/home/openhands/.bashrc`) |
 
+## Live progress
+
+Unlike OpenHands runs, mini has no event stream, so the adapter emits one compact
+line per rollout event while the run is in flight:
+
+```
+2026-11-23 13:16:30,215 [miniswe instance=astropy__astropy-12907 attempt=1] rollout_start model=openai/deepseek-flash cwd=/testbed step_limit=8 command_timeout=120s rollout_timeout=300s
+2026-11-23 13:16:31,509 [miniswe instance=astropy__astropy-12907 attempt=1] model_call n=1 chars=0 tools=2 dt=1.29s tokens=629+104 cost=$0.0000 preview=
+2026-11-23 13:16:31,511 [miniswe instance=astropy__astropy-12907 attempt=1] action n=1 command=echo miniswe-live-ok
+2026-11-23 13:16:31,626 [miniswe instance=astropy__astropy-12907 attempt=1] observation n=1 rc=0 chars=16 dt=0.11s preview=miniswe-live-ok\n
+2026-11-23 13:16:31,745 [miniswe instance=astropy__astropy-12907 attempt=1] interrupt n=1 type=Submitted dt=0.11s
+2026-11-23 13:16:31,752 [miniswe instance=astropy__astropy-12907 attempt=1] rollout_end status=Submitted calls=1 cost=$0.0000 dt=1.54s submission_chars=0
+```
+
+Events: `rollout_start`, `model_call` (latency, output/tool-call counts, tokens,
+cost), `action` (the bash command), `observation` (return code, output size,
+preview), `interrupt` (mini control-flow: `FormatError`, `Submitted`,
+`LimitsExceeded`, `TimeExceeded`), `rollout_end`, `model_error`, `rollout_error`.
+Previews are newline-escaped and truncated to 320 chars; the full transcript is
+in the native trace.
+
+Three sinks (`--mini-progress {console,file,none}`, default `console`):
+
+| Sink | File / stream | Notes |
+| --- | --- | --- |
+| dedicated progress log | `logs/instance_<id>.mini.log` | always written unless `none`; `tail -f` it for one instance |
+| framework run log | `logs/instance_<id>.log` | the progress lines are also INFO records on the normal logging pipeline |
+| console | the worker's real `sys.__stdout__` | escapes `Evaluation`'s per-instance stdout redirection, like the OpenHands conversation-event handler; lines are prefixed with `[miniswe instance=… attempt=…]`, so parallel workers stay attributable |
+
+The inherited `logs/instance_<id>.output.log` is the worker process's redirected
+stdout/stderr, not a channel for our progress lines: it carries stray prints and
+library output (and container command output is fetched over the API, not written
+here). The dedicated `.mini.log` + framework `.log` + console stream are the
+progress surfaces; nothing is written into a container. For a live run:
+
+```bash
+tail -f eval_outputs/.../miniswe/logs/instance_*.mini.log
+```
+
 ## How the adapter works
 
 `benchmarks/utils/miniswe/` owns the shared integration:
@@ -93,6 +132,7 @@ eval_outputs/<dataset>-<split>/<model>_sdk_<sha>_maxiter_<n>_N_<note>/miniswe/
 | `environment.py` | mini `Environment` protocol over `workspace.execute_command()`: task cwd, shell interpreter/`BASH_ENV`, stdout+stderr observation, timeout mapping, submission marker detection, roll-out deadline |
 | `model.py` | translates the OpenHands `LLM` config into mini's `LitellmModel`, reusing the SDK's `select_chat_options()` for provider parity; regenerates `X-SMG-Routing-Key` per rollout when router affinity is configured (put the header in the LLM config — unlike `run_infer.py`, the mini entry point does not inject one); never serializes credentials; defaults mini's `cost_tracking` to `ignore_errors` so unpriced aliases/local models do not abort rollouts (cost is then `0`) |
 | `rollout.py` | runs `DefaultAgent`, maps limits to mini's `step_limit`/`wall_time_limit_seconds`, collects metrics, and writes a redacted native trace before workspace release |
+| `progress.py` | human-readable live progress: decorates mini's model/environment protocols and emits one line per model call, action, observation, interrupt and exit |
 | `history.py` | normalizes mini's transcript to the `*.history.json` contract and publishes the aggregated attempt's history atomically |
 | `submission.py` | uploads the candidate patch and checks it against the task baseline with `git apply --check`; a failed check is recorded, never rewrites candidate bytes |
 
@@ -213,6 +253,7 @@ container and/or a real model endpoint.
 | Submission marker (first line, payload, nonzero exit, stderr exclusion, 1 MiB rejection) | passed (offline + live) | `test_miniswe_environment.py`; live smoke transfers a patch exactly, with stderr excluded |
 | Model config translation (alias, api base/key, sampling, token limit, headers, routing key, redaction, cost-tracking fallback) | passed (offline + live) | `test_miniswe_model.py`; live `openai/deepseek-flash` via `https://api.deepseek.com/v1` emitted a `bash` tool call using the translated kwargs. Live run exposed mini aborting on LiteLLM's missing price entry for the alias, fixed with non-fatal `cost_tracking` |
 | Rollout limits/terminal statuses/metrics/trace redaction | passed (offline + live) | `test_miniswe_rollout.py`; live rollout ended `Submitted` in 1 call (654 prompt / 104 completion tokens, two parallel bash tool calls) with metrics populated and a redacted trace written |
+| Live progress (per-instance log, console mirror, truncation, interrupts/format errors) | passed (offline + live) | `benchmarks/utils/tests/test_miniswe_progress.py`; a live rollout produced `rollout_start`/`model_call`/`action`/`observation`/`interrupt`/`rollout_end` lines in both the `.mini.log` and the console |
 | Evaluator wiring (history publication, judge candidate, JSONL fields, metrics) | passed (offline) | `benchmarks/swebench/tests/test_run_infer_miniswe.py` |
 | Legacy runner regression (extracted `prepare_repo`) | passed (offline) | `benchmarks/{swebench,scaleswe}/tests/test_prepare_repo*.py`; existing suites `tests/`, `benchmarks/utils/test_*.py` show only the 6 `tests/test_metrics.py` failures that already exist on `dev` |
 | SWE-bench baseline checkout (image HEAD -> dataset `base_commit`) | passed (live) | astropy instance image: HEAD was an env-setup commit; `prepare_repo(..., checkout_commit=...)` reset to `base_commit`, `head_matches_commit` True, simulated `git diff` validated by `check_patch_applies` |
