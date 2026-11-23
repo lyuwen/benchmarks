@@ -5,6 +5,7 @@ import json
 import pytest
 
 from benchmarks.utils.miniswe.model import (
+    ROLLOUT_ID_HEADERS,
     MiniModelSpec,
     build_mini_model,
     litellm_model_kwargs,
@@ -41,21 +42,48 @@ def test_request_kwargs_mirror_openhands_llm_config() -> None:
     assert kwargs["drop_params"] is True
 
 
-def test_routing_key_is_regenerated_per_rollout() -> None:
-    kwargs = litellm_model_kwargs(llm=_llm(), rollout_key="rollout-1")
+def test_rollout_headers_are_refreshed_together() -> None:
+    kwargs = litellm_model_kwargs(
+        llm=_llm(
+            extra_headers={
+                "X-SMG-Routing-Key": "stale",
+                "X-Session-ID": "stale-session",
+                "X-Test": "1",
+            }
+        ),
+        rollout_key="rollout-1",
+    )
 
-    assert kwargs["extra_headers"]["X-SMG-Routing-Key"] == "rollout-1"
-    assert kwargs["extra_headers"]["X-Test"] == "1"
+    assert kwargs["extra_headers"] == {
+        "X-SMG-Routing-Key": "rollout-1",
+        "X-Session-ID": "rollout-1",
+        "X-Test": "1",
+    }
 
 
-def test_routing_key_untouched_when_affinity_not_configured() -> None:
-    kwargs = litellm_model_kwargs(llm=_llm(), rollout_key="rollout-1")
+def test_session_id_alone_is_refreshed_per_rollout() -> None:
+    kwargs = litellm_model_kwargs(
+        llm=_llm(extra_headers={"X-Session-ID": "stale-session"}),
+        rollout_key="rollout-2",
+    )
 
-    assert "extra_headers" in kwargs
-    no_header = litellm_model_kwargs(
+    assert kwargs["extra_headers"] == {"X-Session-ID": "rollout-2"}
+
+
+def test_rollout_headers_are_not_injected_when_absent() -> None:
+    unchanged = litellm_model_kwargs(
         llm=_llm(extra_headers={"X-Test": "1"}), rollout_key="rollout-1"
     )
-    assert no_header["extra_headers"] == {"X-Test": "1"}
+    assert unchanged["extra_headers"] == {"X-Test": "1"}
+
+    no_headers = litellm_model_kwargs(
+        llm=_llm(extra_headers=None), rollout_key="rollout-1"
+    )
+    assert "extra_headers" not in no_headers
+
+
+def test_rollout_id_headers_constant() -> None:
+    assert ROLLOUT_ID_HEADERS == ("X-SMG-Routing-Key", "X-Session-ID")
 
 
 def test_unregistered_models_do_not_abort_on_cost_lookup(monkeypatch) -> None:

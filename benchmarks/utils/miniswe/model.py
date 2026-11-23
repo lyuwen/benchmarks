@@ -22,8 +22,17 @@ from openhands.sdk import LLM, get_logger
 
 logger = get_logger(__name__)
 
-ROUTING_KEY_HEADER = "X-SMG-Routing-Key"
-"""Header used by the eval gateway for router affinity (sglang/llm-proxy)."""
+ROLLOUT_ID_HEADERS = ("X-SMG-Routing-Key", "X-Session-ID")
+"""Headers refreshed once per rollout when present in the LLM config.
+
+- ``X-SMG-Routing-Key``: router affinity for sglang/llm-proxy (all requests of a
+  rollout are pinned to the same backend).
+- ``X-Session-ID``: gateway/runtime session correlation.
+
+A header is only refreshed when the operator configured it, so the adapter never
+injects provider-specific headers on its own. Both receive the rollout key, so
+they are stable across the requests of one rollout and unique across rollouts.
+"""
 
 
 class MiniModelSpec(BaseModel):
@@ -48,9 +57,11 @@ def build_mini_model(
     Args:
         llm: The benchmark's OpenHands LLM config. Read at rollout time so the
             per-attempt temperature adjustment made by ``Evaluation`` applies.
-        rollout_key: Fresh identifier for router affinity. When the config
-            declares ``X-SMG-Routing-Key``, its value is replaced so all requests
-            of this rollout stick to one backend.
+        rollout_key: Fresh identifier reused for the per-rollout identity
+            headers. Every header from :data:`ROLLOUT_ID_HEADERS` present in the
+            LLM config is set to this value, so a rollout's requests share one
+            router affinity (``X-SMG-Routing-Key``) and session id
+            (``X-Session-ID``).
         timeout: Hard per-request timeout in seconds (rollout budget), defaulting
             to the LLM config's own timeout.
 
@@ -116,22 +127,28 @@ def litellm_model_kwargs(
     if effective_timeout is not None:
         kwargs["timeout"] = int(effective_timeout)
 
-    _apply_routing_key(kwargs, rollout_key)
+    _apply_rollout_id_headers(kwargs, rollout_key)
     return kwargs
 
 
-def _apply_routing_key(kwargs: dict[str, Any], rollout_key: str | None) -> None:
-    """Reuse one routing key across a rollout's requests when configured."""
+def _apply_rollout_id_headers(kwargs: dict[str, Any], rollout_key: str | None) -> None:
+    """Set configured per-rollout identity headers to this rollout's key.
+
+    Only headers the operator already configured are touched; unknown headers
+    pass through unchanged and no header is injected when absent.
+    """
     if not rollout_key:
         return
     headers = kwargs.get("extra_headers")
     if not isinstance(headers, dict):
         return
-    if ROUTING_KEY_HEADER not in headers:
+    configured = [header for header in ROLLOUT_ID_HEADERS if header in headers]
+    if not configured:
         return
-    headers = dict(headers)
-    headers[ROUTING_KEY_HEADER] = rollout_key
-    kwargs["extra_headers"] = headers
+    updated = dict(headers)
+    for header in configured:
+        updated[header] = rollout_key
+    kwargs["extra_headers"] = updated
 
 
 def _optional_float(value: Any) -> float | None:

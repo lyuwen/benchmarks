@@ -133,11 +133,19 @@ tail -f eval_outputs/.../miniswe/logs/instance_*.mini.log
 | Module | Responsibility |
 | --- | --- |
 | `environment.py` | mini `Environment` protocol over `workspace.execute_command()`: task cwd, shell interpreter/`BASH_ENV`, stdout+stderr observation, timeout mapping, submission marker detection, roll-out deadline |
-| `model.py` | translates the OpenHands `LLM` config into mini's `LitellmModel`, reusing the SDK's `select_chat_options()` for provider parity; regenerates `X-SMG-Routing-Key` per rollout when router affinity is configured (put the header in the LLM config — unlike `run_infer.py`, the mini entry point does not inject one); never serializes credentials; defaults mini's `cost_tracking` to `ignore_errors` so unpriced aliases/local models do not abort rollouts (cost is then `0`) |
+| `model.py` | translates the OpenHands `LLM` config into mini's `LitellmModel`, reusing the SDK's `select_chat_options()` for provider parity; refreshes the configured per-rollout identity headers (see below); never serializes credentials; defaults mini's `cost_tracking` to `ignore_errors` so unpriced aliases/local models do not abort rollouts (cost is then `0`) |
 | `rollout.py` | runs `DefaultAgent`, maps limits to mini's `step_limit`/`wall_time_limit_seconds`, collects metrics, and writes a redacted native trace before workspace release |
 | `progress.py` | human-readable live progress: decorates mini's model/environment protocols and emits one line per model call, action, observation, interrupt and exit |
 | `history.py` | normalizes mini's transcript to the `*.history.json` contract and publishes the aggregated attempt's history atomically |
 | `submission.py` | uploads the candidate patch and checks it against the task baseline with `git apply --check`; a failed check is recorded, never rewrites candidate bytes |
+
+Per-rollout identity headers: if the LLM config (`extra_headers` or
+`litellm_params.extra_headers`) contains `X-SMG-Routing-Key` (router affinity)
+and/or `X-Session-ID` (session correlation), both are set to a fresh id for each
+rollout, shared by every request of that rollout. Headers are only refreshed
+when configured — the adapter never injects them — and other headers pass
+through untouched. Static values for these two names are therefore always
+replaced; use a different header name for static metadata.
 
 Per-task defaults:
 

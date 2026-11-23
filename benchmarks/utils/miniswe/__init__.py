@@ -47,6 +47,7 @@ from benchmarks.utils.miniswe.history import (
     write_history,
 )
 from benchmarks.utils.miniswe.model import (
+    ROLLOUT_ID_HEADERS,
     MiniModelSpec,
     build_mini_model,
     litellm_model_kwargs,
@@ -74,6 +75,7 @@ __all__ = [
     "MAX_SINGLE_OUTPUT_CHARS",
     "MINISWE_SUPPORTED_CRITICS",
     "MINISWE_VERSION",
+    "ROLLOUT_ID_HEADERS",
     "SUBMISSION_MARKER",
     "MiniModelSpec",
     "LoggingEnvironment",
