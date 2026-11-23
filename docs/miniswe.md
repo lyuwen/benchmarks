@@ -17,6 +17,8 @@ with [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) `v2.4.6`.
 | --- | --- | --- |
 | SWE-bench | `benchmarks/swebench/run_infer_miniswe.py` | `benchmarks/swebench/prompts/miniswe-default.j2` |
 | Scale-SWE | `benchmarks/scaleswe/run_infer_miniswe.py` | `benchmarks/scaleswe/prompts/miniswe-default.j2` |
+| z021data | `benchmarks/z021data/run_infer_miniswe.py` | `benchmarks/z021data/prompts/miniswe-default.j2` |
+| SWE-rebench-V2 | `benchmarks/swerebenchv2/run_infer_miniswe.py` | `benchmarks/swerebenchv2/prompts/miniswe-default.j2` |
 
 Both subclass the existing evaluator, reuse `prepare_instances()`,
 `prepare_workspace()` and the extracted `prepare_repo()` checkout helper, and
@@ -81,6 +83,7 @@ eval_outputs/<dataset>-<split>/<model>_sdk_<sha>_maxiter_<n>_N_<note>/miniswe/
 | `--critic {pass,empty_patch_critic}` | supported; `finish_with_patch` depends on OpenHands events and is rejected |
 | `--condenser` | rejected (OpenHands-only feature) |
 | `--mini-cost-limit` | optional rollout cost cap in USD (default `0` = no limit); only effective when the model has a LiteLLM price entry (unpriced aliases record cost `0`) |
+| `--mini-progress`, `--mini-command-timeout`, `--mini-bash-env-file` | shared across all four mini entry points via `benchmarks/utils/miniswe/cli.py` (see [Live progress](#live-progress)) |
 | `--mini-command-timeout` | per-bash-command timeout inside the container (default 60 s) |
 | `--mini-bash-env-file` | optional `BASH_ENV` file for non-login `bash` (off by default: agent-server images already put the task environment on `PATH`, and `/root/.bashrc` is unreadable to the non-root agent user; example override: `/home/openhands/.bashrc`) |
 
@@ -151,6 +154,18 @@ Per-task defaults:
   `pre_commands` run before the first model request, and the checkout is verified
   against `parent_commit` (falling back to `base_commit`) before inference so a
   bad checkout fails the attempt instead of scoring against the wrong baseline.
+- **z021data**: cwd is the image `workdir` (default `/app`), `parent_commit` is
+  checked out, and an empty `problem_statement` falls back to the PR/issue text
+  (same `resolve_problem_statement` helper as the OpenHands runner). The
+  dataset's `pre_commands` hold the test invocation, so they are deliberately not
+  run during inference. The checkout is verified before the rollout fails the
+  attempt on mismatch.
+- **SWE-rebench-V2**: the image repo at `/<repo>` is copied to
+  `/workspace/<repo>/` and symlinked back, then reset to the dataset
+  `base_commit` (multi-language images are not guaranteed to sit there). Pre-existing
+  untracked build artifacts are recorded and filtered from the submitted patch
+  exactly like the OpenHands runner (binary blobs would otherwise break the
+  judge's `git apply`).
 
 ## Patch policy
 
@@ -290,10 +305,12 @@ container and/or a real model endpoint.
 | Rollout limits/terminal statuses/metrics/trace redaction | passed (offline + live) | `test_miniswe_rollout.py`; live rollout ended `Submitted` in 1 call (654 prompt / 104 completion tokens, two parallel bash tool calls) with metrics populated and a redacted trace written |
 | Docker workspace startup (`BenchDockerWorkspace`) | passed (live) | scikit-learn agent-server image: succeeded under the 600s budget (84s in an idle window; 213s was observed while several containers were starting, which the SDK's hardcoded 120s cannot survive), the workspace ran a command as the `openhands` user, and cleanup removed the container |
 | Live progress (per-instance log, console mirror, truncation, interrupts/format errors) | passed (offline + live) | `benchmarks/utils/tests/test_miniswe_progress.py`; a live rollout produced `rollout_start`/`model_call`/`action`/`observation`/`interrupt`/`rollout_end` lines in both the `.mini.log` and the console |
-| Evaluator wiring (history publication, judge candidate, JSONL fields, metrics) | passed (offline) | `benchmarks/swebench/tests/test_run_infer_miniswe.py` |
+| Evaluator wiring (history publication, judge candidate, JSONL fields, metrics) | passed (offline) | `benchmarks/swebench/tests/test_run_infer_miniswe.py`, `benchmarks/z021data/tests/test_run_infer_miniswe_z021data.py`, `benchmarks/swerebenchv2/tests/test_run_infer_miniswe.py` |
 | Legacy runner regression (extracted `prepare_repo`) | passed (offline) | `benchmarks/{swebench,scaleswe}/tests/test_prepare_repo*.py`; existing suites `tests/`, `benchmarks/utils/test_*.py` show only the 6 `tests/test_metrics.py` failures that already exist on `dev` |
 | SWE-bench baseline checkout (image HEAD -> dataset `base_commit`) | passed (live) | astropy instance image: HEAD was an env-setup commit; `prepare_repo(..., checkout_commit=...)` reset to `base_commit`, `head_matches_commit` True, simulated `git diff` validated by `check_patch_applies` |
 | SWE-bench end-to-end in Docker + judge + `swebench-eval` converter | **unverified** | needs a dataset row + judge image build/pull; the environment, model and baseline halves are now live-verified separately |
+| z021data end-to-end (image, checkout, judge) | **unverified** | offline wiring + prepare_repo tests only; needs an image and a dataset row |
+| SWE-rebench-V2 end-to-end (multi-language image, judge) | **unverified** | offline wiring + prepare_repo tests only; needs an image and a dataset row |
 | Scale-SWE end-to-end in Flex + concrete judge verdict | **unverified** | needs image pull, Flex agent-plugin runtime, Docker/AweAgent on the judge host |
 | Parallel batch, interrupt/resume, forced retry, aggregation with earlier attempt winning | **unverified** (aggregation selection unit-tested only) | needs a live batch |
 | Real downstream history readers (`scripts/extract_trajectories_jsonl.py`, training normalizers) | **unverified**; schema follows the shared contract and is fixture-tested | run the real reader on a produced history |

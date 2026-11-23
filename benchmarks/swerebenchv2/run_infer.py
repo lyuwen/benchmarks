@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 from pathlib import Path
 from typing import List
 
@@ -21,6 +22,7 @@ from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
 from benchmarks.utils.dataset import get_dataset
+from benchmarks.utils.docker_workspace import BenchDockerWorkspace
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
     construct_eval_output_dir,
@@ -56,7 +58,7 @@ from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.legacy import get_legacy_tools
-from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
+from openhands.workspace import APIRemoteWorkspace, FlexWorkspace
 
 
 logger = get_logger(__name__)
@@ -220,7 +222,7 @@ class SWERebenchV2Evaluation(Evaluation):
                         f"{sdk_base}/openhands-{module}/openhands/{module.replace('-', '_')}:"
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
                     )
-            workspace = DockerWorkspace(
+            workspace = BenchDockerWorkspace(
                 server_image=agent_server_image,
                 working_dir="/workspace",
                 forward_env=forward_env or [],
@@ -264,14 +266,105 @@ class SWERebenchV2Evaluation(Evaluation):
                 f"Unsupported workspace_type: {self.metadata.workspace_type}"
             )
 
-        for cmd in self.metadata.env_setup_commands or []:
-            res = workspace.execute_command(cmd)
-            if res.exit_code != 0:
-                raise RuntimeError(
-                    f"Failed to run env setup command '{cmd}': {res.stderr}"
-                )
-            logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
+        try:
+            for cmd in self.metadata.env_setup_commands or []:
+                res = workspace.execute_command(cmd)
+                if res.exit_code != 0:
+                    raise RuntimeError(
+                        f"Failed to run env setup command '{cmd}': {res.stderr}"
+                    )
+                logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
+        except Exception:
+            # Evaluation only sees returned workspaces, so release the fresh one.
+            workspace.__exit__(None, None, None)
+            raise
         return workspace
+
+    # ---- Hook: prepare the task checkout ----------------------------------------
+    def prepare_repo(
+        self,
+        workspace: RemoteWorkspace,
+        instance: EvalInstance,
+        *,
+        checkout_commit: str | None = None,
+    ) -> str:
+        """Copy the image repo into /workspace, link it back, and reset.
+
+        Returns the repository path the agent works in. Kept separate from
+        ``evaluate_instance`` so the mini-swe-agent sibling entry point reuses
+        the identical preparation.
+
+        Args:
+            checkout_commit: When given, reset the checkout to this baseline so
+                the agent's diff and the judge share one base commit. Defaults
+                to None (keep image HEAD), preserving the legacy runner.
+        """
+        repo_path = f"/workspace/{instance.data['repo'].split('/')[-1]}/"
+        instance.data["repo_path"] = repo_path
+
+        # SWE-rebench-V2 images place the repo at /{repo_name} (not /testbed).
+        # Copy it into the workspace directory for the agent.
+        repo_name = instance.data["repo"].split("/")[-1]
+        source_repo_path = f"/{repo_name}"
+        logger.info("repo_path: %s (source: %s)", repo_path, source_repo_path)
+        cp_repo = workspace.execute_command(
+            f"mkdir -p {repo_path} ; cp -r {source_repo_path}/. {repo_path}",
+            timeout=120,
+        )
+        assert cp_repo.exit_code == 0, f"cp repo failed: {cp_repo.stderr}"
+
+        # Replace the original source repo with a symlink to the workspace copy.
+        # Some agents ignore the instructed working directory and edit the source
+        # tree (e.g. /pandas) instead of the workspace copy; those edits would be
+        # invisible to patch extraction, which diffs only the workspace copy.
+        rp_no_slash = repo_path.rstrip("/")
+        link_repo = workspace.execute_command(
+            f"rm -rf {source_repo_path} ; ln -s {rp_no_slash} {source_repo_path}",
+            timeout=120,
+        )
+        assert link_repo.exit_code == 0, f"symlink repo failed: {link_repo.stderr}"
+
+        reset_target = f" {shlex.quote(checkout_commit)}" if checkout_commit else ""
+        git_reset = workspace.execute_command(
+            f"cd {repo_path} ; git reset --hard{reset_target}", timeout=120
+        )
+        assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
+
+        brief_history = workspace.execute_command(
+            f"cd {repo_path} ; git --no-pager log --oneline -10"
+        )
+        logger.info(
+            f"Repo status:\n* Current commit: {instance.data['base_commit']}\n"
+            f"* Top 10 history:\n{brief_history.stdout.strip()}"
+        )
+        return repo_path
+
+    def baseline_untracked_files(
+        self, workspace: RemoteWorkspace, repo_path: str
+    ) -> set[str]:
+        """Record pre-existing untracked files so they never enter a patch.
+
+        Some SWE-rebench-V2 images leave untracked build artifacts (e.g. the Go
+        toolchain tarball downloaded by install_config.install) inside the repo.
+        Filtering them out prevents a binary blob from making the judge's
+        ``git apply`` fail, which would silently score a correct fix unresolved.
+        """
+        untracked = workspace.execute_command(
+            f"cd {repo_path} ; git ls-files --others --exclude-standard"
+        )
+        assert untracked.exit_code == 0, f"git ls-files failed: {untracked.stderr}"
+        files = {
+            line.strip()
+            for line in (untracked.stdout or "").splitlines()
+            if line.strip()
+        }
+        if files:
+            logger.info(
+                "Excluding %d pre-existing untracked file(s) from the patch: %s",
+                len(files),
+                sorted(files)[:10],
+            )
+        return files
 
     def evaluate_instance(
         self, instance: EvalInstance, workspace: RemoteWorkspace
@@ -297,9 +390,6 @@ class SWERebenchV2Evaluation(Evaluation):
 
         assert isinstance(workspace, RemoteWorkspace)
 
-        repo_path = f"/workspace/{instance.data['repo'].split('/')[-1]}/"
-        instance.data["repo_path"] = repo_path
-
         persist_callback = build_event_persistence_callback(
             run_id=self.metadata.eval_output_dir,
             instance_id=instance.id,
@@ -313,65 +403,12 @@ class SWERebenchV2Evaluation(Evaluation):
             max_iteration_per_run=self.metadata.max_iterations,
         )
 
-        # SWE-rebench-V2 images place the repo at /{repo_name} (not /testbed).
-        # Copy it into the workspace directory for the agent.
-        # This also provides a timing gap between Conversation() and send_message()
-        # to avoid the WebSocket event-capture race condition.
-        repo_name = instance.data["repo"].split("/")[-1]
-        source_repo_path = f"/{repo_name}"
-        logger.info("repo_path: %s (source: %s)", repo_path, source_repo_path)
-        cp_repo = workspace.execute_command(
-            f"mkdir -p {repo_path} ; cp -r {source_repo_path}/. {repo_path}",
-            timeout=120,
-        )
-        assert cp_repo.exit_code == 0, f"cp repo failed: {cp_repo.stderr}"
-
-        # Replace the original source repo with a symlink to the workspace copy.
-        # Some agents ignore the instructed working directory and edit the
-        # source tree (e.g. /pandas) instead of {repo_path} (/workspace/pandas).
-        # Those edits are then invisible to patch extraction, which diffs only
-        # {repo_path}. Removing the source and symlinking it to {repo_path}
-        # ensures any path-based edit lands in the single tracked repo.
-        rp_no_slash = repo_path.rstrip("/")
-        link_repo = workspace.execute_command(
-            f"rm -rf {source_repo_path} ; ln -s {rp_no_slash} {source_repo_path}",
-            timeout=120,
-        )
-        assert link_repo.exit_code == 0, f"symlink repo failed: {link_repo.stderr}"
-
-        git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
-        assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
-
-        # Some SWE-rebench-V2 images leave untracked build artifacts (e.g. the
-        # Go toolchain tarball downloaded by install_config.install) inside the
-        # repo. Record them now so that `git add -A` at the end does not capture
-        # them into the patch: a binary blob in the patch makes the judge's
-        # `git apply` fail, which silently scores a correct fix as unresolved.
-        untracked = workspace.execute_command(
-            f"cd {repo_path} ; git ls-files --others --exclude-standard"
-        )
-        assert untracked.exit_code == 0, f"git ls-files failed: {untracked.stderr}"
-        baseline_untracked_files = {
-            line.strip()
-            for line in (untracked.stdout or "").splitlines()
-            if line.strip()
-        }
-        if baseline_untracked_files:
-            logger.info(
-                "Excluding %d pre-existing untracked file(s) from the patch: %s",
-                len(baseline_untracked_files),
-                sorted(baseline_untracked_files)[:10],
-            )
-
+        # prepare_repo keeps the original cp/symlink/reset sequence (and provides
+        # the timing gap after Conversation()) while exposing the checkout to the
+        # mini-swe-agent sibling entry point.
+        repo_path = self.prepare_repo(workspace, instance)
+        baseline_untracked_files = self.baseline_untracked_files(workspace, repo_path)
         base_commit = str(instance.data["base_commit"])
-
-        brief_history = workspace.execute_command(
-            f"cd {repo_path} ; git --no-pager log --oneline -10"
-        )
-        logger.info(
-            f"Repo status:\n* Current commit: {base_commit}\n"
-            f"* Top 10 history:\n{brief_history.stdout.strip()}"
-        )
 
         instruction = get_instruction(
             instance=instance.data,

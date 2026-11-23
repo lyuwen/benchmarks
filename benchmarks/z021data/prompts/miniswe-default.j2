@@ -1,0 +1,74 @@
+I have access to a python code repository in the directory {{ instance.repo_path }} .
+Consider the following issue description:
+
+<issue_description>
+{{ instance.problem_statement }}
+</issue_description>
+
+Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue_description> are met?
+I've already taken care of all changes to any of the test files described in the <issue_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+Your task is to make the minimal changes to non-test files in the {{ instance.repo_path }} directory to ensure the <issue_description> is satisfied.
+
+The repository is already checked out at the pre-fix base commit
+{{ instance.base_commit }}; do not change git history. The dataset's test
+invocation is run by the evaluator after you finish, so you do NOT need to run
+the full test suite — focus on making the fix and validating it with a small
+script or a targeted test.
+
+## Finding the environment
+
+The image may already have a Python environment set up. In every command that
+needs it, activate the environment first:
+
+1. Look for conda at `/opt/miniconda3`, `/opt/conda`, or `./opt/miniconda3`, then
+   run `. <conda-root>/etc/profile.d/conda.sh ; conda activate <env>`.
+2. Otherwise check `/usr/local/bin/python`, or a `.venv`/`venv` inside
+   {{ instance.repo_path }}.
+3. Read the repository README for the documented commands.
+
+## Finding the problem
+
+1. Locate the files related to the issue using `grep` and by reading the
+   relevant modules.
+2. Reproduce the issue with a minimal script (or a targeted test) before fixing.
+3. Make a minimal, focused change to the source code.
+4. Re-run your reproduction/targeted test to confirm the fix and check edge
+   cases.
+5. Review `git diff` to confirm the change is complete and limited to source
+   files.
+
+## Important boundaries
+
+- MODIFY: regular non-test source files under {{ instance.repo_path }}.
+- DO NOT MODIFY tests, and do not leave reproduction scripts or helper files in
+  the repository (keep them in `/tmp`).
+- Do not commit your changes.
+
+## Submission
+
+When you are done, submit your changes as a git patch. Follow these steps IN
+ORDER, as SEPARATE commands:
+
+Step 1 — create the patch, listing only the source files you modified:
+
+```bash
+cd {{ instance.repo_path }} && git diff -- path/to/file1 path/to/file2 > /tmp/patch.txt
+```
+
+Step 2 — verify the patch only contains your intended source changes (headers
+show `--- a/` and `+++ b/`):
+
+```bash
+cat /tmp/patch.txt
+```
+
+Step 3 — submit with this EXACT command (single command, must exit 0):
+
+```bash
+echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt
+```
+
+The marker `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` MUST be the first line of the
+command output; everything after it is treated as your final patch. If the
+command fails (non-zero exit status) nothing is submitted. After submitting you
+cannot continue working on this task.

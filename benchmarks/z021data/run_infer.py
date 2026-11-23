@@ -13,6 +13,7 @@ from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
 from benchmarks.utils.dataset import get_dataset
+from benchmarks.utils.docker_workspace import BenchDockerWorkspace
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
     construct_eval_output_dir,
@@ -50,7 +51,7 @@ from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.legacy import get_legacy_tools
-from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
+from openhands.workspace import APIRemoteWorkspace, FlexWorkspace
 
 
 logger = get_logger(__name__)
@@ -294,7 +295,7 @@ class Z021DataEvaluation(Evaluation):
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
                         ":ro"
                     )
-            workspace = DockerWorkspace(
+            workspace = BenchDockerWorkspace(
                 server_image=agent_server_image,
                 working_dir="/workspace",
                 forward_env=forward_env or [],
@@ -337,56 +338,29 @@ class Z021DataEvaluation(Evaluation):
                 f"Unsupported workspace_type: {self.metadata.workspace_type}"
             )
 
-        for cmd in self.metadata.env_setup_commands or []:
-            res = workspace.execute_command(cmd)
-            if res.exit_code != 0:
-                raise RuntimeError(
-                    f"Failed to run env setup command '{cmd}': {res.stderr}"
-                )
-            logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
+        try:
+            for cmd in self.metadata.env_setup_commands or []:
+                res = workspace.execute_command(cmd)
+                if res.exit_code != 0:
+                    raise RuntimeError(
+                        f"Failed to run env setup command '{cmd}': {res.stderr}"
+                    )
+                logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
+        except Exception:
+            # Evaluation only sees returned workspaces, so release the fresh one.
+            workspace.__exit__(None, None, None)
+            raise
         return workspace
 
-    # ---- Hook: evaluate one instance ---------------------------------------------
-    def evaluate_instance(
-        self, instance: EvalInstance, workspace: RemoteWorkspace
-    ) -> EvalOutput:
+    # ---- Hook: prepare the task checkout ----------------------------------------
+    def prepare_repo(self, workspace: RemoteWorkspace, instance: EvalInstance) -> str:
+        """Normalize dataset fields, check out the parent commit, return the workdir.
+
+        Kept separate from ``evaluate_instance`` so the mini-swe-agent sibling
+        entry point reuses the identical preparation. The checkout is warn-only
+        here (legacy behavior); the mini runner verifies HEAD and fails the
+        attempt when the checkout does not actually move to the base commit.
         """
-        Create conversation, run agent, collect history and git patch.
-        """
-        if self.use_legacy_tools:
-            tools = get_legacy_tools(enable_browser=False)
-        else:
-            tools = get_default_tools(enable_browser=False)
-
-        agent = Agent(
-            llm=self.metadata.llm,
-            condenser=get_condenser(
-                self.metadata.condenser,
-                self.metadata.llm,
-                self.metadata.condenser_config,
-            ),
-            tools=tools,
-            system_prompt_kwargs={"cli_mode": True},
-        )
-
-        assert isinstance(workspace, RemoteWorkspace)
-
-        # For some reason we need to instantiate the Conversation object early and leave a few steps
-        # before sending the instruction. Otherwise, there is a random chance that the user message is
-        # not recorded in the events.
-        persist_callback = build_event_persistence_callback(
-            run_id=self.metadata.eval_output_dir,
-            instance_id=instance.id,
-            attempt=self.current_attempt,
-        )
-
-        conversation = Conversation(
-            agent=agent,
-            workspace=workspace,
-            callbacks=[persist_callback],
-            max_iteration_per_run=self.metadata.max_iterations,
-        )
-
         # z021data: repo is already at workdir (default /app; no /testbed copy).
         repo_path = instance.data.get("workdir", "/workspace")
         if not repo_path.endswith("/"):
@@ -430,6 +404,51 @@ class Z021DataEvaluation(Evaluation):
         logger.info(
             f"Repo status:\n* Current commit: {instance.data['base_commit']}\n* Top 10 history:\n{breif_history.stdout.strip()}"
         )
+
+        return repo_path
+
+    # ---- Hook: evaluate one instance ---------------------------------------------
+    def evaluate_instance(
+        self, instance: EvalInstance, workspace: RemoteWorkspace
+    ) -> EvalOutput:
+        """
+        Create conversation, run agent, collect history and git patch.
+        """
+        if self.use_legacy_tools:
+            tools = get_legacy_tools(enable_browser=False)
+        else:
+            tools = get_default_tools(enable_browser=False)
+
+        agent = Agent(
+            llm=self.metadata.llm,
+            condenser=get_condenser(
+                self.metadata.condenser,
+                self.metadata.llm,
+                self.metadata.condenser_config,
+            ),
+            tools=tools,
+            system_prompt_kwargs={"cli_mode": True},
+        )
+
+        assert isinstance(workspace, RemoteWorkspace)
+
+        # For some reason we need to instantiate the Conversation object early and leave a few steps
+        # before sending the instruction. Otherwise, there is a random chance that the user message is
+        # not recorded in the events.
+        persist_callback = build_event_persistence_callback(
+            run_id=self.metadata.eval_output_dir,
+            instance_id=instance.id,
+            attempt=self.current_attempt,
+        )
+
+        conversation = Conversation(
+            agent=agent,
+            workspace=workspace,
+            callbacks=[persist_callback],
+            max_iteration_per_run=self.metadata.max_iterations,
+        )
+
+        repo_path = self.prepare_repo(workspace, instance)
 
         instruction = get_instruction(
             instance=instance.data,

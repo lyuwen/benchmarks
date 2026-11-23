@@ -13,7 +13,6 @@ Usage:
 
 import os
 import uuid
-from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from typing import List, Literal, Optional
 
@@ -36,11 +35,16 @@ from benchmarks.utils.execution_judge import (
 )
 from benchmarks.utils.miniswe import (
     MiniRolloutSettings,
+    add_mini_common_args,
     build_history_dump,
     check_patch_applies,
     head_matches_commit,
+    mini_progress_console,
+    mini_progress_path,
     publish_canonical_histories,
+    resolve_bash_env_file,
     run_mini_rollout,
+    validate_mini_args,
     write_history,
 )
 from benchmarks.utils.models import EvalInstance, EvalMetadata, EvalOutput
@@ -49,8 +53,6 @@ from openhands.sdk.workspace import RemoteWorkspace
 
 
 logger = get_logger(__name__)
-
-MINISWE_SUPPORTED_CRITICS = ("pass", "empty_patch_critic")
 
 
 class ScaleSWEMiniEvaluation(ScaleSWEEvaluation):
@@ -120,13 +122,6 @@ class ScaleSWEMiniEvaluation(ScaleSWEEvaluation):
             "miniswe_traces",
             f"{instance.id}.attempt{self.current_attempt}.{uuid.uuid4().hex[:8]}.json",
         )
-        progress_path = None
-        if self.mini_progress != "none":
-            progress_path = os.path.join(
-                self.metadata.eval_output_dir,
-                "logs",
-                f"instance_{instance.id}.mini.log",
-            )
         settings = MiniRolloutSettings(
             cwd=repo_path,
             step_limit=self.metadata.max_iterations,
@@ -135,8 +130,10 @@ class ScaleSWEMiniEvaluation(ScaleSWEEvaluation):
             command_timeout=self.mini_command_timeout,
             bash_env_file=self.mini_bash_env_file or None,
             trace_path=trace_path,
-            progress_path=progress_path,
-            progress_console=self.mini_progress == "console",
+            progress_path=mini_progress_path(
+                self.mini_progress, self.metadata.eval_output_dir, instance.id
+            ),
+            progress_console=mini_progress_console(self.mini_progress),
             instance_id=instance.id,
             attempt=self.current_attempt,
         )
@@ -209,20 +206,6 @@ class ScaleSWEMiniEvaluation(ScaleSWEEvaluation):
         )
 
 
-def _validate_mini_args(parser: ArgumentParser, args: Namespace) -> None:
-    if args.critic not in MINISWE_SUPPORTED_CRITICS:
-        parser.error(
-            f"--critic {args.critic!r} relies on OpenHands SDK events, which mini "
-            f"rollouts do not produce. Supported critics: "
-            f"{', '.join(MINISWE_SUPPORTED_CRITICS)}."
-        )
-    if args.condenser != "none":
-        parser.error(
-            "--condenser is an OpenHands-only feature and is not supported by "
-            "mini-swe-agent runs."
-        )
-
-
 def main() -> None:
     prompt_dir = (Path(__file__).parent / "prompts").resolve()
     default_prompt_path = prompt_dir / "miniswe-default.j2"
@@ -250,42 +233,10 @@ def main() -> None:
             "last '/' in image_url, e.g. 'myregistry.com/myorg'."
         ),
     )
-    parser.add_argument(
-        "--mini-cost-limit",
-        type=float,
-        default=0.0,
-        help="Stop a rollout after this cost in USD (default: 0, no limit)",
-    )
-    parser.add_argument(
-        "--mini-command-timeout",
-        type=int,
-        default=60,
-        help="Per-command timeout in seconds (default: 60)",
-    )
-    parser.add_argument(
-        "--mini-progress",
-        choices=["console", "file", "none"],
-        default="console",
-        help=(
-            "Live rollout progress: 'console' (default) writes a tail-able "
-            "per-instance progress file and mirrors one-line events to the "
-            "console, 'file' writes the file only, 'none' disables it"
-        ),
-    )
-    parser.add_argument(
-        "--mini-bash-env-file",
-        type=str,
-        default=None,
-        help=(
-            "Optional rc file exported as BASH_ENV for non-login bash. Off by "
-            "default: agent-server images already put the task environment on "
-            "PATH and /root/.bashrc is unreadable to the non-root agent user. "
-            "Example: --mini-bash-env-file /home/openhands/.bashrc"
-        ),
-    )
+    add_mini_common_args(parser)
     add_judge_args(parser, default_judge="scaleswe")
     args = parser.parse_args()
-    _validate_mini_args(parser, args)
+    validate_mini_args(parser, args)
 
     if args.max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {args.max_attempts}")
@@ -340,9 +291,7 @@ def main() -> None:
         condenser="none",
     )
 
-    bash_env_file = args.mini_bash_env_file
-    if isinstance(bash_env_file, str) and bash_env_file.lower() in ("", "none"):
-        bash_env_file = None
+    bash_env_file = resolve_bash_env_file(args.mini_bash_env_file)
 
     evaluator = ScaleSWEMiniEvaluation(
         metadata=metadata,

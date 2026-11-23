@@ -20,6 +20,14 @@ from benchmarks.utils.miniswe.availability import (
     MINISWE_VERSION,
     require_miniswe,
 )
+from benchmarks.utils.miniswe.cli import (
+    MINISWE_SUPPORTED_CRITICS,
+    add_mini_common_args,
+    mini_progress_console,
+    mini_progress_path,
+    resolve_bash_env_file,
+    validate_mini_args,
+)
 from benchmarks.utils.miniswe.environment import (
     DEFAULT_ENV,
     MAX_SINGLE_OUTPUT_CHARS,
@@ -64,6 +72,7 @@ __all__ = [
     "DEFAULT_ENV",
     "INSTALL_HINT",
     "MAX_SINGLE_OUTPUT_CHARS",
+    "MINISWE_SUPPORTED_CRITICS",
     "MINISWE_VERSION",
     "SUBMISSION_MARKER",
     "MiniModelSpec",
@@ -76,6 +85,7 @@ __all__ = [
     "WorkspaceCommandError",
     "WorkspaceEnvironment",
     "WorkspaceEnvironmentConfig",
+    "add_mini_common_args",
     "build_history_dump",
     "build_mini_model",
     "build_trajectories",
@@ -84,10 +94,14 @@ __all__ = [
     "head_matches_commit",
     "history_filename",
     "litellm_model_kwargs",
+    "mini_progress_console",
+    "mini_progress_path",
     "normalize_messages",
     "publish_canonical_histories",
     "redact_secrets",
     "require_miniswe",
+    "resolve_bash_env_file",
     "run_mini_rollout",
+    "validate_mini_args",
     "write_history",
 ]

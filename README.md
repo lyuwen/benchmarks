@@ -119,8 +119,9 @@ After setting up the environment and configuring your LLM, see the individual be
 
 ### mini-swe-agent harness
 
-SWE-bench and Scale-SWE also have mini-swe-agent variants that keep the same
-`Evaluation` orchestration and swap in the mini-swe-agent bash loop:
+SWE-bench, Scale-SWE, z021data and SWE-rebench-V2 also have mini-swe-agent
+variants that keep the same `Evaluation` orchestration and swap in the
+mini-swe-agent bash loop:
 
 ```bash
 uv sync --extra miniswe
