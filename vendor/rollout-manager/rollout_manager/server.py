@@ -98,6 +98,20 @@ _ROUTING_HEADER_NAMES = ("X-SMG-Routing-Key", "X-Session-ID")
 # captured conversation/protocol rather than sampling behaviour.
 _FORBIDDEN_REQUEST_PARAM_KEYS = frozenset({"messages", "stream", "stream_options", "tools"})
 
+# Headers whose values must never be written to logs.
+_REDACTED_HEADERS = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "anthropic-api-key",
+        "cookie",
+        "set-cookie",
+    }
+)
+UPSTREAM_LOG_MODES = ("off", "summary", "full")
+
 # Headers aiohttp must own when talking to the upstream. Everything else is
 # forwarded transparently, including Authorization, X-Api-Key, cookies and
 # vendor/tracing headers.
@@ -155,6 +169,11 @@ class Config:
     # launchers to apply the configured sampling parameters (temperature,
     # top_p, reasoning_effort, ...) to harness traffic that does not carry them.
     request_params: dict[str, Any] = field(default_factory=dict)
+    # Opt-in debug logging of the requests sent to the backend: "off",
+    # "summary" (method/url/header names/body shape) or "full" (redacted headers
+    # plus the request body, truncated to log_upstream_max_chars).
+    log_upstream_requests: str = "off"
+    log_upstream_max_chars: int = 20000
 
     @property
     def upstream_base(self) -> str:
@@ -185,6 +204,47 @@ def parse_request_params(raw: str | None) -> dict[str, Any]:
     if forbidden:
         raise ValueError("--request-params may not override structural fields: " + ", ".join(sorted(forbidden)))
     return parsed
+
+
+def _redacted_headers(headers: list[tuple[str, str]]) -> dict[str, str]:
+    """Headers as a dict with credentials elided, for logging."""
+    return {name: "<redacted>" if name.lower() in _REDACTED_HEADERS else value for name, value in headers}
+
+
+def _log_upstream_request(
+    config: Config,
+    *,
+    url: str,
+    headers: list[tuple[str, str]],
+    payload: dict[str, Any],
+) -> None:
+    """Log the request the proxy is about to send to the backend (opt-in)."""
+    mode = config.log_upstream_requests
+    if mode == "off":
+        return
+    messages = payload.get("messages") or []
+    tools = payload.get("tools") or []
+    if mode == "summary":
+        logger.info(
+            "upstream request: POST %s model=%s messages=%d tools=%d header_names=%s body_keys=%s",
+            url,
+            payload.get("model"),
+            len(messages),
+            len(tools),
+            sorted({name.lower() for name, _ in headers}),
+            sorted(payload),
+        )
+        return
+    body = json.dumps(payload, ensure_ascii=False)
+    limit = config.log_upstream_max_chars
+    if limit and len(body) > limit:
+        body = f"{body[:limit]}... <truncated {len(body) - limit} chars>"
+    logger.info(
+        "upstream request: POST %s\nheaders=%s\nbody=%s",
+        url,
+        json.dumps(_redacted_headers(headers), sort_keys=True),
+        body,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +456,12 @@ class RolloutProxy:
         if self.config.model:
             payload["model"] = self.config.model
         headers = self._upstream_headers(request, content_type=True)
+        _log_upstream_request(
+            self.config,
+            url=self.config.chat_completions_url,
+            headers=headers,
+            payload=payload,
+        )
         try:
             async with self._client.post(self.config.chat_completions_url, json=payload, headers=headers) as response:
                 text = await response.text()
@@ -934,6 +1000,22 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Only write the export on finish instead of after every turn.",
     )
+    parser.add_argument(
+        "--log-upstream-requests",
+        choices=list(UPSTREAM_LOG_MODES),
+        default="off",
+        help=(
+            "Log the requests sent to the backend: 'summary' logs method/url/body "
+            "shape, 'full' also logs redacted headers and the request body "
+            "(default: off)."
+        ),
+    )
+    parser.add_argument(
+        "--log-upstream-max-chars",
+        type=int,
+        default=20000,
+        help=("Maximum body characters logged by --log-upstream-requests full (0 = unlimited, default 20000)."),
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level (default INFO).")
     return parser
 
@@ -962,6 +1044,8 @@ def main(argv: list[str] | None = None) -> None:
         request_params = parse_request_params(args.request_params or os.environ.get("ROLLOUT_REQUEST_PARAMS"))
     except ValueError as exc:
         parser.error(str(exc))
+    if args.log_upstream_max_chars < 0:
+        parser.error("--log-upstream-max-chars must be >= 0")
 
     session_id = args.session_id or os.environ.get("ROLLOUT_SESSION_ID") or f"run-{secrets.token_hex(4)}"
     output = args.output or str(Path(args.output_dir) / f"{_safe_stem(session_id)}.json")
@@ -983,6 +1067,8 @@ def main(argv: list[str] | None = None) -> None:
         metadata=metadata,
         exclude_request_classes=exclude_request_classes,
         request_params=request_params,
+        log_upstream_requests=args.log_upstream_requests,
+        log_upstream_max_chars=args.log_upstream_max_chars,
     )
     app = build_app(config)
     logger.info("starting rollout manager for session %s on %s:%d", session_id, config.host, config.port)

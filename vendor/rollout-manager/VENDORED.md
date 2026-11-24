@@ -18,6 +18,11 @@ being fetched from GitHub at `uv sync` time.
   a `request_params` `model` entry. The overlay is visible in the captured
   per-turn `request`, so exports stay self-describing.
 - Tests for the overlay and for `--request-params` parsing/validation.
+- `--log-upstream-requests {summary,full}` and
+  `--log-upstream-max-chars`: opt-in logging of the requests sent to the backend
+  (`summary`: method/url/body shape/header names; `full`: redacted headers plus
+  the JSON body, truncated to the configured character limit). Credential
+  headers are always redacted.
 
 ## Updating / upstreaming
 

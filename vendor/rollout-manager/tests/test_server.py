@@ -5,13 +5,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from pathlib import Path
 
 import aiohttp
 import pytest
 from aiohttp import web
 
-from rollout_manager.server import Config, build_app, parse_request_params
+from rollout_manager.server import (
+    Config,
+    _redacted_headers,
+    build_app,
+    parse_request_params,
+)
 
 CHAT_TOOLS = [
     {
@@ -1298,3 +1304,99 @@ def test_parse_request_params_validation():
     ):
         with pytest.raises(ValueError):
             parse_request_params(raw)
+
+
+def test_redacted_headers_elide_credentials():
+    headers = [
+        ("Authorization", "Bearer super-secret"),
+        ("x-api-key", "key-secret"),
+        ("Content-Type", "application/json"),
+        ("X-Custom", "visible"),
+    ]
+    assert _redacted_headers(headers) == {
+        "Authorization": "<redacted>",
+        "x-api-key": "<redacted>",
+        "Content-Type": "application/json",
+        "X-Custom": "visible",
+    }
+
+
+def test_log_upstream_requests_full_logs_body_and_redacts_headers(tmp_path, caplog):
+    upstream = FakeUpstream()
+    upstream.reply(content="ok")
+    output = tmp_path / "session.json"
+
+    async def scenario():
+        async with _serve(upstream.app()) as upstream_url:
+            config = _config(
+                upstream_url,
+                output,
+                upstream_api_key="super-secret-key",
+                log_upstream_requests="full",
+                log_upstream_max_chars=0,
+            )
+            async with _serve(build_app(config)) as proxy_url:
+                async with aiohttp.ClientSession() as client:
+                    await client.post(
+                        f"{proxy_url}/v1/chat/completions",
+                        json={
+                            "model": "model-x",
+                            "messages": [{"role": "user", "content": "prompt-marker-abc"}],
+                        },
+                    )
+                    await (await client.post(f"{proxy_url}/rollout/finish", json={})).json()
+
+    with caplog.at_level(logging.INFO, logger="rollout_manager.server"):
+        asyncio.run(scenario())
+
+    text = caplog.text
+    assert "upstream request: POST" in text
+    assert "prompt-marker-abc" in text
+    assert '"model": "model-x"' in text
+    assert "<redacted>" in text
+    assert "super-secret-key" not in text
+
+
+def test_log_upstream_requests_summary_and_truncation(tmp_path, caplog):
+    upstream = FakeUpstream()
+    upstream.reply(content="ok")
+    output = tmp_path / "session.json"
+
+    async def scenario():
+        async with _serve(upstream.app()) as upstream_url:
+            config = _config(
+                upstream_url,
+                output,
+                log_upstream_requests="full",
+                log_upstream_max_chars=40,
+            )
+            async with _serve(build_app(config)) as proxy_url:
+                async with aiohttp.ClientSession() as client:
+                    await client.post(
+                        f"{proxy_url}/v1/chat/completions",
+                        json={
+                            "model": "model-x",
+                            "messages": [{"role": "user", "content": "x" * 500}],
+                        },
+                    )
+                    await (await client.post(f"{proxy_url}/rollout/finish", json={})).json()
+
+            summary_config = _config(upstream_url, output, log_upstream_requests="summary")
+            async with _serve(build_app(summary_config)) as proxy_url:
+                async with aiohttp.ClientSession() as client:
+                    await client.post(
+                        f"{proxy_url}/v1/chat/completions",
+                        json={
+                            "model": "model-x",
+                            "messages": [{"role": "user", "content": "summary-prompt"}],
+                        },
+                    )
+                    await (await client.post(f"{proxy_url}/rollout/finish", json={})).json()
+
+    with caplog.at_level(logging.INFO, logger="rollout_manager.server"):
+        asyncio.run(scenario())
+
+    text = caplog.text
+    assert "truncated" in text
+    assert "summary-prompt" not in text  # summary does not log the body
+    assert "messages=1" in text
