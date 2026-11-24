@@ -351,3 +351,150 @@ def test_main_stitch_mode_and_strict(
     broken["tools"] = []
     source.write_text(json.dumps(broken) + "\n")
     assert flatten.main([str(source), "-o", str(output), "--strict"]) == 1
+
+
+TOOL_B = {
+    "type": "function",
+    "function": {
+        "name": "Read",
+        "description": "read a file",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
+def make_multi_tool_history() -> dict:
+    history = make_history()
+    call_1 = {
+        "id": "call_a",
+        "type": "function",
+        "function": {"name": "Bash", "arguments": '{"command": "ls"}'},
+    }
+    call_2 = {
+        "id": "call_b",
+        "type": "function",
+        "function": {"name": "Bash", "arguments": '{"command": "pwd"}'},
+    }
+    messages = [
+        SYSTEM,
+        USER,
+        {"role": "assistant", "content": "", "tool_calls": [call_1]},
+        {"role": "tool", "tool_call_id": "call_a", "content": "a"},
+        {"role": "assistant", "content": "", "tool_calls": [call_2]},
+        {"role": "tool", "tool_call_id": "call_b", "content": "b"},
+        ASSISTANT_2,
+    ]
+    trajectory = {
+        "trajectory_id": "s:multi",
+        "trajectory_index": 0,
+        "kind": "conversation",
+        "exclude_from_training": False,
+        "leaf_turn_index": 3,
+        "path_turn_indices": [1, 2, 3],
+        "messages": messages,
+        "loss_mask": [0, 0, 1, 0, 1, 0, 1],
+        "reasoning_content": [None] * len(messages),
+        "tool_sets": [[TOOL], [TOOL, TOOL_B]],
+        "turns": [
+            {
+                "turn_index": 1,
+                "message_index": 2,
+                "trained": True,
+                "tool_set": 0,
+                "request_class": "main",
+            },
+            {
+                "turn_index": 2,
+                "message_index": 4,
+                "trained": True,
+                "tool_set": 0,
+                "request_class": "main",
+            },
+            {
+                "turn_index": 3,
+                "message_index": 6,
+                "trained": True,
+                "tool_set": 1,
+                "request_class": "main",
+            },
+        ],
+    }
+    history["trajectories"] = [trajectory]
+    return history
+
+
+def test_split_tool_sets_emits_segment_per_tool_phase() -> None:
+    history = make_multi_tool_history()
+    records = list(flatten.iter_records(iter([history]), split_tool_sets=True))
+    assert len(records) == 2
+
+    first, second = records
+    assert first["source"] == "trajectory-split"
+    assert first["tools"] == [TOOL]
+    assert first["tool_set_index"] == 0
+    assert first["split_index"] == 0
+    assert first["split_count"] == 2
+    assert first["turn_indices"] == [1, 2]
+    assert first["trained_turns"] == [1, 2]
+    # Context up to the last turn of the phase, only its turns are targets.
+    assert first["messages"] == history["trajectories"][0]["messages"][:5]
+    assert first["loss_mask"] == [0, 0, 1, 0, 1]
+
+    assert second["tools"] == [TOOL, TOOL_B]
+    assert second["tool_set_index"] == 1
+    assert second["split_index"] == 1
+    assert second["turn_indices"] == [3]
+    assert second["messages"] == history["trajectories"][0]["messages"]
+    assert second["loss_mask"] == [0, 0, 0, 0, 0, 0, 1]
+    for record in records:
+        assert flatten.validate_record(record) == []
+
+
+def test_split_tool_sets_is_noop_for_single_phase() -> None:
+    history = make_history()
+    split = list(flatten.iter_records(iter([history]), split_tool_sets=True))
+    plain = list(flatten.iter_records(iter([history])))
+    assert [record["tools"] for record in split] == [
+        record["tools"] for record in plain
+    ]
+    assert all(record.get("source") == "trajectory" for record in split)
+
+
+def test_split_tool_sets_respects_excluded_and_train_excluded() -> None:
+    history = make_history(excluded=True)
+    masked = list(
+        flatten.iter_records(
+            iter([history]), split_tool_sets=True, include_excluded=True
+        )
+    )
+    assert masked[1]["loss_mask"] == [0, 0, 0, 0, 0]
+
+    recomputed = list(
+        flatten.iter_records(iter([history]), split_tool_sets=True, train_excluded=True)
+    )
+    # Single-phase trajectory: all of its assistant messages become targets.
+    assert recomputed[1]["loss_mask"] == [0, 0, 1, 0, 1]
+    assert recomputed[1]["loss_mask_recomputed"] is True
+
+
+def test_split_tool_sets_requires_trajectories_mode(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_history()) + "\n")
+    with pytest.raises(SystemExit):
+        flatten.main([str(source), "--mode", "stitch", "--split-tool-sets"])
+
+
+def test_main_split_tool_sets_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_multi_tool_history()) + "\n")
+    output = tmp_path / "flat.jsonl"
+    assert flatten.main([str(source), "-o", str(output), "--split-tool-sets"]) == 0
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == 2
+    assert [len(row["tools"]) for row in rows] == [1, 2]
+    assert [row["split_index"] for row in rows] == [0, 1]
+    assert "emitted=2" in capsys.readouterr().err

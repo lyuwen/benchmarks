@@ -443,6 +443,10 @@ uv run harness-flatten-histories histories.jsonl -o flat-stitched.jsonl --mode s
 # normalized them before replaying history (e.g. stripped "cd /testbed &&")
 uv run harness-flatten-histories histories.jsonl --mode stitch --stitch-verbatim
 
+# split samples whenever the harness changed its tool list mid-trajectory
+# (one record per contiguous tool-set phase, context duplicated)
+uv run harness-flatten-histories histories.jsonl -o flat-tools.jsonl --split-tool-sets
+
 # train already-masked auxiliary calls (auto-mode classifier/security monitor):
 # keeps excluded trajectories and recomputes loss_mask so assistant messages are
 # targets (implies --include-excluded)
@@ -479,6 +483,13 @@ Notes:
   `tools` in `*.history.json` is already the resolved list for the main
   trajectory; `tool_sets` keeps all variants for provenance (older dumps without
   per-trajectory sets may still expose the legacy list-of-lists `tools`).
+- `--split-tool-sets` handles trajectories whose tool list changed mid-way: the
+  capture intentionally keeps them as one trajectory (tools are not part of the
+  message-prefix identity), so the flattener emits one record per contiguous
+  tool-set phase. Each record has `source: "trajectory-split"`, the phase's
+  `tools`/`tool_set_index`, duplicated preceding context, only the phase's turns
+  as training targets, and `split_index`/`split_count`/
+  `split_from_trajectory_id` for reassembly.
 - `tool.message` ids are checked against preceding assistant calls; trailing
   assistant tool calls without results are allowed (that continuation lives in
   the next fragment).

@@ -190,6 +190,117 @@ def flatten_trajectory(
     return record
 
 
+def split_trajectory_by_tool_sets(
+    history: dict[str, Any],
+    trajectory: dict[str, Any],
+    *,
+    excluded: bool = False,
+    train_excluded: bool = False,
+) -> list[dict[str, Any]]:
+    """Split one trajectory into contiguous segments with a constant tool list.
+
+    The capture keeps a trajectory intact when the harness changes its tool
+    schema mid-session (tools are not part of message identity), storing the
+    variants in ``tool_sets`` and a per-turn ``tool_set`` index. For training
+    that is ambiguous (an OpenAI sample has exactly one ``tools`` field), so this
+    emits one record per consecutive tool-set phase: the shared history before
+    each phase is duplicated as context and only the turns produced under that
+    tool list are training targets.
+    """
+    base = flatten_trajectory(history, trajectory)
+    messages = base["messages"]
+    full_loss = base.get("loss_mask")
+    full_reasoning = base.get("reasoning_content")
+    turns = [
+        turn
+        for turn in trajectory.get("turns") or []
+        if isinstance(turn, dict) and isinstance(turn.get("message_index"), int)
+    ]
+    turns.sort(key=lambda turn: int(turn["message_index"]))
+    tool_sets = trajectory.get("tool_sets")
+    if not isinstance(tool_sets, list):
+        tool_sets = []
+
+    groups: list[list[dict[str, Any]]] = []
+    for turn in turns:
+        if groups and groups[-1][-1].get("tool_set") == turn.get("tool_set"):
+            groups[-1].append(turn)
+        else:
+            groups.append([turn])
+
+    if len(groups) <= 1:
+        if excluded and not train_excluded:
+            # Captured as excluded: honour the exclusion (no targets).
+            base["loss_mask"] = [0] * len(messages)
+        elif excluded and train_excluded and groups:
+            # Only this trajectory's own turns are targets (context stays 0).
+            base["loss_mask"] = [0] * len(messages)
+            for turn in groups[0]:
+                index = int(turn["message_index"])
+                if (
+                    0 <= index < len(messages)
+                    and messages[index].get("role") == "assistant"
+                ):
+                    base["loss_mask"][index] = 1
+            base["loss_mask_recomputed"] = True
+        return [base]
+
+    records: list[dict[str, Any]] = []
+    for split_index, group in enumerate(groups):
+        end_index = min(
+            max(int(turn["message_index"]) for turn in group) + 1, len(messages)
+        )
+        segment_messages = messages[:end_index]
+        segment_loss = [0] * end_index
+        for turn in group:
+            index = int(turn["message_index"])
+            if not 0 <= index < end_index:
+                continue
+            is_assistant = segment_messages[index].get("role") == "assistant"
+            if excluded and train_excluded:
+                if is_assistant:
+                    segment_loss[index] = 1
+            elif not excluded and turn.get("trained") and is_assistant:
+                if full_loss is None or (index < len(full_loss) and full_loss[index]):
+                    segment_loss[index] = 1
+        tool_set_index = group[-1].get("tool_set")
+        if (
+            isinstance(tool_set_index, int)
+            and 0 <= tool_set_index < len(tool_sets)
+            and isinstance(tool_sets[tool_set_index], list)
+        ):
+            tools = tool_sets[tool_set_index]
+        else:
+            tools = []
+        record = dict(base)
+        record["messages"] = segment_messages
+        record["tools"] = tools
+        record["loss_mask"] = segment_loss
+        if full_reasoning is not None:
+            record["reasoning_content"] = full_reasoning[:end_index]
+        record["turn_indices"] = [
+            int(turn["turn_index"])
+            for turn in group
+            if isinstance(turn.get("turn_index"), int)
+        ]
+        record["trained_turns"] = [
+            int(turn["turn_index"])
+            for turn in group
+            if turn.get("trained") and isinstance(turn.get("turn_index"), int)
+        ]
+        record["source"] = "trajectory-split"
+        record["split_from_trajectory_id"] = trajectory.get("trajectory_id")
+        record["split_index"] = split_index
+        record["split_count"] = len(groups)
+        record["tool_set_index"] = (
+            tool_set_index if isinstance(tool_set_index, int) else None
+        )
+        if excluded and train_excluded:
+            record["loss_mask_recomputed"] = True
+        records.append(record)
+    return records
+
+
 def _longest_conversation_trajectory(
     history: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -313,6 +424,7 @@ def iter_records(
     include_excluded: bool = False,
     verbatim: bool = False,
     train_excluded: bool = False,
+    split_tool_sets: bool = False,
 ) -> Iterator[dict[str, Any]]:
     for history in histories:
         if mode == "stitch":
@@ -325,6 +437,14 @@ def iter_records(
                 continue
             excluded = bool(trajectory.get("exclude_from_training"))
             if excluded and not (include_excluded or train_excluded):
+                continue
+            if split_tool_sets:
+                yield from split_trajectory_by_tool_sets(
+                    history,
+                    trajectory,
+                    excluded=excluded,
+                    train_excluded=train_excluded,
+                )
                 continue
             record = flatten_trajectory(history, trajectory)
             if excluded and train_excluded:
@@ -451,6 +571,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Keep trajectories marked exclude_from_training (e.g. auxiliary calls)",
     )
     parser.add_argument(
+        "--split-tool-sets",
+        action="store_true",
+        help=(
+            "Split trajectories into contiguous segments per tool-set phase; "
+            "each record carries the tools used for that segment and duplicates "
+            "the preceding conversation as context. Requires --mode trajectories."
+        ),
+    )
+    parser.add_argument(
         "--train-excluded",
         action="store_true",
         help=(
@@ -491,6 +620,8 @@ def main(argv: list[str] | None = None) -> int:
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if args.split_tool_sets and args.mode != "trajectories":
+        parser.error("--split-tool-sets requires --mode trajectories")
     output = (
         sys.stdout
         if args.output == "-"
@@ -512,6 +643,7 @@ def main(argv: list[str] | None = None) -> int:
                     include_excluded=(args.include_excluded or args.train_excluded),
                     verbatim=args.stitch_verbatim,
                     train_excluded=args.train_excluded,
+                    split_tool_sets=args.split_tool_sets,
                 )
             )
             if not records:
