@@ -100,6 +100,23 @@ def test_command_omits_forced_request_params_when_empty(tmp_path: Path) -> None:
     assert "--request-params" not in rollout_manager_command(make_config(tmp_path))
 
 
+def test_command_forwards_upstream_logging(tmp_path: Path) -> None:
+    argv = rollout_manager_command(
+        make_config(
+            tmp_path,
+            log_upstream_requests="full",
+            log_upstream_max_chars=5000,
+        )
+    )
+    index = argv.index("--log-upstream-requests")
+    assert argv[index + 1] == "full"
+    index = argv.index("--log-upstream-max-chars")
+    assert argv[index + 1] == "5000"
+    assert "--log-upstream-requests" not in rollout_manager_command(
+        make_config(tmp_path)
+    )
+
+
 def test_normalize_upstream_base_url() -> None:
     assert normalize_upstream_base_url("https://api.example.com") == (
         "https://api.example.com/v1"

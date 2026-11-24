@@ -318,6 +318,8 @@ def _start_rollout_manager(
             metadata=metadata,
             exclude_request_classes=config.exclude_request_classes,
             request_params=config.request_params,
+            log_upstream_requests=config.rollout_log_upstream,
+            log_upstream_max_chars=config.rollout_log_upstream_max_chars,
             request_timeout_sec=config.rollout_request_timeout_sec,
             finish_wait_sec=config.rollout_finish_timeout_sec,
             start_timeout_sec=config.rollout_start_timeout_sec,

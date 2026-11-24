@@ -534,6 +534,32 @@ It creates a git repo in the container, scripts one Bash tool call through the
 capture proxy, and asserts that the patch and the trajectory export are
 produced.
 
+## Debugging what the manager sends upstream
+
+The **effective request body** is always captured per turn in the trajectory
+export (`turns[].request`), including prompt messages, tools and the forced
+sampling parameters. To also inspect what the proxy actually puts on the wire
+(headers + body) in its own log, enable upstream request logging:
+
+```bash
+uv run swebench-infer-harnesses .llm_config/model.json \
+  --rollout-log-upstream full \
+  --rollout-log-upstream-max-chars 50000      # 0 = unlimited (default 20000)
+```
+
+- `--rollout-log-upstream summary` logs method/URL, model, message/tool counts,
+  header *names* and body keys (cheap, no prompt content).
+- `--rollout-log-upstream full` additionally logs the redacted headers and the
+  JSON request body. Credentials (`Authorization`, `x-api-key`, `api-key`,
+  cookies, ...) are always replaced with `<redacted>`; the body can be truncated
+  with `--rollout-log-upstream-max-chars`.
+
+Lines appear in
+`<eval_output_dir>/logs/<instance>.attempt<N>.rollout-manager.log` as
+`upstream request: POST ...` entries. Note that the logged body contains prompt
+and tool-result content, so treat these logs with the same care as the
+trajectory exports.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |

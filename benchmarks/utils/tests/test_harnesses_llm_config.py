@@ -159,6 +159,25 @@ def test_build_harness_config_permission_mode_default_model(tmp_path: Path) -> N
     assert config.auto_mode_model is None
 
 
+def test_build_harness_config_upstream_logging(tmp_path: Path) -> None:
+    args = make_args(
+        tmp_path,
+        [
+            "--rollout-log-upstream",
+            "full",
+            "--rollout-log-upstream-max-chars",
+            "4000",
+        ],
+    )
+    _, config = build_harness_config(args)
+    assert config.rollout_log_upstream == "full"
+    assert config.rollout_log_upstream_max_chars == 4000
+
+    args = make_args(tmp_path, [])
+    _, config = build_harness_config(args)
+    assert config.rollout_log_upstream == "off"
+
+
 def test_build_harness_config_train_auxiliary(tmp_path: Path) -> None:
     args = make_args(tmp_path, [])
     _, config = build_harness_config(args)

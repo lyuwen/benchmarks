@@ -198,6 +198,12 @@ def main() -> int:
     parser.add_argument("--claude-binary", type=Path, default=None)
     parser.add_argument("--dist-mode", choices=["copy", "mount"], default="mount")
     parser.add_argument(
+        "--log-upstream-requests",
+        choices=["off", "summary", "full"],
+        default="off",
+        help="Ask the rollout manager to log requests sent to the backend",
+    )
+    parser.add_argument(
         "--permission-mode",
         choices=["auto", "bypassPermissions", "acceptEdits", "default", "plan"],
         default=None,
@@ -234,6 +240,7 @@ def main() -> int:
         max_turns=6,
         request_params=FORCED_REQUEST_PARAMS,
         permission_mode=args.permission_mode,
+        rollout_log_upstream=args.log_upstream_requests,
     )
 
     upstream = FakeUpstream(args.tool_command or TOOL_COMMAND)
@@ -304,6 +311,16 @@ def main() -> int:
                 f"{first_request.get(key)!r}"
             )
         assert result.rollout_export_path is not None
+        manager_logs = sorted(Path(tmp_dir).glob("out/logs/*.rollout-manager.log"))
+        if args.log_upstream_requests != "off" and manager_logs:
+            log_text = manager_logs[0].read_text(errors="replace")
+            assert "upstream request:" in log_text, (
+                "rollout manager did not log upstream requests"
+            )
+            print(
+                "manager logged upstream requests: "
+                f"{log_text.count('upstream request:')} line(s)"
+            )
         request_classes = sorted(
             {
                 str(entry.get("request_class"))

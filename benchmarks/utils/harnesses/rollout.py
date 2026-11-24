@@ -80,6 +80,8 @@ class RolloutManagerConfig:
     metadata: dict[str, Any] = field(default_factory=dict)
     exclude_request_classes: str = "auxiliary"
     request_params: dict[str, Any] = field(default_factory=dict)
+    log_upstream_requests: str = "off"
+    log_upstream_max_chars: int = 20000
     request_timeout_sec: float = 900.0
     finish_wait_sec: float = 60.0
     start_timeout_sec: float = 90.0
@@ -136,6 +138,15 @@ def rollout_manager_command(config: RolloutManagerConfig) -> list[str]:
             [
                 "--request-params",
                 json.dumps(config.request_params, sort_keys=True),
+            ]
+        )
+    if config.log_upstream_requests != "off":
+        argv.extend(
+            [
+                "--log-upstream-requests",
+                config.log_upstream_requests,
+                "--log-upstream-max-chars",
+                str(config.log_upstream_max_chars),
             ]
         )
     return argv

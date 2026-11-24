@@ -261,6 +261,21 @@ class HarnessConfig(BaseModel):
         gt=0,
         description="How long the rollout manager may take to finalize its export",
     )
+    rollout_log_upstream: Literal["off", "summary", "full"] = Field(
+        default="off",
+        description=(
+            "Log the requests the rollout manager sends to the model backend: "
+            "'summary' (shape only) or 'full' (redacted headers + body, "
+            "truncated to rollout_log_upstream_max_chars)"
+        ),
+    )
+    rollout_log_upstream_max_chars: int = Field(
+        default=20000,
+        ge=0,
+        description=(
+            "Maximum request-body characters logged in 'full' mode (0 = unlimited)"
+        ),
+    )
     exclude_request_classes: str = Field(
         default=DEFAULT_EXCLUDE_REQUEST_CLASSES,
         description=(
@@ -533,6 +548,25 @@ def add_harness_args(parser: ArgumentParser) -> None:
         ),
     )
     group.add_argument(
+        "--rollout-log-upstream",
+        choices=["off", "summary", "full"],
+        default="off",
+        help=(
+            "Log the requests sent to the backend by the rollout manager: "
+            "'summary' logs shape/headers names, 'full' logs redacted headers "
+            "and the request body (in the per-instance manager log)"
+        ),
+    )
+    group.add_argument(
+        "--rollout-log-upstream-max-chars",
+        type=int,
+        default=20000,
+        help=(
+            "Maximum body characters logged by --rollout-log-upstream full "
+            "(0 = unlimited, default 20000)"
+        ),
+    )
+    group.add_argument(
         "--exclude-request-classes",
         type=str,
         default=DEFAULT_EXCLUDE_REQUEST_CLASSES,
@@ -658,6 +692,8 @@ def harness_config_from_args(args: Any) -> HarnessConfig:
         exclude_request_classes=(
             "" if args.harness_include_auxiliary else args.exclude_request_classes
         ),
+        rollout_log_upstream=args.rollout_log_upstream,
+        rollout_log_upstream_max_chars=args.rollout_log_upstream_max_chars,
         skip_image_pull=args.skip_image_pull,
     )
 
@@ -676,6 +712,8 @@ def validate_harness_args(parser: ArgumentParser, args: Any) -> None:
         parser.error("--harness-compaction-threshold must be between 0 and 100")
     if args.harness_context_window < 0:
         parser.error("--harness-context-window must be >= 0")
+    if args.rollout_log_upstream_max_chars < 0:
+        parser.error("--rollout-log-upstream-max-chars must be >= 0")
     parse_extra_env(args.harness_env)
     parse_headers(args.harness_header)
     try:

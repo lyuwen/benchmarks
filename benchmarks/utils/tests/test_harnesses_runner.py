@@ -405,7 +405,9 @@ def test_start_rollout_manager_passes_request_params(
         gateway_ip="172.17.0.1", host_alias="host.docker.internal"
     )
     config = HarnessConfig(
-        request_params={"temperature": 0.4, "reasoning_effort": "high"}
+        request_params={"temperature": 0.4, "reasoning_effort": "high"},
+        rollout_log_upstream="full",
+        rollout_log_upstream_max_chars=5000,
     )
     runner._start_rollout_manager(
         workspace=cast(Any, workspace),
@@ -428,3 +430,5 @@ def test_start_rollout_manager_passes_request_params(
     }
     assert manager_config.model == "served-model"
     assert manager_config.host == "172.17.0.1"
+    assert manager_config.log_upstream_requests == "full"
+    assert manager_config.log_upstream_max_chars == 5000
