@@ -96,9 +96,57 @@ uv run harness-prepare --binary /path/to/claude --sha256 <checksum>
 
 Seed mode verifies size/checksum (and runs `claude --version` when the binary
 matches the host platform) before writing the cache, so a truncated or wrong
-platform download fails fast. Point evaluation runs at a custom cache with
-`--harness-cache-dir`; the distribution is then copied/mounted into each task
-container (see `--harness-dist-mode`).
+platform download fails fast.
+
+Set the cache location once for a whole cluster instead of passing a flag to
+every command:
+
+```bash
+export HARNESS_DIST_CACHE_DIR=/mnt/shared/harness-dist   # NFS or other shared FS
+uv run harness-prepare                                   # fill it once
+uv run swebench-infer-harnesses ...                      # all nodes/workers use it
+```
+
+### Distributed / shared cache (NFS)
+
+The cache directory can live on NFS (or any shared filesystem) and be shared by
+every evaluation node and worker. It is safe against concurrent first-use:
+
+- the cached entry is checked lock-free before any work;
+- an advisory `flock` on `<entry>/.distribution.lock` serializes a first-time
+  build so a shared cache is downloaded **once**, not once per node (other
+  processes re-check the cache after acquiring the lock);
+- downloads go to a per-process unique temp file and are published with an
+  atomic `os.replace` (same filesystem as the final path), and `manifest.json`
+  is written atomically — so a reader never sees a partial binary/manifest;
+- the layout is per version *and* platform
+  (`<cache>/claude-code/<version>/<platform>/`), so nodes preparing different
+  container platforms never collide.
+
+Filesystem caveats:
+
+- `flock` is advisory and not guaranteed on every NFS setup. The code detects
+  “lock not supported” and continues lock-free; correctness is preserved by the
+  unique temp files + atomic renames, but simultaneous first downloads may be
+  duplicated. Warm the cache once (`harness-prepare`) before a large run to
+  avoid that.
+- The cache directory must be writable by the evaluation users (and `os.replace`
+  requires the temp file to be on the same filesystem, which is why temp files
+  are created as siblings).
+- For **performance**, prefer a shared cache as a *cold store* and a per-node
+  local cache for the actual runs: 380 MiB is read per instance in `copy` mode
+  (`docker cp`) and per execution in `mount` mode, which is expensive over NFS.
+  Seed each node once from the shared copy:
+
+  ```bash
+  # on each evaluation node
+  uv run harness-prepare \
+    --harness-cache-dir ~/.cache/openhands-benchmarks/harness-dist \
+    --binary /mnt/shared/harness-dist/claude-code/2.1.331/linux-x64/claude \
+    --sha256 4c00839cf46beb2b38ec310105f2d538f7f9321fe46c636299b74bcab94626b1
+  ```
+
+  (`--check` confirms the local copy is present.)
 
 ## Usage
 

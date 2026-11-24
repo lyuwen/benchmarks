@@ -25,35 +25,37 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import shutil
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from benchmarks.utils.harnesses.config import (
-    DEFAULT_CACHE_DIR,
     DEFAULT_CLAUDE_CODE_VERSION,
+    HARNESS_CACHE_ENV,
     HARNESS_PLATFORMS,
     SUPPORTED_HARNESSES,
     HarnessConfig,
+    default_cache_dir,
 )
 from benchmarks.utils.harnesses.distribution import (
     BINARY_NAME,
-    MANIFEST_FILENAME,
     MIN_BINARY_BYTES,
     DistributionError,
     HarnessDistribution,
     detect_platform,
     distribution_dir,
+    distribution_lock,
     ensure_distribution,
     host_can_run,
     load_cached_distribution,
     release_manifest_url,
     sha256_file,
     verify_binary,
+    write_manifest,
 )
 
 
@@ -65,7 +67,7 @@ def _config_from_args(args: argparse.Namespace) -> HarnessConfig:
         name=args.harness,
         version=args.harness_version,
         platform=args.harness_platform,
-        cache_dir=args.harness_cache_dir,
+        cache_dir=args.harness_cache_dir or default_cache_dir(),
     )
 
 
@@ -123,29 +125,36 @@ def seed_distribution(
         config.expanded_cache_dir, config.name, config.version, platform_key
     )
     directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / source.name
-    if destination.resolve() != source.resolve():
-        shutil.copy2(source, destination)
-    destination.chmod(0o755)
-    if destination.name != BINARY_NAME:
-        # Keep the cache layout stable regardless of the source file name.
-        canonical = directory / BINARY_NAME
-        os.replace(destination, canonical)
-        destination = canonical
+    with distribution_lock(directory):
+        # Keep the cache layout stable regardless of the source file name, and
+        # publish the binary atomically so concurrent readers never see a
+        # half-copied file on a shared (NFS) cache.
+        destination = directory / BINARY_NAME
+        temporary = directory / (f".{BINARY_NAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            if source.resolve() != destination.resolve():
+                shutil.copy2(source, temporary)
+                temporary.chmod(0o755)
+                os.replace(temporary, destination)
+            else:
+                destination.chmod(0o755)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
 
-    distribution = HarnessDistribution(
-        harness=config.name,
-        version=config.version,
-        platform=platform_key,
-        directory=directory,
-        binary_path=destination,
-        sha256=digest,
-        size_bytes=size,
-    )
-    (directory / MANIFEST_FILENAME).write_text(
-        json.dumps({**distribution.manifest(), "created_at": time.time()}, indent=2)
-        + "\n"
-    )
+        distribution = HarnessDistribution(
+            harness=config.name,
+            version=config.version,
+            platform=platform_key,
+            directory=directory,
+            binary_path=destination,
+            sha256=digest,
+            size_bytes=size,
+        )
+        write_manifest(
+            directory,
+            {**distribution.manifest(), "created_at": time.time()},
+        )
     logger.info("Seeded harness distribution at %s", directory)
     return distribution
 
@@ -198,8 +207,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--harness-cache-dir",
         type=str,
-        default=DEFAULT_CACHE_DIR,
-        help=f"Host cache directory (default: {DEFAULT_CACHE_DIR})",
+        default=None,
+        help=(
+            "Host cache directory. Defaults to $"
+            f"{HARNESS_CACHE_ENV} or {default_cache_dir()}"
+        ),
     )
     parser.add_argument(
         "--binary",

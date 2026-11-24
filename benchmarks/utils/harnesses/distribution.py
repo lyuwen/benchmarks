@@ -17,6 +17,8 @@ pipeline never touches the network again. Tests inject ``fetch_json`` /
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -26,10 +28,17 @@ import shutil
 import subprocess
 import time
 import urllib.request
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+try:  # POSIX only; the cache lock is advisory and optional elsewhere.
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None  # type: ignore[assignment]
 
 
 logger = logging.getLogger(__name__)
@@ -38,6 +47,8 @@ RELEASE_BASE_URL = "https://downloads.claude.ai/claude-code-releases"
 MANIFEST_FILENAME = "manifest.json"
 BINARY_NAME = "claude"
 MIN_BINARY_BYTES = 1_000_000
+LOCK_FILENAME = ".distribution.lock"
+LOCK_WAIT_TIMEOUT_SEC = 900.0
 
 PLATFORM_BY_MACHINE = {
     ("linux", "x86_64"): "linux-x64",
@@ -117,13 +128,110 @@ def fetch_json(url: str) -> dict[str, Any]:
     return data
 
 
+def _temporary_path(destination: Path, suffix: str) -> Path:
+    """Unique sibling temp path so concurrent hosts never share a partial file."""
+    return destination.with_name(
+        f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.{suffix}"
+    )
+
+
 def download(url: str, destination: Path) -> None:
+    """Download to a unique temp file, then atomically publish it.
+
+    The temp name includes the pid and a random token: two hosts (or two
+    workers) racing on a shared cache never write the same partial file, and the
+    final ``os.replace`` is atomic within the cache filesystem.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.part")
-    with urllib.request.urlopen(url, timeout=600) as response:  # noqa: S310
-        with open(temporary, "wb") as handle:
-            shutil.copyfileobj(response, handle)
-    os.replace(temporary, destination)
+    temporary = _temporary_path(destination, "part")
+    try:
+        with urllib.request.urlopen(url, timeout=600) as response:  # noqa: S310
+            with open(temporary, "wb") as handle:
+                shutil.copyfileobj(response, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def write_manifest(directory: Path, payload: dict[str, Any]) -> Path:
+    """Atomically publish ``manifest.json`` in the cache directory."""
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / MANIFEST_FILENAME
+    temporary = _temporary_path(destination, "tmp")
+    data = json.dumps(payload, indent=2) + "\n"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return destination
+
+
+@contextlib.contextmanager
+def distribution_lock(
+    directory: Path, *, timeout: float = LOCK_WAIT_TIMEOUT_SEC
+) -> Iterator[None]:
+    """Advisory inter-process/host lock for building one distribution entry.
+
+    Serializes first-time downloads so a shared (e.g. NFS) cache is fetched
+    once instead of once per node/worker. The lock is *advisory*: filesystems
+    that do not support ``flock`` (or a read-only cache directory) fall back to
+    lock-free building, which stays correct because downloads and manifests are
+    published with unique temp files + atomic renames.
+    """
+    if fcntl is None:  # pragma: no cover - non-POSIX
+        yield
+        return
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        handle = open(directory / LOCK_FILENAME, "a+")
+    except OSError as exc:
+        logger.debug(
+            "Cannot open harness cache lock in %s (%s); continuing", directory, exc
+        )
+        yield
+        return
+
+    locked = False
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    logger.warning(
+                        "Harness cache lock not supported in %s (%s); "
+                        "continuing without serializing the download",
+                        directory,
+                        exc,
+                    )
+                    break
+                if time.monotonic() >= deadline:
+                    logger.warning(
+                        "Timed out waiting for the harness cache lock in %s; "
+                        "continuing without it",
+                        directory,
+                    )
+                    break
+                time.sleep(0.5)
+        yield
+    finally:
+        if locked:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:  # pragma: no cover - defensive
+                pass
+        handle.close()
 
 
 def sha256_file(path: Path) -> str:
@@ -248,7 +356,15 @@ def ensure_distribution(
     fetch: FetchJson = fetch_json,
     download_file: Download = download,
 ) -> HarnessDistribution:
-    """Return the cached portable distribution, building it when missing."""
+    """Return the cached portable distribution, building it when missing.
+
+    Safe on a shared/distributed cache (e.g. NFS): the cached entry is checked
+    lock-free first, then an advisory :func:`distribution_lock` serializes
+    first-time builds across workers/hosts, and the binary/manifest are
+    published with unique temp files + atomic renames. The directory layout is
+    per version and platform, so nodes preparing different container platforms
+    never collide.
+    """
     harness = str(config.name)
     version = str(config.version)
     platform_key = detect_platform(config.platform)
@@ -272,42 +388,57 @@ def ensure_distribution(
     if harness != "claude-code":
         raise DistributionError(f"Unsupported harness distribution: {harness!r}")
 
-    binary_path, checksum, size = _download_release_binary(
-        version,
-        platform_key,
-        directory,
-        fetch=fetch,
-        download_file=download_file,
-    )
-    if size < MIN_BINARY_BYTES:
-        raise DistributionError(
-            f"Harness binary {binary_path} is unexpectedly small ({size} bytes)"
+    with distribution_lock(directory):
+        # Another host/worker may have finished the build while we waited.
+        cached = load_cached_distribution(
+            directory, harness=harness, version=version, platform_key=platform_key
         )
-    if host_can_run(platform_key):
-        verify_binary(binary_path)
+        if cached is not None:
+            logger.info(
+                "Harness distribution %s@%s (%s) was prepared concurrently at %s",
+                harness,
+                version,
+                platform_key,
+                cached.binary_path,
+            )
+            return cached
 
-    distribution = HarnessDistribution(
-        harness=harness,
-        version=version,
-        platform=platform_key,
-        directory=directory,
-        binary_path=binary_path,
-        sha256=checksum,
-        size_bytes=size,
-    )
-    (directory / MANIFEST_FILENAME).write_text(
-        json.dumps({**distribution.manifest(), "created_at": time.time()}, indent=2)
-        + "\n"
-    )
-    logger.info(
-        "Cached harness distribution %s@%s (%s, %.1f MiB) at %s",
-        harness,
-        version,
-        platform_key,
-        size / (1024 * 1024),
-        directory,
-    )
-    return distribution
+        binary_path, checksum, size = _download_release_binary(
+            version,
+            platform_key,
+            directory,
+            fetch=fetch,
+            download_file=download_file,
+        )
+        if size < MIN_BINARY_BYTES:
+            raise DistributionError(
+                f"Harness binary {binary_path} is unexpectedly small ({size} bytes)"
+            )
+        if host_can_run(platform_key):
+            verify_binary(binary_path)
+
+        distribution = HarnessDistribution(
+            harness=harness,
+            version=version,
+            platform=platform_key,
+            directory=directory,
+            binary_path=binary_path,
+            sha256=checksum,
+            size_bytes=size,
+        )
+        write_manifest(
+            directory,
+            {**distribution.manifest(), "created_at": time.time()},
+        )
+        logger.info(
+            "Cached harness distribution %s@%s (%s, %.1f MiB) at %s",
+            harness,
+            version,
+            platform_key,
+            size / (1024 * 1024),
+            directory,
+        )
+        return distribution
 
 
 def host_can_run(platform_key: str) -> bool:

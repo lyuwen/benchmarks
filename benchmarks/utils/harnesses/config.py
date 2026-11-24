@@ -36,6 +36,7 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 DEFAULT_COMPACTION_THRESHOLD = 80
 
 DEFAULT_CACHE_DIR = "~/.cache/openhands-benchmarks/harness-dist"
+HARNESS_CACHE_ENV = "HARNESS_DIST_CACHE_DIR"
 DEFAULT_INSTALL_DIR = "/opt/harness"
 
 # Long tool calls (test suites, builds) are common in SWE tasks; the Claude Code
@@ -58,6 +59,11 @@ HARNESS_PLATFORMS = (
 SUPPORTED_HARNESSES = ("claude-code",)
 
 
+def default_cache_dir() -> str:
+    """Cache directory used when no CLI flag is given (env-overridable)."""
+    return os.getenv(HARNESS_CACHE_ENV) or DEFAULT_CACHE_DIR
+
+
 class HarnessConfig(BaseModel):
     """Everything the harness runner needs, independent of the benchmark task."""
 
@@ -77,8 +83,11 @@ class HarnessConfig(BaseModel):
         ),
     )
     cache_dir: str = Field(
-        default=DEFAULT_CACHE_DIR,
-        description="Host cache directory for portable harness distributions",
+        default_factory=default_cache_dir,
+        description=(
+            "Host cache directory for portable harness distributions "
+            f"(default: ${HARNESS_CACHE_ENV} or {DEFAULT_CACHE_DIR})"
+        ),
     )
     install_dir: str = Field(
         default=DEFAULT_INSTALL_DIR,
@@ -270,8 +279,11 @@ def add_harness_args(parser: ArgumentParser) -> None:
     group.add_argument(
         "--harness-cache-dir",
         type=str,
-        default=DEFAULT_CACHE_DIR,
-        help="Host cache directory for portable harness distributions",
+        default=None,
+        help=(
+            "Host cache directory for portable harness distributions "
+            f"(default: ${HARNESS_CACHE_ENV} or {DEFAULT_CACHE_DIR})"
+        ),
     )
     group.add_argument(
         "--harness-install-dir",
@@ -465,7 +477,7 @@ def harness_config_from_args(args: Any) -> HarnessConfig:
         name=args.harness,
         version=args.harness_version,
         platform=args.harness_platform,
-        cache_dir=args.harness_cache_dir,
+        cache_dir=args.harness_cache_dir or default_cache_dir(),
         install_dir=args.harness_install_dir,
         dist_mode=args.harness_dist_mode,
         context_window=args.harness_context_window,

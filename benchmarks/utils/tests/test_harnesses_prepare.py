@@ -158,3 +158,42 @@ def test_main_reports_failure_with_offline_hint(
     assert "harness-prepare failed" in captured.err
     assert "Release manifest" in captured.err
     assert release_manifest_url("2.1.331") in captured.err
+
+
+def test_cache_dir_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared = tmp_path / "shared-cache"
+    monkeypatch.setenv("HARNESS_DIST_CACHE_DIR", str(shared))
+    assert HarnessConfig().cache_dir == str(shared)
+
+    exit_code = prepare.main(
+        [
+            "--harness-platform",
+            "linux-arm64",
+            "--binary",
+            str(write_binary(tmp_path)),
+        ]
+    )
+    assert exit_code == 0
+    assert (shared / "claude-code" / "2.1.331" / "linux-arm64" / "claude").is_file()
+
+
+def test_cache_dir_flag_overrides_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HARNESS_DIST_CACHE_DIR", str(tmp_path / "from-env"))
+    explicit = tmp_path / "from-flag"
+    exit_code = prepare.main(
+        [
+            "--harness-platform",
+            "linux-arm64",
+            "--harness-cache-dir",
+            str(explicit),
+            "--binary",
+            str(write_binary(tmp_path)),
+        ]
+    )
+    assert exit_code == 0
+    assert (explicit / "claude-code" / "2.1.331" / "linux-arm64" / "claude").is_file()
+    assert not (tmp_path / "from-env").exists()

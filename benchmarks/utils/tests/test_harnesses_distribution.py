@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,12 +16,15 @@ from benchmarks.utils.harnesses import distribution
 from benchmarks.utils.harnesses.distribution import (
     MIN_BINARY_BYTES,
     DistributionError,
+    HarnessDistribution,
     detect_platform,
     distribution_dir,
+    download,
     ensure_distribution,
     release_binary_url,
     release_manifest_url,
     verify_binary,
+    write_manifest,
 )
 
 
@@ -188,3 +194,128 @@ def test_missing_platform_entry_is_reported(tmp_path: Path) -> None:
             fetch=lambda url: {"platforms": {"darwin-arm64": {}}},
             download_file=lambda url, destination: None,
         )
+
+
+def test_download_publishes_atomically_with_unique_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+    requested: list[str] = []
+
+    def fake_urlopen(url, timeout=None):
+        requested.append(url)
+        return FakeResponse(BLOB)
+
+    monkeypatch.setattr(distribution.urllib.request, "urlopen", fake_urlopen)
+    destination = tmp_path / "cache" / "claude"
+    url = release_binary_url("2.1.331", "linux-arm64")
+    download(url, destination)
+    assert requested == [url]
+    assert destination.read_bytes() == BLOB
+    leftovers = [
+        path.name for path in destination.parent.iterdir() if path != destination
+    ]
+    assert leftovers == []
+
+
+def test_write_manifest_is_atomic(tmp_path: Path) -> None:
+    directory = tmp_path / "cache"
+    write_manifest(directory, {"version": "2.1.331"})
+    assert json.loads((directory / "manifest.json").read_text()) == {
+        "version": "2.1.331"
+    }
+    leftovers = [
+        path.name for path in directory.iterdir() if path.name != "manifest.json"
+    ]
+    assert leftovers == []
+
+
+def test_ensure_distribution_shared_cache_downloads_once(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    calls = {"fetch": 0, "download": 0}
+    guard = threading.Lock()
+
+    def fake_fetch(url: str) -> dict:
+        with guard:
+            calls["fetch"] += 1
+        return release_manifest()
+
+    def fake_download(url: str, destination: Path) -> None:
+        with guard:
+            calls["download"] += 1
+        time.sleep(0.3)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(BLOB)
+
+    results: list[HarnessDistribution] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            results.append(
+                ensure_distribution(
+                    config, fetch=fake_fetch, download_file=fake_download
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - reported after join
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert errors == []
+    assert calls["download"] == 1
+    assert len(results) == 3
+    paths = {getattr(result, "binary_path") for result in results}
+    assert paths == {results[0].binary_path}
+
+
+def test_ensure_distribution_works_without_flock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(tmp_path)
+    monkeypatch.setattr(distribution, "fcntl", None)
+
+    def fake_download(url: str, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(BLOB)
+
+    result = ensure_distribution(
+        config, fetch=lambda url: release_manifest(), download_file=fake_download
+    )
+    assert result.binary_path.read_bytes() == BLOB
+
+
+def test_ensure_distribution_works_when_flock_is_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(tmp_path)
+
+    class UnsupportedFlock:
+        LOCK_EX = 2
+        LOCK_NB = 4
+        LOCK_UN = 8
+
+        @staticmethod
+        def flock(fd, operation):  # noqa: ANN001 - mimics fcntl.flock
+            raise OSError(37, "No locks available")
+
+    monkeypatch.setattr(distribution, "fcntl", UnsupportedFlock)
+
+    def fake_download(url: str, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(BLOB)
+
+    result = ensure_distribution(
+        config, fetch=lambda url: release_manifest(), download_file=fake_download
+    )
+    assert result.binary_path.read_bytes() == BLOB

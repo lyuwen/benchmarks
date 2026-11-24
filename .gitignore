@@ -222,3 +222,6 @@ builds/
 
 # Manual harness smoke-test scratch dirs (scripts/harness_smoke.py)
 /.harness-smoke-*/
+
+# Local harness distribution cache (when HARNESS_DIST_CACHE_DIR is inside the repo)
+/.harness-dist/
