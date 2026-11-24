@@ -7,12 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.utils.harnesses import prepare
+from benchmarks.utils.harnesses import distribution as distribution_module, prepare
 from benchmarks.utils.harnesses.config import HarnessConfig
 from benchmarks.utils.harnesses.distribution import (
     MIN_BINARY_BYTES,
     DistributionError,
     release_manifest_url,
+)
+from benchmarks.utils.tests.test_harnesses_distribution import (
+    DSH_BLOB,
+    DSH_EXE,
+    dsh_wheel_bytes,
 )
 
 
@@ -197,3 +202,109 @@ def test_cache_dir_flag_overrides_env(
     assert exit_code == 0
     assert (explicit / "claude-code" / "2.1.331" / "linux-arm64" / "claude").is_file()
     assert not (tmp_path / "from-env").exists()
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek Harness: seed the runtime payload (wheel or extracted executable)
+# ---------------------------------------------------------------------------
+
+
+def dsh_config(tmp_path: Path) -> HarnessConfig:
+    return HarnessConfig(
+        name="deepseek-harness",
+        version=distribution_module.DSH_RUNTIME_VERSION,
+        platform="linux-x64",
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+
+def test_main_seeds_deepseek_runtime_from_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(distribution_module, "host_can_run", lambda platform: False)
+    wheel = tmp_path / "runtime.whl"
+    wheel.write_bytes(dsh_wheel_bytes())
+    cache = tmp_path / "cache"
+    exit_code = prepare.main(
+        [
+            "--harness",
+            "deepseek-harness",
+            "--wheel",
+            str(wheel),
+            "--harness-platform",
+            "linux-x64",
+            "--harness-cache-dir",
+            str(cache),
+        ]
+    )
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "payload: 3 file(s)" in output
+    cached = prepare.check_distribution(dsh_config(tmp_path))
+    assert cached is not None
+    assert cached.binary_path.name == DSH_EXE
+    assert "linux-x64/downloads.json" in cached.files
+
+
+def test_main_seeds_deepseek_runtime_from_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(distribution_module, "host_can_run", lambda platform: False)
+    source = tmp_path / "runtime" / DSH_EXE
+    source.parent.mkdir()
+    source.write_bytes(DSH_BLOB)
+    (source.parent / f"{DSH_EXE}-rg").write_bytes(b"rg")
+    (source.parent / "linux-x64").mkdir()
+    (source.parent / "linux-x64" / "downloads.json").write_text("{}")
+    exit_code = prepare.main(
+        [
+            "--harness",
+            "deepseek-harness",
+            "--binary",
+            str(source),
+            "--harness-platform",
+            "linux-x64",
+            "--harness-cache-dir",
+            str(tmp_path / "cache"),
+        ]
+    )
+    assert exit_code == 0
+    cached = prepare.check_distribution(dsh_config(tmp_path))
+    assert cached is not None
+    assert set(cached.files) == {
+        DSH_EXE,
+        f"{DSH_EXE}-rg",
+        "linux-x64/downloads.json",
+    }
+
+
+def test_check_mode_prints_default_deepseek_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = prepare.main(
+        [
+            "--harness",
+            "deepseek-harness",
+            "--harness-platform",
+            "linux-x64",
+            "--harness-cache-dir",
+            str(tmp_path / "cache"),
+            "--check",
+        ]
+    )
+    assert exit_code == 0
+    assert "0.2.2rc2" in capsys.readouterr().out
+
+
+def test_wheel_flag_requires_deepseek_harness(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        prepare.main(
+            [
+                "--wheel",
+                str(tmp_path / "runtime.whl"),
+                "--harness-cache-dir",
+                str(tmp_path / "cache"),
+            ]
+        )

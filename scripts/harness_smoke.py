@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Manual end-to-end smoke test for the blackbox harness pipeline.
 
-Runs the real Claude Code binary inside a local Docker container, with a fake
-OpenAI-compatible upstream behind the rollout-manager capture proxy, and checks
-that the patch and the trajectory export are produced.
+Runs a real harness binary (Claude Code or DeepSeek Harness) inside a local
+Docker container, with a fake OpenAI-compatible upstream behind the
+rollout-manager capture proxy, and checks that the patch and the trajectory
+export are produced.
 
 It needs Docker and a container image with ``git`` and ``bash``::
 
@@ -15,6 +16,13 @@ It needs Docker and a container image with ``git`` and ``bash``::
 ``--claude-binary`` lets you reuse a locally downloaded native binary instead of
 downloading the ~380 MiB release again; without it the normal distribution
 cache/download path is exercised.
+
+DeepSeek Harness can be smoke-tested the same way; ``--dsh-runtime`` seeds the
+cache from a local runtime directory (as installed by the Python SDK), the
+extracted executable or the published runtime wheel::
+
+    uv run python scripts/harness_smoke.py --harness deepseek-harness \
+        --image <task-image> --dsh-runtime /path/to/deepseek_harness_runtime/runtime
 
 To check that Claude Code's auto-mode classifier requests are captured, run with
 ``--permission-mode auto`` and a Bash command the classifier has to review, e.g.
@@ -38,12 +46,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from benchmarks.utils.harnesses.claude_code import build_distribution_bind_volumes
-from benchmarks.utils.harnesses.config import HarnessConfig
+from benchmarks.utils.harnesses.config import (
+    DEFAULT_CLAUDE_CODE_VERSION,
+    DEFAULT_DEEPSEEK_HARNESS_VERSION,
+    HarnessConfig,
+)
 from benchmarks.utils.harnesses.distribution import (
     BINARY_NAME,
+    build_distribution_bind_volumes,
     distribution_dir,
     ensure_distribution,
+    seed_deepseek_distribution,
 )
 from benchmarks.utils.harnesses.runner import HarnessRunRequest, run_harness_instance
 from benchmarks.utils.harnesses.workspace import DockerContainerWorkspace
@@ -64,8 +77,9 @@ FORCED_REQUEST_PARAMS = {
 class FakeUpstream:
     """Minimal OpenAI Chat-Completions backend with a scripted tool call."""
 
-    def __init__(self, tool_command: str) -> None:
+    def __init__(self, tool_command: str, *, shell_tool: str = "Bash") -> None:
         self.tool_command = tool_command
+        self.shell_tool = shell_tool
         self.requests: list[dict[str, Any]] = []
         self.server: ThreadingHTTPServer | None = None
 
@@ -125,7 +139,7 @@ class FakeUpstream:
                                 "id": "call_smoke_1",
                                 "type": "function",
                                 "function": {
-                                    "name": "Bash",
+                                    "name": upstream.shell_tool,
                                     "arguments": json.dumps(
                                         {
                                             "command": upstream.tool_command,
@@ -191,11 +205,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True, help="Task image with git+bash")
     parser.add_argument(
+        "--harness",
+        choices=["claude-code", "deepseek-harness"],
+        default="claude-code",
+        help="Harness to smoke-test (default: claude-code)",
+    )
+    parser.add_argument(
         "--tool-command",
         default=None,
         help="Override the scripted Bash command (e.g. one auto mode classifies)",
     )
     parser.add_argument("--claude-binary", type=Path, default=None)
+    parser.add_argument(
+        "--dsh-runtime",
+        type=Path,
+        default=None,
+        help=(
+            "Seed DeepSeek Harness from an extracted runtime executable or a "
+            "deepseek_harness_runtime_bin wheel instead of downloading it"
+        ),
+    )
     parser.add_argument("--dist-mode", choices=["copy", "mount"], default="mount")
     parser.add_argument(
         "--log-upstream-requests",
@@ -205,9 +234,18 @@ def main() -> int:
     )
     parser.add_argument(
         "--permission-mode",
-        choices=["auto", "bypassPermissions", "acceptEdits", "default", "plan"],
+        choices=[
+            "auto",
+            "bypassPermissions",
+            "acceptEdits",
+            "default",
+            "plan",
+            "danger-full-access",
+            "workspace-write",
+            "read-only",
+        ],
         default=None,
-        help="Claude Code permission mode (e.g. auto to exercise the classifier)",
+        help="Harness permission mode (e.g. auto exercises the Claude Code classifier)",
     )
     parser.add_argument(
         "--tmp-dir",
@@ -221,7 +259,11 @@ def main() -> int:
     parser.add_argument("--keep", action="store_true", help="Keep temp dirs")
     args = parser.parse_args()
 
-    version = "2.1.331"
+    version = (
+        DEFAULT_CLAUDE_CODE_VERSION
+        if args.harness == "claude-code"
+        else DEFAULT_DEEPSEEK_HARNESS_VERSION
+    )
     if args.tmp_dir is not None:
         tmp_dir = str(args.tmp_dir)
         os.makedirs(tmp_dir, exist_ok=True)
@@ -230,6 +272,7 @@ def main() -> int:
     cache_dir = os.path.join(tmp_dir, "cache")
     output_dir = os.path.join(tmp_dir, "out")
     config = HarnessConfig(
+        name=args.harness,
         version=version,
         platform="linux-x64",
         cache_dir=cache_dir,
@@ -243,13 +286,20 @@ def main() -> int:
         rollout_log_upstream=args.log_upstream_requests,
     )
 
-    upstream = FakeUpstream(args.tool_command or TOOL_COMMAND)
+    upstream = FakeUpstream(
+        args.tool_command or TOOL_COMMAND,
+        shell_tool="Bash" if args.harness == "claude-code" else "bash",
+    )
     port = upstream.start()
     workspace: DockerContainerWorkspace | None = None
     try:
-        if args.claude_binary is not None:
+        if args.harness == "deepseek-harness":
+            if args.dsh_runtime is not None:
+                seed_deepseek_distribution(config, args.dsh_runtime)
+        elif args.claude_binary is not None:
             seed_distribution(cache_dir, version, args.claude_binary)
         distribution = ensure_distribution(config)
+        print(f"harness: {config.name} {config.version}")
         print(f"distribution: {distribution.binary_path}")
 
         bind_volumes = build_distribution_bind_volumes(config, distribution)
@@ -328,6 +378,9 @@ def main() -> int:
             }
         )
         print(f"captured request classes: {request_classes}")
+        if config.name == "deepseek-harness":
+            assert history["run"]["result"], "missing dsh final result event"
+            assert history["run"]["result"].get("text"), "dsh run produced no answer"
         print(
             "SMOKE OK: "
             f"{history['stats']['requests']} request(s), "

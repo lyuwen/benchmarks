@@ -34,15 +34,19 @@ import uuid
 from pathlib import Path
 
 from benchmarks.utils.harnesses.config import (
-    DEFAULT_CLAUDE_CODE_VERSION,
+    DEFAULT_HARNESS_VERSIONS,
     HARNESS_CACHE_ENV,
     HARNESS_PLATFORMS,
+    HARNESS_PLATFORMS_BY_HARNESS,
     SUPPORTED_HARNESSES,
     HarnessConfig,
     default_cache_dir,
 )
 from benchmarks.utils.harnesses.distribution import (
     BINARY_NAME,
+    DEEPSEEK_HARNESS,
+    DSH_RUNTIME_VERSION,
+    DSH_RUNTIME_WHEELS,
     MIN_BINARY_BYTES,
     DistributionError,
     HarnessDistribution,
@@ -53,6 +57,7 @@ from benchmarks.utils.harnesses.distribution import (
     host_can_run,
     load_cached_distribution,
     release_manifest_url,
+    seed_deepseek_distribution,
     sha256_file,
     verify_binary,
     write_manifest,
@@ -65,7 +70,7 @@ logger = logging.getLogger(__name__)
 def _config_from_args(args: argparse.Namespace) -> HarnessConfig:
     return HarnessConfig(
         name=args.harness,
-        version=args.harness_version,
+        version=args.harness_version or DEFAULT_HARNESS_VERSIONS[args.harness],
         platform=args.harness_platform,
         cache_dir=args.harness_cache_dir or default_cache_dir(),
     )
@@ -91,7 +96,7 @@ def seed_distribution(
     *,
     expected_sha256: str | None = None,
 ) -> HarnessDistribution:
-    """Copy an already-downloaded harness binary into the cache.
+    """Copy an already-downloaded single-binary harness payload into the cache.
 
     This is the offline path: no network call is made. When the binary matches
     the host platform it is smoke-checked with ``--version`` before being
@@ -165,6 +170,8 @@ def _print_distribution(distribution: HarnessDistribution) -> None:
         f"  harness: {distribution.harness} {distribution.version} "
         f"({distribution.platform})"
     )
+    if len(distribution.payload_files()) > 1:
+        print(f"  payload: {len(distribution.payload_files())} file(s)")
     print(
         f"  binary:  {distribution.binary_path} "
         f"({distribution.size_bytes / (1024 * 1024):.1f} MiB, "
@@ -194,8 +201,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--harness-version",
         type=str,
-        default=DEFAULT_CLAUDE_CODE_VERSION,
-        help=f"Pinned harness release (default: {DEFAULT_CLAUDE_CODE_VERSION})",
+        default=None,
+        help=(
+            "Pinned harness release (default: the selected harness's pinned version)"
+        ),
     )
     parser.add_argument(
         "--harness-platform",
@@ -219,7 +228,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Seed the cache from an already-downloaded harness binary instead "
-            "of downloading it (offline mode)"
+            "of downloading it (offline mode). For deepseek-harness this is the "
+            "extracted runtime executable; its <exe>-rg sidecar and "
+            "<platform>/downloads.json are collected automatically."
+        ),
+    )
+    parser.add_argument(
+        "--wheel",
+        type=str,
+        default=None,
+        help=(
+            "Seed deepseek-harness from an already-downloaded "
+            "deepseek_harness_runtime_bin wheel instead of downloading it"
         ),
     )
     parser.add_argument(
@@ -250,8 +270,15 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = _config_from_args(args)
+    platform_key: str | None = None
     try:
         platform_key = detect_platform(config.platform)
+        allowed = HARNESS_PLATFORMS_BY_HARNESS.get(config.name, HARNESS_PLATFORMS)
+        if platform_key not in allowed:
+            raise DistributionError(
+                f"{config.name} has no portable distribution for {platform_key}; "
+                f"supported: {', '.join(allowed)}"
+            )
         if args.check:
             cached = check_distribution(config)
             if cached is None:
@@ -262,10 +289,21 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             _print_distribution(cached)
             return 0
-        if args.binary:
-            distribution = seed_distribution(
-                config, args.binary, expected_sha256=args.sha256
+        if args.wheel:
+            if config.name != DEEPSEEK_HARNESS:
+                parser.error("--wheel is only supported for --harness deepseek-harness")
+            distribution = seed_deepseek_distribution(
+                config, Path(args.wheel), expected_sha256=args.sha256
             )
+        elif args.binary:
+            if config.name == DEEPSEEK_HARNESS:
+                distribution = seed_deepseek_distribution(
+                    config, Path(args.binary), expected_sha256=args.sha256
+                )
+            else:
+                distribution = seed_distribution(
+                    config, args.binary, expected_sha256=args.sha256
+                )
         else:
             distribution = ensure_distribution(config)
         _print_distribution(distribution)
@@ -275,13 +313,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Not cached: {exc}")
             return 0
         print(f"harness-prepare failed: {exc}", file=sys.stderr)
-        print(
-            "If this host has no network access, download the binary elsewhere "
-            f"and seed it:\n  harness-prepare --binary /path/to/{BINARY_NAME} "
-            "--sha256 <checksum>\n"
-            f"Release manifest: {release_manifest_url(config.version)}",
-            file=sys.stderr,
-        )
+        if config.name == DEEPSEEK_HARNESS:
+            spec = DSH_RUNTIME_WHEELS.get(platform_key) if platform_key else None
+            source = spec["url"] if spec else f"DeepSeek Harness {DSH_RUNTIME_VERSION}"
+            print(
+                "If this host has no network access, download the runtime wheel "
+                "elsewhere and seed it:\n  harness-prepare --harness "
+                f"deepseek-harness --wheel /path/to/runtime.whl --sha256 "
+                f"<checksum>\nWheel: {source}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "If this host has no network access, download the binary elsewhere "
+                f"and seed it:\n  harness-prepare --binary /path/to/{BINARY_NAME} "
+                "--sha256 <checksum>\n"
+                f"Release manifest: {release_manifest_url(config.version)}",
+                file=sys.stderr,
+            )
         return 1
 
 

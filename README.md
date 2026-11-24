@@ -121,14 +121,16 @@ After setting up the environment and configuring your LLM, see the individual be
 
 In addition to the OpenHands agent runs, SWE-bench and SWE-rebench-V2 have
 `run_infer_harnesses.py` entry points that run an external agent CLI (Claude
-Code first) **inside the task container** and capture its model traffic through
-the [rollout-manager](https://github.com/lyuwen/rollout-manager) proxy. Each
+Code or DeepSeek Harness, via `--harness`) **inside the task container** and
+capture its model traffic through the
+[rollout-manager](https://github.com/lyuwen/rollout-manager) proxy. Each
 instance produces a trajectory export (main conversation, compactions,
 sub-agents) next to the evaluation outputs, and the collected patch is judged
 exactly like a normal run.
 
 ```bash
 uv run swebench-infer-harnesses .llm_config/model.json --harness claude-code --judge swebench
+uv run swebench-infer-harnesses .llm_config/model.json --harness deepseek-harness --judge swebench
 uv run swerebenchv2-infer-harnesses .llm_config/model.json --harness claude-code --judge swerebenchv2
 ```
 

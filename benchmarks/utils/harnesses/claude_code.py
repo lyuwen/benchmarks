@@ -14,19 +14,19 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
 from typing import Any
 
+from benchmarks.utils.harnesses.base import HarnessRun, InstalledHarness
 from benchmarks.utils.harnesses.config import HarnessConfig
-from benchmarks.utils.harnesses.distribution import HarnessDistribution
+from benchmarks.utils.harnesses.distribution import (
+    HarnessDistribution,
+    build_distribution_bind_volumes,
+)
 from benchmarks.utils.harnesses.rollout import (
     RolloutManagerError,
     parse_stream_json_result,
 )
-from benchmarks.utils.harnesses.workspace import (
-    DockerContainerWorkspace,
-    ProcessOutcome,
-)
+from benchmarks.utils.harnesses.workspace import DockerContainerWorkspace
 
 
 logger = logging.getLogger(__name__)
@@ -70,36 +70,6 @@ _PROVIDER_OVERRIDES = {
     "CLAUDE_CODE_USE_VERTEX": "",
     "CLAUDE_CODE_USE_FOUNDRY": "",
 }
-
-
-@dataclass(frozen=True)
-class InstalledHarness:
-    """Where the harness binary lives inside a task container."""
-
-    binary_path: str
-    install_dir: str
-    work_dir: str
-    settings_path: str
-    instruction_path: str
-    version: str
-
-
-@dataclass(frozen=True)
-class HarnessRun:
-    """Outcome of one headless harness invocation inside the container."""
-
-    argv: list[str]
-    env: dict[str, str]
-    outcome: ProcessOutcome
-    result_event: dict[str, Any] | None
-
-    @property
-    def exit_code(self) -> int:
-        return self.outcome.exit_code
-
-    @property
-    def timed_out(self) -> bool:
-        return self.outcome.timed_out
 
 
 class ClaudeCodeHarness:
@@ -334,11 +304,11 @@ class ClaudeCodeHarness:
         )
 
 
-def build_distribution_bind_volumes(
-    config: HarnessConfig, distribution: HarnessDistribution
-) -> list[str]:
-    """Bind mounts needed to expose a portable distribution in the container."""
-    if config.dist_mode != "mount":
-        return []
-    install_dir = config.install_dir.rstrip("/") or "/opt/harness"
-    return [f"{distribution.directory}:{install_dir}:ro"]
+__all__ = [
+    "CAPTURE_AUTH_TOKEN",
+    "ClaudeCodeHarness",
+    "HarnessRun",
+    "HARNESS_NAME",
+    "InstalledHarness",
+    "build_distribution_bind_volumes",
+]

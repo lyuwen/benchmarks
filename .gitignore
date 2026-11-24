@@ -225,3 +225,6 @@ builds/
 
 # Local harness distribution cache (when HARNESS_DIST_CACHE_DIR is inside the repo)
 /.harness-dist/
+
+# Vendored third-party checkouts (e.g. deepseek-harness for reference)
+/thirdparty/

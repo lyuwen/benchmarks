@@ -14,6 +14,8 @@ package holds the task-independent plumbing:
 - :mod:`benchmarks.utils.harnesses.workspace` -- task container via the docker CLI
 - :mod:`benchmarks.utils.harnesses.rollout` -- capture proxy lifecycle + exports
 - :mod:`benchmarks.utils.harnesses.claude_code` -- the Claude Code harness
+- :mod:`benchmarks.utils.harnesses.deepseek_harness` -- the DeepSeek Harness adapter
+- :mod:`benchmarks.utils.harnesses.base` -- shared run types and the harness registry
 - :mod:`benchmarks.utils.harnesses.runner` -- per-instance pipeline
 """
 
@@ -21,6 +23,7 @@ from benchmarks.utils.harnesses.config import (
     DEFAULT_CLAUDE_CODE_VERSION,
     DEFAULT_COMPACTION_THRESHOLD,
     DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_DEEPSEEK_HARNESS_VERSION,
     SUPPORTED_HARNESSES,
     HarnessConfig,
     add_harness_args,
@@ -56,6 +59,7 @@ from benchmarks.utils.harnesses.workspace import (
 
 __all__ = [
     "DEFAULT_CLAUDE_CODE_VERSION",
+    "DEFAULT_DEEPSEEK_HARNESS_VERSION",
     "DEFAULT_COMPACTION_THRESHOLD",
     "DEFAULT_CONTEXT_WINDOW",
     "SUPPORTED_HARNESSES",

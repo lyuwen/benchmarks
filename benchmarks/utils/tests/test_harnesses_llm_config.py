@@ -203,3 +203,26 @@ def test_build_harness_config_rejects_structural_overrides(
     args = make_args(tmp_path, ["--request-param", "messages=[]"])
     with pytest.raises(ValueError, match="structural fields"):
         build_harness_config(args)
+
+
+def test_build_harness_config_deepseek_harness_defaults(tmp_path: Path) -> None:
+    args = make_args(tmp_path, ["--harness", "deepseek-harness"])
+    _, config = build_harness_config(args)
+    assert config.name == "deepseek-harness"
+    assert config.version == "0.2.2rc2"
+    assert config.permission_mode is None
+
+    args = make_args(
+        tmp_path,
+        [
+            "--harness",
+            "deepseek-harness",
+            "--harness-permission-mode",
+            "workspace-write",
+            "--harness-version",
+            "0.2.2rc2",
+        ],
+    )
+    _, config = build_harness_config(args)
+    assert config.permission_mode == "workspace-write"
+    assert config.version == "0.2.2rc2"

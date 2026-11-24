@@ -44,7 +44,7 @@ from benchmarks.utils.harnesses import (
     run_harness_instance,
     validate_harness_args,
 )
-from benchmarks.utils.harnesses.claude_code import build_distribution_bind_volumes
+from benchmarks.utils.harnesses.distribution import build_distribution_bind_volumes
 from benchmarks.utils.harnesses.llm_config import build_harness_config
 from benchmarks.utils.harnesses.runner import env_from_setup_commands
 from benchmarks.utils.harnesses.workspace import DockerContainerWorkspace

@@ -1,19 +1,26 @@
-# Blackbox harness inference (Claude Code)
+# Blackbox harness inference (Claude Code, DeepSeek Harness)
 
 This page documents `run_infer_harnesses.py`, the inference entry points that run
 an **external agent harness as a black box inside the task container** and
 capture its model traffic for trajectory synthesis.
 
-Two harness-family entry points exist today:
+Two task-family entry points exist today:
 
 | Task | Entry point | Module |
 | --- | --- | --- |
 | SWE-bench | `swebench-infer-harnesses` | `benchmarks/swebench/run_infer_harnesses.py` |
 | SWE-rebench-V2 | `swerebenchv2-infer-harnesses` | `benchmarks/swerebenchv2/run_infer_harnesses.py` |
 
-The first supported harness is **Claude Code**; the architecture is deliberately
-harness-agnostic so other CLIs (Codex, Gemini CLI, ...) can be added behind the
-same runner.
+Two harnesses are supported, selected with `--harness`:
+
+| Harness | `--harness` | Model protocol | Portable distribution |
+| --- | --- | --- | --- |
+| Claude Code | `claude-code` (default) | Anthropic Messages (proxy converts to OpenAI Chat-Completions) | single native binary |
+| DeepSeek Harness (`dsh`) | `deepseek-harness` | OpenAI Chat-Completions directly | published Python-SDK runtime wheel, unpacked (native executable + `-rg` sidecar) |
+
+The architecture is deliberately harness-agnostic so other CLIs (Codex, Gemini
+CLI, ...) can be added behind the same runner; see
+[Adding another harness](#adding-another-harness).
 
 ## Why a rollout manager
 
@@ -26,8 +33,9 @@ local **capture proxy**:
 ```text
 task container                          host
 ┌──────────────────────────────┐    ┌───────────────────────────────────────┐
-│  Claude Code (native binary) │    │  rollout-manager (one process/session) │
-│    ANTHROPIC_BASE_URL ───────┼───▶│  Anthropic Messages → OpenAI chat      │
+│  Claude Code / DeepSeek      │    │  rollout-manager (one process/session) │
+│  Harness (native binary)     │    │  Anthropic Messages → OpenAI chat, or   │
+│    model base URL ───────────┼───▶│  OpenAI Chat-Completions passthrough   │
 │    (tool calls, compaction)  │    │  requests/responses captured + tree    │
 │  repo at /testbed            │    │  ↓                                     │
 └──────────────────────────────┘    │  OpenAI-compatible model backend       │
@@ -46,7 +54,10 @@ pinned as a project dependency. Per instance it:
   JSON document (`schema version 2`);
 - labels compaction/auxiliary requests from Claude Code's explicit
   `x-claude-code-*` gateway hint headers (enabled via
-  `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`, set by the harness adapter).
+  `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`, set by the harness adapter). DeepSeek
+  Harness does not send those hints, so its requests are recorded as ordinary
+  main-conversation turns (its session-title call is disabled instead of being
+  captured as auxiliary traffic).
 
 The harness never sees credentials: the container gets a dummy token, and the
 proxy uses the real upstream key from the LLM config.
@@ -58,8 +69,9 @@ proxy uses the real upstream key from the LLM config.
 - An OpenAI-compatible model backend reachable from the host that supports
   **tool calling**. The LLM config is the same JSON used by the other
   benchmarks (`.llm_config/*.json`).
-- ~380 MiB of disk and a one-time download for the pinned native Claude Code
-  distribution (cached under `~/.cache/openhands-benchmarks/harness-dist`).
+- One-time download/disk for the pinned harness distribution, cached under
+  `~/.cache/openhands-benchmarks/harness-dist`: ~380 MiB for Claude Code, ~180 MiB
+  for the unpacked DeepSeek Harness runtime (download is a ~95 MiB wheel).
 
 ### Preparing the harness distribution in advance
 
@@ -68,9 +80,21 @@ before workers start, so it is downloaded exactly once per host. To fetch it
 ahead of time (login node, image build, shared cache) use the dedicated command:
 
 ```bash
-uv run harness-prepare                     # download the pinned release
+uv run harness-prepare                                # Claude Code (pinned release)
+uv run harness-prepare --harness deepseek-harness     # DeepSeek Harness (pinned PyPI wheel)
 uv run harness-prepare --harness-cache-dir /shared/harness-dist
-uv run harness-prepare --check             # cached? (no network)
+uv run harness-prepare --check --harness deepseek-harness   # cached? (no network)
+```
+
+Offline / air-gapped hosts can seed either harness from artifacts downloaded
+elsewhere:
+
+```bash
+# Claude Code: the native binary
+uv run harness-prepare --binary /path/to/claude --sha256 <checksum>
+# DeepSeek Harness: the published runtime wheel, an extracted runtime dir, or the exe
+uv run harness-prepare --harness deepseek-harness --wheel runtime.whl --sha256 <checksum>
+uv run harness-prepare --harness deepseek-harness --binary /path/to/runtime/
 ```
 
 Resulting cache layout:
@@ -78,6 +102,13 @@ Resulting cache layout:
 ```text
 <cache>/claude-code/<version>/<platform>/{claude, manifest.json}
 # e.g. ~/.cache/openhands-benchmarks/harness-dist/claude-code/2.1.331/linux-x64/
+
+<cache>/deepseek-harness/<version>/<platform>/
+  deepseek-harness-sdk-runtime-linux-x64        # native executable
+  deepseek-harness-sdk-runtime-linux-x64-rg     # ripgrep sidecar
+  linux-x64/downloads.json                      # resource metadata
+  manifest.json
+# e.g. ~/.cache/openhands-benchmarks/harness-dist/deepseek-harness/0.2.2rc2/linux-x64/
 ```
 
 For **air-gapped hosts**, download on a machine with network access and seed the
@@ -160,6 +191,16 @@ uv run swebench-infer-harnesses .llm_config/model.json \
   --judge swebench
 ```
 
+DeepSeek Harness (needs `harness-prepare --harness deepseek-harness` first, or a
+seeded cache):
+
+```bash
+uv run swebench-infer-harnesses .llm_config/model.json \
+  --dataset princeton-nlp/SWE-bench_Verified --split test \
+  --harness deepseek-harness \
+  --judge swebench
+```
+
 SWE-rebench-V2:
 
 ```bash
@@ -183,22 +224,22 @@ container and the proxy runs next to the local Docker daemon.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--harness` | `claude-code` | Harness implementation |
-| `--harness-version` | `2.1.331` | Pinned Claude Code release (native package version) |
-| `--harness-platform` | host auto-detect | `linux-x64`, `linux-arm64`, `linux-x64-musl`, `linux-arm64-musl` |
+| `--harness-version` | per harness | Pinned release (`2.1.331` Claude Code, `0.2.2rc2` DeepSeek Harness runtime) |
+| `--harness-platform` | host auto-detect | Claude Code: `linux-x64`, `linux-arm64`, `linux-x64-musl`, `linux-arm64-musl`; DeepSeek Harness: `linux-x64`, `linux-arm64` (glibc) |
 | `--harness-cache-dir` | `~/.cache/openhands-benchmarks/harness-dist` | Host cache for the portable distribution |
-| `--harness-install-dir` | `/opt/harness` | Where the binary is exposed inside the task container |
-| `--harness-dist-mode` | `copy` | `copy` (`docker cp` the binary) or `mount` (bind-mount the cache; faster for large local runs) |
+| `--harness-install-dir` | `/opt/harness` | Where the distribution payload is exposed inside the task container |
+| `--harness-dist-mode` | `copy` | `copy` (`docker cp` the payload) or `mount` (bind-mount the cache; faster for large local runs) |
 | `--harness-context-window` | `200000` | Real context window of the served model, reported to the harness (`0`: harness default) |
 | `--harness-compaction-threshold` | `80` | Compact at this percentage of the auto-compact window (`0`: harness default) |
 | `--harness-max-output-tokens` | unset | Per-response output-token cap |
-| `--harness-max-turns` | `--max-iterations` | Agentic-turn cap |
+| `--harness-max-turns` | `--max-iterations` | Agentic-turn cap (Claude Code only; DeepSeek Harness has no turn cap — rejected there) |
 | `--harness-bash-timeout-ms` | `600000` | Default/max harness shell-command timeout |
 | `--harness-api-timeout-ms` | `1200000` | Per-model-request timeout |
-| `--harness-bare` | off | Run Claude Code with `--bare` (no hooks/CLAUDE.md/skills/MCP discovery) |
-| `--harness-no-skip-permissions` | off | Do not use bypass-permissions mode |
-| `--harness-permission-mode` | unset | Claude Code permission mode: `auto`, `bypassPermissions`, `acceptEdits`, `default`, `plan` |
-| `--harness-include-auxiliary` | off | Train auxiliary requests (auto-mode classifier, titles) instead of masking them (`--exclude-request-classes ''`) |
-| `--harness-auto-mode-model` | main agent model | Optional model ID for auto-mode classifier requests |
+| `--harness-bare` | off | Run Claude Code with `--bare` (no hooks/CLAUDE.md/skills/MCP discovery); Claude Code only |
+| `--harness-no-skip-permissions` | off | Do not use bypass-permissions mode (DeepSeek Harness then defaults to `workspace-write`) |
+| `--harness-permission-mode` | unset | Claude Code: `auto`, `bypassPermissions`, `acceptEdits`, `default`, `plan`. DeepSeek Harness: `danger-full-access`, `workspace-write`, `read-only` (plus the Claude names, mapped) |
+| `--harness-include-auxiliary` | off | Train auxiliary requests (auto-mode classifier, titles) instead of masking them (`--exclude-request-classes ''`); DeepSeek Harness captures no auxiliary class |
+| `--harness-auto-mode-model` | main agent model | Optional model ID for Claude Code auto-mode classifier requests |
 | `--harness-env KEY=VALUE` | none | Extra environment variable (repeatable) |
 | `--harness-arg ARG` | none | Extra harness CLI argument (repeatable) |
 | `--harness-header 'Name: Value'` | from LLM config | Extra HTTP header sent by the harness (forwarded by the proxy to the upstream) |
@@ -207,8 +248,9 @@ container and the proxy runs next to the local Docker daemon.
 
 Claude Code assumes a **1M-token** context window for model IDs it does not
 recognize (which is the usual case for a served backend behind a proxy), so its
-default compaction point would be far beyond the model's real limit. The
-pipeline therefore sets, inside the harness process:
+default compaction point would be far beyond the model's real limit. DeepSeek
+Harness sizes the declared model through its provider config instead. The
+pipeline therefore sets, inside the Claude Code process:
 
 | Variable | Value |
 | --- | --- |
@@ -216,10 +258,13 @@ pipeline therefore sets, inside the harness process:
 | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `--harness-context-window` (only when ≥ 100k) |
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `--harness-compaction-threshold` |
 
-With the defaults (200k window, 80%), the harness compacts when the conversation
+With the defaults (200k window, 80%), Claude Code compacts when the conversation
 reaches ~160k tokens. Compaction requests are captured as their own trajectory
 (kind `compaction`) and labelled in the export, so the trajectory series shows
-the pre-compaction conversation, the summary call, and the continuation.
+the pre-compaction conversation, the summary call, and the continuation. For
+DeepSeek Harness the same percentage becomes
+`compaction-basic.thresholdRatio` in the `--patch` overlay (its summary call is
+an ordinary main-conversation turn in the capture).
 
 ### Sampling / request parameters
 
@@ -320,6 +365,51 @@ follows the same `--exclude-request-classes` rules. To make auxiliary traffic
 trainable end-to-end, run with `--exclude-request-classes ""` (capture nothing
 as excluded) and flatten without `--exclude` filtering.
 
+### DeepSeek Harness specifics
+
+Select it with `--harness deepseek-harness` (pinned runtime `0.2.2rc2`). The
+adapter runs the packaged runtime headless:
+
+```text
+dsh --patch /tmp/harness/dsh-patch.json --profile headless --json \
+    --permission-mode <preset> --approval-policy never "<instruction>"
+```
+
+The `--patch` overlay configures a benchmark-only OpenAI Chat-Completions
+provider (route id `benchmark`) pointing at the capture proxy, makes it the
+`agent-default-model`, and disables the session-title model call so it is not
+captured as extra training traffic. pi-ai compatibility switches are pinned for
+generic OpenAI-compatible gateways (`supportsStore: false`,
+`maxTokensField: max_tokens`, no `developer` role, no harness-sent
+`reasoning_effort`); the benchmark's sampling parameters still reach the backend
+through the proxy overlay.
+
+- **Permissions:** `--harness-permission-mode` maps onto dsh presets:
+  `danger-full-access` / `bypassPermissions` / `auto` → unrestricted (default
+  when skip-permissions is on), `workspace-write` / `acceptEdits` / `default` →
+  workspace-confined, `plan` / `read-only` → read-only. Headless has no live
+  approval responder, so the runner always passes `--approval-policy never`.
+- **Compaction:** `--harness-compaction-threshold` is expressed as
+  `compaction-basic.thresholdRatio` (percentage of the context window);
+  `--harness-context-window` and `--harness-max-output-tokens` size the declared
+  model. dsh compaction summary calls are ordinary main-conversation turns in
+  the capture (no gateway hint headers, so no separate `compaction` trajectory).
+- **Limitations:** `--harness-max-turns` is unsupported (dsh has no turn cap);
+  use `--conversation-timeout`. `--harness-bare` and
+  `--harness-auto-mode-model` are Claude Code-specific and rejected. Request
+  classes are not labelled, so `--exclude-request-classes` /
+  `--harness-include-auxiliary` do not change dsh captures.
+- **Output:** `--json` streams NDJSON events to the harness log
+  (`.harness.jsonl`); the terminal `final` event is parsed into
+  `history.run.result` (`type`, `sessionId`, `reason`, `text`). Session state
+  lives under `/tmp/harness/dsh-home` inside the container and is discarded with
+  it.
+- **Distribution:** `harness-prepare --harness deepseek-harness` downloads the
+  pinned PyPI wheel and unpacks it; the whole payload (executable, `-rg` sidecar,
+  `downloads.json`) is copied or bind-mounted into the container. dsh publishes
+  glibc/manylinux wheels only (`linux-x64`, `linux-arm64`) — musl images need a
+  separately built payload seeded with `--wheel`.
+
 ### Upstream model resolution
 
 The rollout manager needs the OpenAI-compatible URL, key and model name:
@@ -341,24 +431,17 @@ stripped.
 
 1. The official task image is pulled (if missing) and a long-lived container is
    started from it (`--entrypoint sleep infinity`); no agent server is involved.
-2. The portable Claude Code binary is installed (`docker cp`) or mounted
-   (`-v ...:ro`), then smoke-checked with `claude --version` inside the
-   container.
+2. The portable harness payload is installed (`docker cp`) or mounted
+   (`-v ...:ro`), then smoke-checked inside the container (`claude --version`
+   for Claude Code, the runtime executable's `--version` for DeepSeek Harness).
 3. The repository is reset to the dataset `base_commit`
    (`/testbed` for SWE-bench, `/<repo>` for SWE-rebench-V2) and pre-existing
    untracked files are recorded so image build artifacts never leak into the
    patch.
 4. One `rollout-manager` process is started on the host, bound to the Docker
-   bridge gateway, and the harness runs headless inside the container:
-
-   ```text
-   claude -p "<instruction>" --output-format stream-json --verbose \
-     --settings /tmp/harness/settings.json --model <model> \
-     --dangerously-skip-permissions --max-turns <n> --no-session-persistence
-   ```
-
-   with `IS_SANDBOX=1` (required for bypass-permissions as root), telemetry and
-   auto-update disabled, and `ANTHROPIC_BASE_URL` pointing at the proxy.
+   bridge gateway, and the harness runs headless inside the container (Claude
+   Code with `-p --output-format stream-json`; DeepSeek Harness with
+   `--profile headless --json`), with its model endpoint pointing at the proxy.
 5. The harness stream-json log is streamed line-by-line to the output directory
    (line-buffered, so `tail -f` shows events live while the run is in progress;
    stderr is interleaved); the proxy is finalized (`POST /rollout/finish`) and
@@ -371,11 +454,11 @@ stripped.
 ## Outputs
 
 Everything lands in the evaluator's structured output directory, under
-`.../harnesses/claude-code/` (separate from OpenHands runs, so resume and
-attempt bookkeeping never mix):
+`.../harnesses/<harness>/` (`claude-code` or `deepseek-harness`; separate from
+OpenHands runs, so resume and attempt bookkeeping never mix):
 
 ```text
-<eval_output_dir>/harnesses/claude-code/
+<eval_output_dir>/harnesses/<harness>/
 ├── metadata.json
 ├── output.jsonl                          # EvalOutput per instance (test_result.git_patch)
 ├── output_errors.jsonl
@@ -409,7 +492,7 @@ The per-instance **history JSON** mirrors the other benchmarks' dumps:
 | `trajectories`, `request_log`, `stats` | the rollout export's trajectory data |
 | `test_result.git_patch` | candidate patch (also in `output.jsonl`) |
 | `evaluation` | judge verdict (`true`/`false`/`null`), when a judge ran |
-| `run` | harness exit code, duration, timeout flag, stream-json `result` event |
+| `run` | harness exit code, duration, timeout flag, and the parsed terminal event (`stream-json` `result` for Claude Code, `final` for DeepSeek Harness) |
 | `rollout_export` | relative path to the trajectory export |
 | `repository` | repo path, base commit, ignored pre-existing untracked files |
 | `warnings` | non-fatal harness/proxy problems (e.g. no captures) |
@@ -553,7 +636,16 @@ uv run python scripts/harness_smoke.py \
 
 It creates a git repo in the container, scripts one Bash tool call through the
 capture proxy, and asserts that the patch and the trajectory export are
-produced.
+produced. DeepSeek Harness uses the same script (the shell tool is `bash`, and
+the runtime can be seeded from a local runtime directory or wheel):
+
+```bash
+uv run python scripts/harness_smoke.py \
+  --image <task-image-with-git-and-bash> \
+  --harness deepseek-harness \
+  --dsh-runtime /path/to/deepseek_harness_runtime/runtime \
+  --dist-mode mount
+```
 
 ## Debugging what the manager sends upstream
 
@@ -588,6 +680,8 @@ trajectory exports.
 | `Cannot use --dangerously-skip-permissions as root` | The adapter sets `IS_SANDBOX=1`; if you removed it, restore it or run as non-root |
 | `rollout-manager` not installed | Run `uv sync` (it is a core dependency) |
 | `harness binary ... does not run in the task container` | Wrong `--harness-platform`, musl vs glibc image, or a non-Linux container |
+| DeepSeek Harness runtime fails with a glibc error | The published runtime wheel is manylinux (glibc) only; use a glibc image or seed a payload built for that platform with `harness-prepare --harness deepseek-harness --wheel ...` |
+| Day-one DeepSeek Harness download is slow / host offline | Download the `deepseek_harness_runtime_bin` wheel elsewhere and seed the cache: `harness-prepare --harness deepseek-harness --wheel runtime.whl --sha256 <checksum>`; the cache is then reused with no network |
 | `Cannot create /opt/harness` | The image user cannot write `/opt`; pass `--harness-install-dir /tmp/harness-dist` |
 | Upstream 400 / unsupported params | The backend must accept Chat-Completions with function tools; try `--harness-model` pinning, `--harness-bare`, or disable provider betas (`--harness-header` / LLM-config headers) |
 | `rollout-manager did not become healthy ... (timed out)` while its log shows it running | The host-side control request was routed through an `http_proxy`/`all_proxy` in your shell. Control traffic bypasses proxies (and the manager subprocess gets `NO_PROXY` for loopback), so update to the current revision; the error now prints a TCP probe and the proxy environment. If it persists, check the host firewall for the Docker bridge and `--rollout-bind-host` |
@@ -597,13 +691,17 @@ trajectory exports.
 ## Adding another harness
 
 1. Implement an `install`/`run` adapter (see
-   `benchmarks/utils/harnesses/claude_code.py`) that installs a portable
+   `benchmarks/utils/harnesses/claude_code.py` or
+   `benchmarks/utils/harnesses/deepseek_harness.py`) that installs a portable
    distribution into the container and runs the CLI headless with its model
-   endpoint pointed at `proxy_url`.
-2. Register it in `benchmarks/utils/harnesses/base.py` (`_FACTORIES`) and add the
-   name to `SUPPORTED_HARNESSES`.
-3. Add a distribution source in `benchmarks/utils/harnesses/distribution.py` if
-   the harness does not use the Claude Code release feed.
+   endpoint pointed at `proxy_url`; reuse the shared `InstalledHarness` /
+   `HarnessRun` types from `base.py`.
+2. Register it in `benchmarks/utils/harnesses/base.py` (`_FACTORY_PATHS`) and add
+   the name to `SUPPORTED_HARNESSES` plus the per-harness maps in `config.py`
+   (default version, platforms, permission modes).
+3. Add a distribution source in `benchmarks/utils/harnesses/distribution.py` (and
+   a `harness-prepare` seed path) if the harness does not use the Claude Code
+   release feed or the DeepSeek Harness runtime wheel.
 
 The per-instance pipeline (`runner.py`), capture proxy lifecycle (`rollout.py`),
 Docker plumbing (`workspace.py`), patch extraction, judging and history dumping

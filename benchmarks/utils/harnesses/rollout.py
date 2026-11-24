@@ -695,6 +695,42 @@ def collect_tool_sets(export: dict[str, Any]) -> list[list[dict[str, Any]]]:
     return tools
 
 
+def parse_dsh_json_result(
+    log_path: str | os.PathLike[str],
+) -> dict[str, Any] | None:
+    """Read the terminal ``final`` (or ``error``) event from a ``dsh --json`` log.
+
+    The headless runner projects the run as newline-delimited events; the last
+    ``final`` event carries the answer, session identity and durable turn
+    reason. A run the runner aborts outside a turn writes an ``error`` event
+    instead, which is likewise returned so history dumps keep the failure.
+    """
+    path = Path(log_path)
+    if not path.is_file():
+        return None
+    final: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") == "final":
+                    final = event
+                elif event.get("type") == "error":
+                    error = event
+    except OSError:  # pragma: no cover - defensive
+        return None
+    return final if final is not None else error
+
+
 def parse_stream_json_result(log_path: str | os.PathLike[str]) -> dict[str, Any] | None:
     """Read the final ``result`` event from a ``claude -p --output-format stream-json`` log."""
     path = Path(log_path)

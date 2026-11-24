@@ -1,7 +1,7 @@
 """Configuration for blackbox agent harnesses.
 
-A "harness" here is an external coding agent CLI (Claude Code first) that runs
-*inside* the task container as a black box. Its model traffic is routed through
+A "harness" here is an external coding agent CLI (Claude Code or DeepSeek
+Harness) that runs *inside* the task container as a black box. Its model traffic is routed through
 the ``rollout-manager`` proxy, which captures every request/response pair and
 exports the session's trajectory series next to the evaluation outputs.
 
@@ -26,6 +26,16 @@ DEFAULT_HARNESS = "claude-code"
 # with the tests/docs when validating a new Claude Code release.
 DEFAULT_CLAUDE_CODE_VERSION = "2.1.331"
 
+# Pinned published DeepSeek Harness runtime carrier (PyPI wheel tag). The
+# repository checkout can be ahead of the last published runtime; evaluation
+# consumes the published one for reproducibility.
+DEFAULT_DEEPSEEK_HARNESS_VERSION = "0.2.2rc2"
+
+DEFAULT_HARNESS_VERSIONS = {
+    "claude-code": DEFAULT_CLAUDE_CODE_VERSION,
+    "deepseek-harness": DEFAULT_DEEPSEEK_HARNESS_VERSION,
+}
+
 # Claude Code assumes a 1M context window for model IDs it does not recognize.
 # Benchmark backends are usually much smaller, so we tell the harness the real
 # window (and where to compact) instead of letting it run to ~967K tokens.
@@ -49,15 +59,37 @@ DEFAULT_API_TIMEOUT_MS = 1_200_000
 # the same proxy. They are kept in the export but masked out of training.
 DEFAULT_EXCLUDE_REQUEST_CLASSES = "auxiliary"
 
-# Supported container platforms for the native Claude Code distribution.
-HARNESS_PLATFORMS = (
-    "linux-x64",
-    "linux-arm64",
-    "linux-x64-musl",
-    "linux-arm64-musl",
+# Supported container platforms per harness: Claude Code publishes glibc and musl
+# native binaries; the DeepSeek Harness runtime wheel is manylinux (glibc) only.
+HARNESS_PLATFORMS_BY_HARNESS = {
+    "claude-code": ("linux-x64", "linux-arm64", "linux-x64-musl", "linux-arm64-musl"),
+    "deepseek-harness": ("linux-x64", "linux-arm64"),
+}
+HARNESS_PLATFORMS = tuple(
+    dict.fromkeys(
+        platform
+        for platforms in HARNESS_PLATFORMS_BY_HARNESS.values()
+        for platform in platforms
+    )
 )
 
-SUPPORTED_HARNESSES = ("claude-code",)
+SUPPORTED_HARNESSES = tuple(DEFAULT_HARNESS_VERSIONS)
+
+# Permission-mode vocabulary accepted by each adapter. Claude Code passes its
+# own mode names through; DeepSeek Harness maps the shared vocabulary onto dsh
+# permission presets (danger-full-access / workspace-write / read-only).
+HARNESS_PERMISSION_MODES = {
+    "claude-code": ("auto", "bypassPermissions", "acceptEdits", "default", "plan"),
+    "deepseek-harness": (
+        "danger-full-access",
+        "workspace-write",
+        "read-only",
+        "bypassPermissions",
+        "acceptEdits",
+        "default",
+        "plan",
+    ),
+}
 
 # Structural request fields the rollout manager refuses to override: the
 # benchmark supplies sampling parameters only, not the conversation/tools.
@@ -80,7 +112,10 @@ class HarnessConfig(BaseModel):
     )
     version: str = Field(
         default=DEFAULT_CLAUDE_CODE_VERSION,
-        description="Pinned harness release (Claude Code npm version)",
+        description=(
+            "Pinned harness release (Claude Code npm version or the published "
+            "DeepSeek Harness runtime wheel version)"
+        ),
     )
     platform: str | None = Field(
         default=None,
@@ -163,7 +198,17 @@ class HarnessConfig(BaseModel):
         description="Run the harness in bypass-permissions mode",
     )
     permission_mode: (
-        Literal["auto", "bypassPermissions", "acceptEdits", "default", "plan"] | None
+        Literal[
+            "auto",
+            "bypassPermissions",
+            "acceptEdits",
+            "default",
+            "plan",
+            "danger-full-access",
+            "workspace-write",
+            "read-only",
+        ]
+        | None
     ) = Field(
         default=None,
         description=(
@@ -323,8 +368,11 @@ def add_harness_args(parser: ArgumentParser) -> None:
     group.add_argument(
         "--harness-version",
         type=str,
-        default=DEFAULT_CLAUDE_CODE_VERSION,
-        help="Pinned harness release (Claude Code npm version)",
+        default=None,
+        help=(
+            "Pinned harness release (default: the selected harness's pinned "
+            "version, e.g. Claude Code 2.1.331 or DeepSeek Harness 0.2.2rc2)"
+        ),
     )
     group.add_argument(
         "--harness-platform",
@@ -414,11 +462,16 @@ def add_harness_args(parser: ArgumentParser) -> None:
         "--harness-permission-mode",
         type=str,
         default=None,
-        choices=["auto", "bypassPermissions", "acceptEdits", "default", "plan"],
+        choices=list(
+            dict.fromkeys(
+                mode for modes in HARNESS_PERMISSION_MODES.values() for mode in modes
+            )
+        ),
         help=(
-            "Claude Code permission mode. 'auto' runs the auto-mode classifier "
-            "(its requests are captured as auxiliary); default: bypass "
-            "permissions (--dangerously-skip-permissions)"
+            "Harness permission mode. Claude Code: 'auto' runs the auto-mode "
+            "classifier (captured as auxiliary); default: bypass permissions. "
+            "DeepSeek Harness: danger-full-access (default), workspace-write or "
+            "read-only"
         ),
     )
     group.add_argument(
@@ -658,7 +711,7 @@ def harness_config_from_args(args: Any) -> HarnessConfig:
     """Build a :class:`HarnessConfig` from parsed CLI arguments."""
     return HarnessConfig(
         name=args.harness,
-        version=args.harness_version,
+        version=args.harness_version or DEFAULT_HARNESS_VERSIONS[args.harness],
         platform=args.harness_platform,
         cache_dir=args.harness_cache_dir or default_cache_dir(),
         install_dir=args.harness_install_dir,
@@ -714,6 +767,33 @@ def validate_harness_args(parser: ArgumentParser, args: Any) -> None:
         parser.error("--harness-context-window must be >= 0")
     if args.rollout_log_upstream_max_chars < 0:
         parser.error("--rollout-log-upstream-max-chars must be >= 0")
+    allowed_platforms = HARNESS_PLATFORMS_BY_HARNESS.get(
+        args.harness, HARNESS_PLATFORMS
+    )
+    if args.harness_platform and args.harness_platform not in allowed_platforms:
+        parser.error(
+            f"--harness-platform {args.harness_platform!r} is not available for "
+            f"{args.harness}; supported: {', '.join(allowed_platforms)}"
+        )
+    allowed_modes = HARNESS_PERMISSION_MODES.get(args.harness, ())
+    if (
+        args.harness_permission_mode
+        and args.harness_permission_mode not in allowed_modes
+    ):
+        parser.error(
+            f"--harness-permission-mode {args.harness_permission_mode!r} is not "
+            f"supported by {args.harness}; supported: {', '.join(allowed_modes)}"
+        )
+    if args.harness == "deepseek-harness":
+        if args.harness_bare:
+            parser.error("--harness-bare is Claude Code-specific")
+        if args.harness_auto_mode_model:
+            parser.error("--harness-auto-mode-model is Claude Code-specific")
+        if args.harness_max_turns is not None:
+            parser.error(
+                "--harness-max-turns is not supported by deepseek-harness; "
+                "bound the run with --conversation-timeout instead"
+            )
     parse_extra_env(args.harness_env)
     parse_headers(args.harness_header)
     try:
