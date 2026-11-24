@@ -29,6 +29,13 @@ Every emitted record has ``messages`` (strict OpenAI chat messages) and
 ``tools`` (one OpenAI function-tool list, resolved from the trajectory's
 ``tool_sets``/``turn.tool_set``); ``loss_mask`` and ``reasoning_content`` are
 kept as the aligned arrays the capture uses.
+
+One training-side normalization: when a request configured a single stop
+sequence and the reply finished on it (e.g. Claude Code's auto-mode classifier
+sends ``stop=["</block>"]`` and receives ``"<block>no"``), the API strips that
+sequence from the returned content, so the flattener appends it back and records
+the change in ``restored_stop_sequences``. Pass ``--no-restore-stop-sequences``
+for verbatim API content.
 """
 
 from __future__ import annotations
@@ -157,11 +164,70 @@ def _base_record(history: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _restore_stop_sequences(
+    trajectory: dict[str, Any], messages: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Reattach single stop sequences the API stripped from assistant replies.
+
+    Chat-Completions (like the Anthropic Messages API) removes the matched stop
+    sequence from the returned content. Claude Code's auto-mode classifier, for
+    example, sends ``stop: ["</block>"]`` and receives ``"<block>no"``; for
+    training the model output should be ``"<block>no</block>"``. Only turns
+    whose request configured exactly one stop sequence and that finished with
+    ``finish_reason == "stop"`` are changed, and only for non-empty text
+    assistant messages without tool calls. Multiple stop sequences are
+    ambiguous (the API does not report which one matched), so they are left
+    untouched.
+    """
+    turns_by_message: dict[int, dict[str, Any]] = {}
+    for turn in trajectory.get("turns") or []:
+        if isinstance(turn, dict) and isinstance(turn.get("message_index"), int):
+            turns_by_message[int(turn["message_index"])] = turn
+    restored: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if message.get("tool_calls"):
+            continue
+        turn = turns_by_message.get(index)
+        if turn is None or turn.get("finish_reason") != "stop":
+            continue
+        request = turn.get("request")
+        stop = request.get("stop") if isinstance(request, dict) else None
+        if isinstance(stop, str):
+            candidates = [stop]
+        elif isinstance(stop, list):
+            candidates = [value for value in stop if isinstance(value, str) and value]
+        else:
+            candidates = []
+        if len(candidates) != 1:
+            continue
+        sequence = candidates[0]
+        content = message.get("content")
+        if not isinstance(content, str) or not content or content.endswith(sequence):
+            continue
+        messages[index] = {**message, "content": content + sequence}
+        restored.append(
+            {
+                "message_index": index,
+                "turn_index": turn.get("turn_index"),
+                "stop_sequence": sequence,
+            }
+        )
+    return restored
+
+
 def flatten_trajectory(
-    history: dict[str, Any], trajectory: dict[str, Any]
+    history: dict[str, Any],
+    trajectory: dict[str, Any],
+    *,
+    restore_stop_sequences: bool = True,
 ) -> dict[str, Any]:
     """Flatten one captured trajectory fragment into a training-ready record."""
     messages = [message for message in trajectory.get("messages") or [] if message]
+    restored = (
+        _restore_stop_sequences(trajectory, messages) if restore_stop_sequences else []
+    )
     record = _base_record(history)
     record.update(
         {
@@ -181,6 +247,8 @@ def flatten_trajectory(
             "tools": resolve_tools(trajectory, history),
         }
     )
+    if restored:
+        record["restored_stop_sequences"] = restored
     loss_mask = _aligned(trajectory.get("loss_mask"), len(messages))
     if loss_mask is not None:
         record["loss_mask"] = loss_mask
@@ -371,13 +439,19 @@ def restore_verbatim_messages(
 
 
 def stitch_row(
-    history: dict[str, Any], *, verbatim: bool = False
+    history: dict[str, Any],
+    *,
+    verbatim: bool = False,
+    restore_stop_sequences: bool = True,
 ) -> dict[str, Any] | None:
     """Emit one linear trajectory for a history row (fragment stitching)."""
     trajectory = _longest_conversation_trajectory(history)
     if trajectory is None:
         return None
     messages = [message for message in trajectory.get("messages") or [] if message]
+    restored = (
+        _restore_stop_sequences(trajectory, messages) if restore_stop_sequences else []
+    )
     if verbatim:
         messages = restore_verbatim_messages(messages, history)
     record = _base_record(history)
@@ -411,6 +485,8 @@ def stitch_row(
             ],
         }
     )
+    if restored:
+        record["restored_stop_sequences"] = restored
     reasoning = _aligned(trajectory.get("reasoning_content"), len(messages))
     if reasoning is not None:
         record["reasoning_content"] = reasoning
@@ -425,10 +501,15 @@ def iter_records(
     verbatim: bool = False,
     train_excluded: bool = False,
     split_tool_sets: bool = False,
+    restore_stop_sequences: bool = True,
 ) -> Iterator[dict[str, Any]]:
     for history in histories:
         if mode == "stitch":
-            record = stitch_row(history, verbatim=verbatim)
+            record = stitch_row(
+                history,
+                verbatim=verbatim,
+                restore_stop_sequences=restore_stop_sequences,
+            )
             if record is not None:
                 yield record
             continue
@@ -446,7 +527,11 @@ def iter_records(
                     train_excluded=train_excluded,
                 )
                 continue
-            record = flatten_trajectory(history, trajectory)
+            record = flatten_trajectory(
+                history,
+                trajectory,
+                restore_stop_sequences=restore_stop_sequences,
+            )
             if excluded and train_excluded:
                 # The capture masked these turns; the caller explicitly wants
                 # their assistant responses as training targets instead.
@@ -571,6 +656,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Keep trajectories marked exclude_from_training (e.g. auxiliary calls)",
     )
     parser.add_argument(
+        "--no-restore-stop-sequences",
+        dest="restore_stop_sequences",
+        action="store_false",
+        help=(
+            "Keep assistant content exactly as returned by the API instead of "
+            "re-attaching a single configured stop sequence (e.g. the auto-mode "
+            "classifier's </block>) that the API strips from the reply"
+        ),
+    )
+    parser.add_argument(
         "--split-tool-sets",
         action="store_true",
         help=(
@@ -644,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
                     verbatim=args.stitch_verbatim,
                     train_excluded=args.train_excluded,
                     split_tool_sets=args.split_tool_sets,
+                    restore_stop_sequences=args.restore_stop_sequences,
                 )
             )
             if not records:

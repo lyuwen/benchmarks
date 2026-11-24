@@ -498,3 +498,142 @@ def test_main_split_tool_sets_output(
     assert [len(row["tools"]) for row in rows] == [1, 2]
     assert [row["split_index"] for row in rows] == [0, 1]
     assert "emitted=2" in capsys.readouterr().err
+
+
+def make_aux_stop_history(
+    *,
+    content: str = "<block>no",
+    stop: object = ["</block>"],
+    finish_reason: str = "stop",
+) -> dict:
+    history = make_history()
+    turn = {
+        "turn_index": 3,
+        "message_index": 2,
+        "trained": False,
+        "tool_set": None,
+        "request_class": "auxiliary",
+        "finish_reason": finish_reason,
+        "request": {
+            "model": "m",
+            "max_tokens": 256,
+            "messages": [],
+            "stop": stop,
+        },
+    }
+    trajectory = {
+        "trajectory_id": "s:aux",
+        "trajectory_index": 1,
+        "kind": "conversation",
+        "exclude_from_training": True,
+        "leaf_turn_index": 3,
+        "messages": [SYSTEM, USER, {"role": "assistant", "content": content}],
+        "loss_mask": [0, 0, 0],
+        "tool_sets": [],
+        "turns": [turn],
+    }
+    history["trajectories"] = [trajectory]
+    return history
+
+
+def test_auxiliary_stop_sequence_is_reattached() -> None:
+    history = make_aux_stop_history()
+    records = list(flatten.iter_records(iter([history]), include_excluded=True))
+    record = records[0]
+    assert record["messages"][2]["content"] == "<block>no</block>"
+    assert record["restored_stop_sequences"] == [
+        {"message_index": 2, "turn_index": 3, "stop_sequence": "</block>"}
+    ]
+    assert flatten.validate_record(record) == []
+
+
+def test_stop_sequence_restoration_is_conservative() -> None:
+    # Already terminated: nothing to do.
+    record = list(
+        flatten.iter_records(
+            iter([make_aux_stop_history(content="<block>no</block>")]),
+            include_excluded=True,
+        )
+    )[0]
+    assert record["messages"][2]["content"] == "<block>no</block>"
+    assert "restored_stop_sequences" not in record
+
+    # Truncated by max_tokens: the model never emitted the stop sequence.
+    record = list(
+        flatten.iter_records(
+            iter([make_aux_stop_history(finish_reason="length")]),
+            include_excluded=True,
+        )
+    )[0]
+    assert record["messages"][2]["content"] == "<block>no"
+    assert "restored_stop_sequences" not in record
+
+    # Multiple stop sequences are ambiguous (the API does not say which one hit).
+    record = list(
+        flatten.iter_records(
+            iter([make_aux_stop_history(stop=["</block>", "\n\n"])]),
+            include_excluded=True,
+        )
+    )[0]
+    assert record["messages"][2]["content"] == "<block>no"
+    assert "restored_stop_sequences" not in record
+
+    # A string stop is a valid single stop sequence.
+    record = list(
+        flatten.iter_records(
+            iter([make_aux_stop_history(stop="</verdict>")]),
+            include_excluded=True,
+        )
+    )[0]
+    assert record["messages"][2]["content"] == "<block>no</verdict>"
+
+
+def test_restore_stop_sequences_can_be_disabled() -> None:
+    history = make_aux_stop_history()
+    record = list(
+        flatten.iter_records(
+            iter([history]),
+            include_excluded=True,
+            restore_stop_sequences=False,
+        )
+    )[0]
+    assert record["messages"][2]["content"] == "<block>no"
+    assert "restored_stop_sequences" not in record
+
+
+def test_stop_sequence_restoration_skips_tool_calls() -> None:
+    history = make_aux_stop_history()
+    history["trajectories"][0]["messages"][2] = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_x",
+                "type": "function",
+                "function": {"name": "Bash", "arguments": "{}"},
+            }
+        ],
+    }
+    record = list(flatten.iter_records(iter([history]), include_excluded=True))[0]
+    assert record["messages"][2]["content"] == ""
+    assert "restored_stop_sequences" not in record
+
+
+def test_main_cli_no_restore_stop_sequences(tmp_path: Path) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_aux_stop_history()) + "\n")
+    output = tmp_path / "flat.jsonl"
+    assert (
+        flatten.main(
+            [
+                str(source),
+                "-o",
+                str(output),
+                "--include-excluded",
+                "--no-restore-stop-sequences",
+            ]
+        )
+        == 0
+    )
+    row = json.loads(output.read_text())
+    assert row["messages"][2]["content"] == "<block>no"

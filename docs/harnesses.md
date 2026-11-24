@@ -454,6 +454,11 @@ uv run harness-flatten-histories histories.jsonl -o flat-tools.jsonl --split-too
 # targets (implies --include-excluded)
 uv run harness-flatten-histories histories.jsonl -o flat-aux.jsonl --train-excluded
 
+# keep assistant content exactly as the API returned it (do not re-attach a
+# single configured stop sequence, e.g. the auto-mode classifier's </block>)
+uv run harness-flatten-histories histories.jsonl --include-excluded \
+  --no-restore-stop-sequences
+
 # fail on format/consistency problems (useful in CI)
 uv run harness-flatten-histories histories.jsonl --strict
 ```
@@ -470,6 +475,7 @@ Each output record contains at least:
 | `test_result.git_patch`, `evaluation`, `rollout_export`, `stats` | patch, judge verdict, raw capture path |
 | `trajectory_id`, `parent_trajectory_id`, `path_turn_indices`, `turn_indices` | tree position / request-log order (per-fragment mode) |
 | `fragmented`, `num_fragments`, `trajectory_ids` | fragment count (stitch mode) |
+| `restored_stop_sequences` | present when a single configured stop sequence was re-attached to a reply (see below) |
 
 Notes:
 
@@ -500,6 +506,19 @@ Notes:
 - `--train-excluded` does the same but recomputes `loss_mask` from the messages
   (assistant = 1) and sets `loss_mask_recomputed: true`, for using auxiliary
   turns as training data without re-capturing.
+- **Stop sequences are re-attached.** Chat-Completions and the Anthropic
+  Messages API strip the matched stop sequence from the returned content.
+  Claude Code's auto-mode classifier sends `stop: ["</block>"]` and gets back
+  `<block>no`, so training on that reply would omit the closing token the model
+  actually generated. The flattener appends a stop sequence back when the turn
+  (a) configured exactly one string stop sequence, (b) finished with
+  `finish_reason == "stop"`, and (c) the assistant reply is non-empty text
+  without tool calls and does not already end with it. Each change is recorded
+  in `restored_stop_sequences: [{message_index, turn_index, stop_sequence}]`.
+  Multiple stop sequences are ambiguous (the API does not report which matched)
+  and are left verbatim; use `--no-restore-stop-sequences` to disable the
+  normalization entirely (the raw capture and `*.history.json` are never
+  modified — this is a flatten-time, training-oriented change).
 - A summary (`histories=… emitted=… warnings=…`) is printed to stderr; warnings
   never change stdout, which is pure JSONL.
 
