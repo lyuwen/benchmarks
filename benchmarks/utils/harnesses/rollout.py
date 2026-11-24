@@ -158,6 +158,40 @@ def find_free_port(host: str) -> int:
         return int(sock.getsockname()[1])
 
 
+_CONTROL_OPENER: urllib.request.OpenerDirector | None = None
+
+_PROXY_ENV_NAMES = (
+    "http_proxy",
+    "HTTP_PROXY",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+)
+
+
+def _control_opener() -> urllib.request.OpenerDirector:
+    """Opener for the local control endpoint that ignores proxy settings.
+
+    Evaluation hosts commonly export ``http_proxy`` / ``all_proxy`` for model
+    backends or package mirrors. Those proxies must never be used for the
+    rollout-manager control endpoint (usually the Docker bridge gateway): a
+    blackholed proxy otherwise looks exactly like "rollout-manager did not
+    become healthy (timed out)".
+    """
+    global _CONTROL_OPENER
+    if _CONTROL_OPENER is None:
+        _CONTROL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _CONTROL_OPENER
+
+
+def _proxy_env_summary() -> str:
+    values = {name: os.environ[name] for name in _PROXY_ENV_NAMES if name in os.environ}
+    return json.dumps(values, sort_keys=True) if values else "none"
+
+
 def http_json(
     url: str,
     *,
@@ -165,7 +199,11 @@ def http_json(
     payload: dict[str, Any] | None = None,
     timeout: float = 30.0,
 ) -> tuple[int, dict[str, Any]]:
-    """Small JSON-over-HTTP helper used for the proxy control endpoints."""
+    """Small JSON-over-HTTP helper used for the proxy control endpoints.
+
+    Always connects directly: control traffic is host-local and must not be
+    affected by ``http_proxy``/``all_proxy`` environment variables.
+    """
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(  # noqa: S310 - loopback control endpoint
         url,
@@ -174,13 +212,14 @@ def http_json(
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        with _control_opener().open(request, timeout=timeout) as response:  # noqa: S310
             body = response.read()
             return response.status, _decode_json(body)
     except urllib.error.HTTPError as exc:
         return exc.code, _decode_json(exc.read())
-    except urllib.error.URLError as exc:
-        raise ConnectionError(str(exc.reason or exc)) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise ConnectionError(str(reason or exc)) from exc
 
 
 def _decode_json(raw: bytes | str) -> dict[str, Any]:
@@ -208,6 +247,15 @@ def spawn_rollout_manager(
     log_file = open(log_path, "a", encoding="utf-8")
     env = dict(os.environ)
     env.setdefault("PYTHONUNBUFFERED", "1")
+    # The proxy only talks to host-local services (task containers, the
+    # upstream model backend); make sure inherited proxy settings never apply
+    # to the loopback/bridge part of that traffic.
+    local_hosts = "127.0.0.1,localhost,host.docker.internal"
+    inherited_bypass = env.get("NO_PROXY") or env.get("no_proxy") or ""
+    env["NO_PROXY"] = ",".join(
+        part for part in (inherited_bypass.strip(","), local_hosts) if part
+    )
+    env["no_proxy"] = env["NO_PROXY"]
     try:
         process = subprocess.Popen(  # noqa: S603 - argv list, no shell
             argv,
@@ -273,7 +321,13 @@ class RolloutManager:
         self.process, self._log_file = self._spawn(
             self.command(), log_path=self.config.log_path
         )
-        self.wait_ready(self.config.start_timeout_sec)
+        try:
+            self.wait_ready(self.config.start_timeout_sec)
+        except BaseException:
+            # Never leak a capture proxy that failed its readiness probe: the
+            # evaluation will retry with a fresh one.
+            self.stop()
+            raise
 
     def wait_ready(self, timeout: float | None = None) -> None:
         deadline = time.monotonic() + (timeout if timeout is not None else 90.0)
@@ -297,7 +351,10 @@ class RolloutManager:
             time.sleep(HEALTH_POLL_INTERVAL_SEC)
         raise RolloutManagerError(
             "rollout-manager did not become healthy within the timeout "
-            f"({last_error or 'no response'}). Log:\n{self._log_tail()}"
+            f"({last_error or 'no response'}). "
+            f"Control endpoint {self.base_url}: "
+            f"{_probe_endpoint(self.config.host, self.port)}. "
+            f"Proxy env: {_proxy_env_summary()}. Log:\n{self._log_tail()}"
         )
 
     def status(self) -> RolloutManagerStatus:
@@ -371,6 +428,16 @@ class RolloutManager:
         except OSError:  # pragma: no cover - defensive
             return ""
         return "\n".join(content.splitlines()[-lines:])
+
+
+def _probe_endpoint(host: str, port: int, timeout: float = 3.0) -> str:
+    """Best-effort TCP diagnostic for the control endpoint (used on failure)."""
+    probe_host = "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
+    try:
+        with socket.create_connection((probe_host, port), timeout=timeout):
+            return "tcp connect ok"
+    except OSError as exc:
+        return f"tcp connect failed: {type(exc).__name__}: {exc}"
 
 
 def _status_from_payload(payload: dict[str, Any]) -> RolloutManagerStatus:

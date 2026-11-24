@@ -351,6 +351,7 @@ produced.
 | `harness binary ... does not run in the task container` | Wrong `--harness-platform`, musl vs glibc image, or a non-Linux container |
 | `Cannot create /opt/harness` | The image user cannot write `/opt`; pass `--harness-install-dir /tmp/harness-dist` |
 | Upstream 400 / unsupported params | The backend must accept Chat-Completions with function tools; try `--harness-model` pinning, `--harness-bare`, or disable provider betas (`--harness-header` / LLM-config headers) |
+| `rollout-manager did not become healthy ... (timed out)` while its log shows it running | The host-side control request was routed through an `http_proxy`/`all_proxy` in your shell. Control traffic bypasses proxies (and the manager subprocess gets `NO_PROXY` for loopback), so update to the current revision; the error now prints a TCP probe and the proxy environment. If it persists, check the host firewall for the Docker bridge and `--rollout-bind-host` |
 | Proxy unreachable from container | Use the default Docker bridge; `--rollout-bind-host` can pin the host interface |
 | Empty patch / zero captures | Harness never reached the model (check `logs/*.harness.jsonl` and `logs/*.rollout-manager.log`); the instance is scored unresolved |
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,6 +20,7 @@ from benchmarks.utils.harnesses.rollout import (
     collect_tool_sets,
     export_summary,
     find_free_port,
+    http_json,
     load_rollout_export,
     main_trajectory,
     normalize_upstream_base_url,
@@ -343,3 +346,82 @@ def test_parse_stream_json_result(tmp_path: Path) -> None:
 
 def test_parse_stream_json_result_missing(tmp_path: Path) -> None:
     assert parse_stream_json_result(tmp_path / "nope.jsonl") is None
+
+
+def test_http_json_ignores_environment_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib API
+            body = json.dumps({"ok": True}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # A blackholed proxy in the environment must not affect control traffic.
+        for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            monkeypatch.setenv(name, "http://127.0.0.1:1")
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        port = server.server_address[1]
+        code, payload = http_json(f"http://127.0.0.1:{port}/healthz", timeout=5)
+        assert code == 200
+        assert payload == {"ok": True}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_wait_ready_timeout_reports_diagnostics(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    manager = RolloutManager(
+        config,
+        spawn=cast(Any, lambda argv, *, log_path: (FakeProcess(returncode=None), None)),
+        request=cast(
+            Any, lambda *a, **k: (_ for _ in ()).throw(ConnectionError("timed out"))
+        ),
+    )
+    manager.port = find_free_port("127.0.0.1")
+    manager.process = cast(Any, FakeProcess(returncode=None))
+    with pytest.raises(RolloutManagerError) as excinfo:
+        manager.wait_ready(timeout=0.1)
+    message = str(excinfo.value)
+    assert "Control endpoint" in message
+    assert "Proxy env" in message
+    assert "tcp connect failed" in message
+
+
+def test_start_stops_process_when_never_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(tmp_path)
+    config.start_timeout_sec = 0.1
+    process = FakeProcess(returncode=None)
+
+    def fake_spawn(argv, *, log_path):
+        Path(log_path).write_text("Running on http://172.17.0.1:1234\n")
+        return process, open(log_path)
+
+    monkeypatch.setattr(rollout_module, "require_rollout_manager", lambda: None)
+    manager = RolloutManager(
+        config,
+        spawn=cast(Any, fake_spawn),
+        request=cast(
+            Any, lambda *a, **k: (_ for _ in ()).throw(ConnectionError("timed out"))
+        ),
+    )
+    # Bind a real free port on the configured host so the probe diagnostic works.
+    manager.port = find_free_port("127.0.0.1")
+    with pytest.raises(RolloutManagerError, match="did not become healthy"):
+        manager.start()
+    assert process.terminated is True
+    assert manager.process is None
