@@ -359,8 +359,10 @@ stripped.
 
    with `IS_SANDBOX=1` (required for bypass-permissions as root), telemetry and
    auto-update disabled, and `ANTHROPIC_BASE_URL` pointing at the proxy.
-5. The harness stream-json log is streamed to the output directory; the proxy is
-   finalized (`POST /rollout/finish`) and the export is validated.
+5. The harness stream-json log is streamed line-by-line to the output directory
+   (line-buffered, so `tail -f` shows events live while the run is in progress;
+   stderr is interleaved); the proxy is finalized (`POST /rollout/finish`) and
+   the export is validated.
 6. `git add -A` + a `harness patch` commit + `git diff <base_commit> HEAD`
    yields the candidate patch (pre-existing untracked files are removed from it).
 7. The optional `--judge` runs exactly like in the regular inference entry

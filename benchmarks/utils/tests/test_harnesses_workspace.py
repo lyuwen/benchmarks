@@ -220,6 +220,49 @@ def test_cleanup_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     assert removed == ["container123"]
 
 
+def test_run_streaming_flushes_each_line_for_live_tailing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log_path = tmp_path / "harness.jsonl"
+    observed: list[str] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            self.stdout = self._lines()
+            self.returncode = 0
+
+        def _lines(self):
+            yield "first event\n"
+            # Runs after run_streaming wrote the first line but before the
+            # process exits: the file must already contain it.
+            observed.append(log_path.read_text())
+            yield "second event\n"
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self) -> None:
+            pass
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(
+        workspace_module.subprocess,
+        "Popen",
+        lambda argv, **kwargs: FakePopen(argv, **kwargs),
+    )
+    ws = make_workspace()
+    ws.run_streaming(
+        ["/opt/harness/claude", "-p", "hi"],
+        cwd="/testbed",
+        log_path=log_path,
+        timeout_sec=30,
+    )
+    assert observed == ["first event\n"]
+    assert log_path.read_text() == "first event\nsecond event\n"
+
+
 def test_run_streaming_streams_to_log_and_wraps_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -344,7 +344,10 @@ class DockerContainerWorkspace:
         timed_out = False
         tail: list[str] = []
         process: subprocess.Popen[str] | None = None
-        with open(path, "w", encoding="utf-8") as log:
+        # Line-buffered so the file can be tailed live while the harness runs;
+        # otherwise Python's block buffering would delay events until the buffer
+        # fills or the process exits.
+        with open(path, "w", encoding="utf-8", buffering=1) as log:
             try:
                 process = subprocess.Popen(  # noqa: S603 - argv list, no shell
                     docker_argv,
