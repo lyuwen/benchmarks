@@ -61,9 +61,44 @@ proxy uses the real upstream key from the LLM config.
 - ~380 MiB of disk and a one-time download for the pinned native Claude Code
   distribution (cached under `~/.cache/openhands-benchmarks/harness-dist`).
 
-The first run in an environment builds the portable distribution; subsequent
-runs are offline-cache hits. Pre-warm it with `--n-limit 0` on a small
-`--select` file, or simply start any run once.
+### Preparing the harness distribution in advance
+
+The evaluation entry points build/verify the distribution in the main process
+before workers start, so it is downloaded exactly once per host. To fetch it
+ahead of time (login node, image build, shared cache) use the dedicated command:
+
+```bash
+uv run harness-prepare                     # download the pinned release
+uv run harness-prepare --harness-cache-dir /shared/harness-dist
+uv run harness-prepare --check             # cached? (no network)
+```
+
+Resulting cache layout:
+
+```text
+<cache>/claude-code/<version>/<platform>/{claude, manifest.json}
+# e.g. ~/.cache/openhands-benchmarks/harness-dist/claude-code/2.1.331/linux-x64/
+```
+
+For **air-gapped hosts**, download on a machine with network access and seed the
+cache from the binary (checksum is optional but recommended; `harness-prepare`
+prints it, and the release manifest publishes it):
+
+```bash
+# with network:
+curl -fsSL -o claude \
+  https://downloads.claude.ai/claude-code-releases/2.1.331/linux-x64/claude
+sha256sum claude
+
+# on the eval host:
+uv run harness-prepare --binary /path/to/claude --sha256 <checksum>
+```
+
+Seed mode verifies size/checksum (and runs `claude --version` when the binary
+matches the host platform) before writing the cache, so a truncated or wrong
+platform download fails fast. Point evaluation runs at a custom cache with
+`--harness-cache-dir`; the distribution is then copied/mounted into each task
+container (see `--harness-dist-mode`).
 
 ## Usage
 

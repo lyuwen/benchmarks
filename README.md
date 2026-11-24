@@ -132,7 +132,9 @@ uv run swebench-infer-harnesses .llm_config/model.json --harness claude-code --j
 uv run swerebenchv2-infer-harnesses .llm_config/model.json --harness claude-code --judge swerebenchv2
 ```
 
-Compaction is configured explicitly for these runs
+Pre-download the pinned harness distribution ahead of a run with
+`uv run harness-prepare` (or seed it offline from an existing binary with
+`--binary`). Compaction is configured explicitly for these runs
 (`--harness-context-window`, `--harness-compaction-threshold`). See
 **[docs/harnesses.md](docs/harnesses.md)** for architecture, configuration,
 outputs and troubleshooting.

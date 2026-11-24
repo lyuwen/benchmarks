@@ -146,7 +146,7 @@ def read_manifest(directory: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _load_cached(
+def load_cached_distribution(
     directory: Path, *, harness: str, version: str, platform_key: str
 ) -> HarnessDistribution | None:
     manifest = read_manifest(directory)
@@ -256,7 +256,7 @@ def ensure_distribution(
         config.expanded_cache_dir, harness, version, platform_key
     )
 
-    cached = _load_cached(
+    cached = load_cached_distribution(
         directory, harness=harness, version=version, platform_key=platform_key
     )
     if cached is not None:
@@ -283,7 +283,7 @@ def ensure_distribution(
         raise DistributionError(
             f"Harness binary {binary_path} is unexpectedly small ({size} bytes)"
         )
-    if _host_can_run(platform_key):
+    if host_can_run(platform_key):
         verify_binary(binary_path)
 
     distribution = HarnessDistribution(
@@ -310,7 +310,7 @@ def ensure_distribution(
     return distribution
 
 
-def _host_can_run(platform_key: str) -> bool:
+def host_can_run(platform_key: str) -> bool:
     """Whether the host itself can execute the extracted binary (for checks)."""
     try:
         return detect_platform() == platform_key
