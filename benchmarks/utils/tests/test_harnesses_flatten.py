@@ -189,6 +189,21 @@ def test_projects_total_turn_set_into_single_stitched_record() -> None:
     assert flatten.validate_record(record) == []
 
 
+def test_train_excluded_recomputes_loss_mask() -> None:
+    history = make_history(excluded=True)
+    default = list(flatten.iter_records(iter([history])))
+    assert [record["trajectory_id"] for record in default] == ["s:1"]
+
+    included = list(flatten.iter_records(iter([history]), train_excluded=True))
+    assert [record["trajectory_id"] for record in included] == ["s:1", "s:2"]
+    masked = included[1]
+    assert masked["exclude_from_training"] is True
+    assert masked["loss_mask_recomputed"] is True
+    # s:2 messages: system, user, assistant(tool call), tool, assistant
+    assert masked["loss_mask"] == [0, 0, 1, 0, 1]
+    assert flatten.validate_record(masked) == []
+
+
 def test_stitch_verbatim_restores_original_tool_arguments() -> None:
     history = make_history()
     # The captured response (turn 1) kept the original cd-prefixed command.
@@ -226,6 +241,53 @@ def test_resolve_tools_falls_back_to_top_level_tools() -> None:
     assert flatten.resolve_tools({"tool_sets": []}, {"tools": []}) == []
 
 
+def test_resolve_tools_respects_explicitly_empty_tool_sets() -> None:
+    history = make_history()
+    tool_less = {
+        "trajectory_id": "s:aux",
+        "messages": [SYSTEM, USER, ASSISTANT_2],
+        "tool_sets": [],
+        "turns": [
+            {
+                "turn_index": 3,
+                "message_index": 2,
+                "trained": False,
+                "tool_set": None,
+            }
+        ],
+    }
+    assert flatten.resolve_tools(tool_less, history) == []
+
+    record = flatten.flatten_trajectory(history, tool_less)
+    assert record["tools"] == []
+    assert flatten.validate_record(record) == []
+
+
+def test_stitch_ignores_excluded_trajectories() -> None:
+    history = make_history()
+    # Give the auxiliary (excluded) fragment the highest leaf turn index so a
+    # naive "longest conversation" pick would choose it.
+    auxiliary = {
+        "trajectory_id": "s:aux",
+        "trajectory_index": 2,
+        "kind": "conversation",
+        "exclude_from_training": True,
+        "leaf_turn_index": 99,
+        "messages": [SYSTEM, USER, ASSISTANT_2],
+        "loss_mask": [0, 0, 0],
+        "tool_sets": [],
+        "turns": [{"turn_index": 99, "message_index": 2, "trained": False}],
+    }
+    history["trajectories"].append(auxiliary)
+    record = flatten.stitch_row(history)
+    assert record is not None
+    main = [t for t in history["trajectories"] if not t.get("exclude_from_training")][
+        -1
+    ]
+    assert record["messages"] == main["messages"]
+    assert record["tools"] == [TOOL]
+
+
 def test_validate_record_reports_problems() -> None:
     record = {
         "instance_id": "i",
@@ -235,11 +297,11 @@ def test_validate_record_reports_problems() -> None:
             {"role": "tool", "tool_call_id": "missing", "content": "x"},
             {"role": "assistant", "tool_calls": [{"id": "c", "function": {}}]},
         ],
-        "tools": [],
+        "tools": "nope",
         "loss_mask": [0, 1],
     }
     problems = flatten.validate_record(record)
-    assert any("tools list is empty" in problem for problem in problems)
+    assert any("tools is not a list" in problem for problem in problems)
     assert any("has no preceding call" in problem for problem in problems)
     assert any("loss_mask is not aligned" in problem for problem in problems)
 

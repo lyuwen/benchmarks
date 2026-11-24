@@ -524,6 +524,15 @@ def add_harness_args(parser: ArgumentParser) -> None:
         help="Seconds the rollout manager may take to finalize its export",
     )
     group.add_argument(
+        "--harness-include-auxiliary",
+        action="store_true",
+        help=(
+            "Train auxiliary requests (auto-mode classifier/security-monitor "
+            "calls, session titles) instead of masking them out: equivalent to "
+            "--exclude-request-classes ''"
+        ),
+    )
+    group.add_argument(
         "--exclude-request-classes",
         type=str,
         default=DEFAULT_EXCLUDE_REQUEST_CLASSES,
@@ -646,7 +655,9 @@ def harness_config_from_args(args: Any) -> HarnessConfig:
         rollout_bind_host=args.rollout_bind_host,
         rollout_start_timeout_sec=args.rollout_start_timeout,
         rollout_finish_timeout_sec=args.rollout_finish_timeout,
-        exclude_request_classes=args.exclude_request_classes,
+        exclude_request_classes=(
+            "" if args.harness_include_auxiliary else args.exclude_request_classes
+        ),
         skip_image_pull=args.skip_image_pull,
     )
 
@@ -674,3 +685,11 @@ def validate_harness_args(parser: ArgumentParser, args: Any) -> None:
         )
     except ValueError as exc:
         parser.error(str(exc))
+    if args.harness_include_auxiliary and args.exclude_request_classes not in (
+        "",
+        DEFAULT_EXCLUDE_REQUEST_CLASSES,
+    ):
+        parser.error(
+            "--harness-include-auxiliary conflicts with an explicit "
+            "--exclude-request-classes; pass --exclude-request-classes '' instead"
+        )

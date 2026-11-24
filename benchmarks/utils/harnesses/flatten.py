@@ -115,19 +115,27 @@ def resolve_tools(
     """Resolve the OpenAI function-tool list used by one captured trajectory."""
     tool_sets = trajectory.get("tool_sets")
     turns = [turn for turn in trajectory.get("turns") or [] if isinstance(turn, dict)]
-    if isinstance(tool_sets, list) and tool_sets:
+    if isinstance(tool_sets, list):
+        # An explicit empty list means the requests carried no tools at all
+        # (e.g. auto-mode classifier / security-monitor calls). Never fall back
+        # to another trajectory's tools in that case.
+        if not tool_sets:
+            return []
         # Prefer the tool set of the last turn (tools can change mid-session).
         for turn in reversed(turns):
             index = turn.get("tool_set")
-            if isinstance(index, int) and 0 <= index < len(tool_sets):
-                candidate = tool_sets[index]
-                if _is_openai_tool_list(candidate):
-                    return candidate
+            if (
+                isinstance(index, int)
+                and 0 <= index < len(tool_sets)
+                and _is_openai_tool_list(tool_sets[index])
+            ):
+                return tool_sets[index]
         for candidate in tool_sets:
             if _is_openai_tool_list(candidate):
                 return candidate
+        return []
 
-    # Fallbacks for older/foreign history dumps.
+    # Fallbacks for older/foreign history dumps without per-trajectory sets.
     top_tools = history.get("tools")
     if _is_openai_tool_list(top_tools):
         return top_tools
@@ -231,6 +239,7 @@ def _longest_conversation_trajectory(
         for trajectory in history.get("trajectories") or []
         if isinstance(trajectory, dict)
         and trajectory.get("kind", "conversation") == "conversation"
+        and not trajectory.get("exclude_from_training")
     ]
     if not candidates:
         return None
@@ -344,6 +353,7 @@ def iter_records(
     mode: str = "trajectories",
     include_excluded: bool = False,
     verbatim: bool = False,
+    train_excluded: bool = False,
 ) -> Iterator[dict[str, Any]]:
     for history in histories:
         if mode == "stitch":
@@ -354,9 +364,19 @@ def iter_records(
         for trajectory in history.get("trajectories") or []:
             if not isinstance(trajectory, dict):
                 continue
-            if trajectory.get("exclude_from_training") and not include_excluded:
+            excluded = bool(trajectory.get("exclude_from_training"))
+            if excluded and not (include_excluded or train_excluded):
                 continue
-            yield flatten_trajectory(history, trajectory)
+            record = flatten_trajectory(history, trajectory)
+            if excluded and train_excluded:
+                # The capture masked these turns; the caller explicitly wants
+                # their assistant responses as training targets instead.
+                record["loss_mask"] = [
+                    1 if message.get("role") == "assistant" else 0
+                    for message in record["messages"]
+                ]
+                record["loss_mask_recomputed"] = True
+            yield record
 
 
 # ---------------------------------------------------------------------------
@@ -374,9 +394,7 @@ def validate_record(record: dict[str, Any]) -> list[str]:
     tools = record.get("tools")
     if not isinstance(tools, list):
         problems.append(f"{label}: tools is not a list")
-    elif not tools:
-        problems.append(f"{label}: tools list is empty")
-    else:
+    elif tools:
         for tool in tools:
             if not isinstance(tool, dict) or tool.get("type") != "function":
                 problems.append(f"{label}: tool is not an OpenAI function tool")
@@ -474,6 +492,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Keep trajectories marked exclude_from_training (e.g. auxiliary calls)",
     )
     parser.add_argument(
+        "--train-excluded",
+        action="store_true",
+        help=(
+            "Keep trajectories masked out at capture time (e.g. auto-mode "
+            "classifier calls) and recompute their loss_mask so assistant "
+            "responses are trained. Implies --include-excluded."
+        ),
+    )
+    parser.add_argument(
         "--stitch-verbatim",
         action="store_true",
         help=(
@@ -523,8 +550,9 @@ def main(argv: list[str] | None = None) -> int:
                 iter_records(
                     iter([history]),
                     mode=args.mode,
-                    include_excluded=args.include_excluded,
+                    include_excluded=(args.include_excluded or args.train_excluded),
                     verbatim=args.stitch_verbatim,
+                    train_excluded=args.train_excluded,
                 )
             )
             if not records:

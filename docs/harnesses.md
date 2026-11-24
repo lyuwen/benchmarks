@@ -197,6 +197,7 @@ container and the proxy runs next to the local Docker daemon.
 | `--harness-bare` | off | Run Claude Code with `--bare` (no hooks/CLAUDE.md/skills/MCP discovery) |
 | `--harness-no-skip-permissions` | off | Do not use bypass-permissions mode |
 | `--harness-permission-mode` | unset | Claude Code permission mode: `auto`, `bypassPermissions`, `acceptEdits`, `default`, `plan` |
+| `--harness-include-auxiliary` | off | Train auxiliary requests (auto-mode classifier, titles) instead of masking them (`--exclude-request-classes ''`) |
 | `--harness-auto-mode-model` | main agent model | Optional model ID for auto-mode classifier requests |
 | `--harness-env KEY=VALUE` | none | Extra environment variable (repeatable) |
 | `--harness-arg ARG` | none | Extra harness CLI argument (repeatable) |
@@ -281,6 +282,29 @@ How this is wired:
   auxiliary`): they stay in the export (`excluded_turns`,
   `exclude_from_training=true`, `loss_mask=0`) but `harness-flatten-histories`
   drops them unless you pass `--include-excluded`.
+
+How to read the masks in an auto-mode history dump:
+
+- The **main conversation** is split into fragment trajectories by the capture
+  tree; each fragment trains only the turns it owns (`loss_mask=1` on those
+  assistant messages) while the shared prefix is context (`loss_mask=0`). A
+  29-request auto-mode run, for example, had 6 main fragments with 17 trained
+  turns in total and the final answer trained in the last fragment.
+- The **auxiliary** (security-monitor/classifier) calls are the only trajectories
+  whose `loss_mask` is entirely zero — by design, not a missing assistant
+  target. Their assistant verdicts (`<block>no`, …) are masked at capture time.
+
+To train auxiliary calls as well, either capture differently or post-process:
+
+```bash
+# capture-side: do not mask any request class (rerun needed)
+uv run swebench-infer-harnesses ... --harness-permission-mode auto --harness-include-auxiliary
+# equivalent explicit form
+uv run swebench-infer-harnesses ... --harness-permission-mode auto --exclude-request-classes ""
+
+# post-hoc: recompute loss masks for an existing capture
+uv run harness-flatten-histories histories.jsonl -o flat.jsonl --train-excluded
+```
 
 Verified against Claude Code 2.1.331: with auto mode and a network Bash command
 that the classifier reviews, one run produced 12 requests — 2 `main` turns and
@@ -418,6 +442,11 @@ uv run harness-flatten-histories histories.jsonl -o flat-stitched.jsonl --mode s
 # normalized them before replaying history (e.g. stripped "cd /testbed &&")
 uv run harness-flatten-histories histories.jsonl --mode stitch --stitch-verbatim
 
+# train already-masked auxiliary calls (auto-mode classifier/security monitor):
+# keeps excluded trajectories and recomputes loss_mask so assistant messages are
+# targets (implies --include-excluded)
+uv run harness-flatten-histories histories.jsonl -o flat-aux.jsonl --train-excluded
+
 # fail on format/consistency problems (useful in CI)
 uv run harness-flatten-histories histories.jsonl --strict
 ```
@@ -427,7 +456,7 @@ Each output record contains at least:
 | Key | Meaning |
 | --- | --- |
 | `messages` | strict OpenAI Chat-Completions messages (`role`, `content`, assistant `tool_calls` with JSON-string `function.arguments`, `tool_call_id`) |
-| `tools` | one OpenAI function-tool list, resolved from the trajectory's `tool_sets`/`turn.tool_set` |
+| `tools` | one OpenAI function-tool list, resolved from the trajectory's `tool_sets`/`turn.tool_set`; `[]` for requests that carried no tools (auto-mode classifier/security monitor) |
 | `loss_mask`, `reasoning_content` | message-aligned arrays from the capture (`reasoning_content` is kept out of `messages` by design) |
 | `loss_mask` sum / `trained_turns` | which turns of the record are training targets |
 | `instance_id`, `attempt`, `harness`, `harness_version`, `model`, `instruction` | provenance |
@@ -442,11 +471,20 @@ Notes:
   replayed tool inputs (Bash `cd <cwd> &&` stripping, Edit defaults). Use
   `--mode stitch` (optionally `--stitch-verbatim`) for one trajectory per
   session, or keep fragments as separate loss-masked samples.
+- Tool lists are per request: the history dump keeps deduplicated variants in
+  `trajectories[].tool_sets` with a `turns[].tool_set` index. The flattened
+  `tools` field is the variant used by the trajectory's last turn (falling back
+  to the first variant), or `[]` when the request was tool-less. The root-level
+  `tools` in `*.history.json` is only a union/provenance view of all variants;
+  do not feed it to a trainer directly.
 - `tool.message` ids are checked against preceding assistant calls; trailing
   assistant tool calls without results are allowed (that continuation lives in
   the next fragment).
 - `--include-excluded` keeps trajectories masked out of training
   (`exclude_from_training`, e.g. auxiliary calls); they are dropped by default.
+- `--train-excluded` does the same but recomputes `loss_mask` from the messages
+  (assistant = 1) and sets `loss_mask_recomputed: true`, for using auxiliary
+  turns as training data without re-capturing.
 - A summary (`histories=… emitted=… warnings=…`) is printed to stderr; warnings
   never change stdout, which is pure JSONL.
 

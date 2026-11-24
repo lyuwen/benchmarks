@@ -159,6 +159,17 @@ def test_build_harness_config_permission_mode_default_model(tmp_path: Path) -> N
     assert config.auto_mode_model is None
 
 
+def test_build_harness_config_train_auxiliary(tmp_path: Path) -> None:
+    args = make_args(tmp_path, [])
+    _, config = build_harness_config(args)
+    assert config.exclude_request_classes == "auxiliary"
+
+    args = make_args(tmp_path, ["--harness-include-auxiliary"])
+    _, config = build_harness_config(args)
+    # No request classes excluded: auxiliary turns become training targets.
+    assert config.exclude_request_classes == ""
+
+
 def test_build_harness_config_no_llm_params(tmp_path: Path) -> None:
     args = make_args(
         tmp_path, ["--no-llm-request-params", "--request-param", "seed=42"]
