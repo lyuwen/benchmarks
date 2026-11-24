@@ -309,6 +309,69 @@ The per-instance **history JSON** mirrors the other benchmarks' dumps:
 | `repository` | repo path, base commit, ignored pre-existing untracked files |
 | `warnings` | non-fatal harness/proxy problems (e.g. no captures) |
 
+## Building training data: flattening histories
+
+`harness-flatten-histories` turns per-instance history dumps into JSONL records
+that carry **OpenAI Chat-Completions `messages` and `tools`** directly.
+
+Collect the history files first (a real JSONL file, or plain `cat` of the
+pretty-printed JSON files — the reader handles both):
+
+```bash
+# either real JSONL ...
+jq -c . eval_outputs/.../harnesses/claude-code/*.history.json > histories.jsonl
+# ... or a concatenation of the pretty-printed documents
+cat eval_outputs/.../harnesses/claude-code/*.history.json > histories.jsonl
+
+uv run harness-flatten-histories histories.jsonl -o flat.jsonl
+```
+
+Two output shapes:
+
+```bash
+# default: one loss-masked record per captured trajectory fragment
+uv run harness-flatten-histories histories.jsonl -o flat-fragments.jsonl
+
+# one linear record per history row (the 6 fragments of a fragmented Claude Code
+# session become a single 25-message trajectory)
+uv run harness-flatten-histories histories.jsonl -o flat-stitched.jsonl --mode stitch
+
+# same, but restore the model's original tool-call arguments where Claude Code
+# normalized them before replaying history (e.g. stripped "cd /testbed &&")
+uv run harness-flatten-histories histories.jsonl --mode stitch --stitch-verbatim
+
+# fail on format/consistency problems (useful in CI)
+uv run harness-flatten-histories histories.jsonl --strict
+```
+
+Each output record contains at least:
+
+| Key | Meaning |
+| --- | --- |
+| `messages` | strict OpenAI Chat-Completions messages (`role`, `content`, assistant `tool_calls` with JSON-string `function.arguments`, `tool_call_id`) |
+| `tools` | one OpenAI function-tool list, resolved from the trajectory's `tool_sets`/`turn.tool_set` |
+| `loss_mask`, `reasoning_content` | message-aligned arrays from the capture (`reasoning_content` is kept out of `messages` by design) |
+| `loss_mask` sum / `trained_turns` | which turns of the record are training targets |
+| `instance_id`, `attempt`, `harness`, `harness_version`, `model`, `instruction` | provenance |
+| `test_result.git_patch`, `evaluation`, `rollout_export`, `stats` | patch, judge verdict, raw capture path |
+| `trajectory_id`, `parent_trajectory_id`, `path_turn_indices`, `turn_indices` | tree position / request-log order (per-fragment mode) |
+| `fragmented`, `num_fragments`, `trajectory_ids` | fragment count (stitch mode) |
+
+Notes:
+
+- The capture is one fragment per trajectory leaf; a single linear Claude Code
+  conversation can produce several fragments because the client normalizes
+  replayed tool inputs (Bash `cd <cwd> &&` stripping, Edit defaults). Use
+  `--mode stitch` (optionally `--stitch-verbatim`) for one trajectory per
+  session, or keep fragments as separate loss-masked samples.
+- `tool.message` ids are checked against preceding assistant calls; trailing
+  assistant tool calls without results are allowed (that continuation lives in
+  the next fragment).
+- `--include-excluded` keeps trajectories masked out of training
+  (`exclude_from_training`, e.g. auxiliary calls); they are dropped by default.
+- A summary (`histories=… emitted=… warnings=…`) is printed to stderr; warnings
+  never change stdout, which is pure JSONL.
+
 ## Reliability notes
 
 - Harness-level failures (non-zero exit, timeout, empty capture) are **outcomes,

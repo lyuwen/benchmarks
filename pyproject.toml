@@ -48,6 +48,7 @@ dependencies = [
 [project.scripts]
 validate-cfg = "benchmarks.scripts.validate_cfg:main"
 harness-prepare = "benchmarks.utils.harnesses.prepare:main"
+harness-flatten-histories = "benchmarks.utils.harnesses.flatten:main"
 swebench-infer = "benchmarks.swebench.run_infer:main"
 swebench-infer-harnesses = "benchmarks.swebench.run_infer_harnesses:main"
 swtbench-infer = "benchmarks.swtbench.run_infer:main"

@@ -136,9 +136,10 @@ Pre-download the pinned harness distribution ahead of a run with
 `uv run harness-prepare` (or seed it offline from an existing binary with
 `--binary`; set `HARNESS_DIST_CACHE_DIR` to share the cache across nodes over
 NFS). Compaction is configured explicitly for these runs
-(`--harness-context-window`, `--harness-compaction-threshold`). See
-**[docs/harnesses.md](docs/harnesses.md)** for architecture, configuration,
-outputs and troubleshooting.
+(`--harness-context-window`, `--harness-compaction-threshold`), and
+`uv run harness-flatten-histories` flattens the history dumps into OpenAI-format
+training trajectories. See **[docs/harnesses.md](docs/harnesses.md)** for
+architecture, configuration, outputs, flattening and troubleshooting.
 
 ## Triggering Cloud Evals from This Repo
 
