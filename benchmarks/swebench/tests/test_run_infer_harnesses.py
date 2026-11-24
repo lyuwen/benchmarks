@@ -191,3 +191,34 @@ def test_prompt_renders_harness_instructions() -> None:
     assert "Fix the ORM crash." in instruction
     assert "/testbed" in instruction
     assert "do NOT create a patch file" in instruction
+
+
+def test_prepare_workspace_prefers_instance_image_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[dict[str, Any]] = []
+    distribution = HarnessDistribution(
+        harness="claude-code",
+        version="2.1.331",
+        platform="linux-x64",
+        directory=tmp_path / "dist",
+        binary_path=tmp_path / "dist" / "claude",
+        sha256="x",
+        size_bytes=1,
+    )
+    monkeypatch.setattr(
+        harness_runner, "ensure_distribution", lambda config: distribution
+    )
+    monkeypatch.setattr(
+        harness_runner.DockerContainerWorkspace,
+        "start",
+        staticmethod(lambda **kwargs: started.append(kwargs) or FakeWorkspace()),
+    )
+    instance = make_instance()
+    instance.data["image_name"] = "docker.io/custom/sweb.eval.x86_64.repo-1:local"
+    evaluation = make_evaluation(tmp_path)
+    evaluation.metadata = evaluation.metadata.model_copy(
+        update={"workspace_type": "docker"}
+    )
+    evaluation.prepare_workspace(instance)
+    assert started[0]["image"] == "docker.io/custom/sweb.eval.x86_64.repo-1:local"

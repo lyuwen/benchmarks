@@ -94,7 +94,10 @@ class SWEBenchHarnessEvaluation(SWEBenchEvaluation):
                 "Harness inference supports --workspace docker only: the harness "
                 "must execute inside the task container"
             )
-        image = get_official_docker_image(instance.id)
+        if "image_name" in instance.data:
+            image = instance.data["image_name"]
+        else:
+            image = get_official_docker_image(instance.id)
         distribution = ensure_distribution(self.harness_config)
         bind_volumes = build_distribution_bind_volumes(
             self.harness_config, distribution
