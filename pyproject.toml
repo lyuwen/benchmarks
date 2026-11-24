@@ -109,7 +109,7 @@ force-single-line = false
 lines-after-imports = 2
 
 [tool.uv.sources]
-rollout-manager = { git = "https://github.com/lyuwen/rollout-manager.git", rev = "380427cfae49ac429c5cb7c5904982c7ab756ca6" }
+rollout-manager = { path = "vendor/rollout-manager", editable = true }
 openhands-sdk = { workspace = true }
 openhands-tools = { workspace = true }
 openhands-workspace = { workspace = true }

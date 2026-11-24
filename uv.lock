@@ -2398,7 +2398,7 @@ requires-dist = [
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "python-json-logger", specifier = ">=3.3.0" },
     { name = "requests" },
-    { name = "rollout-manager", git = "https://github.com/lyuwen/rollout-manager.git?rev=380427cfae49ac429c5cb7c5904982c7ab756ca6" },
+    { name = "rollout-manager", editable = "vendor/rollout-manager" },
     { name = "swebench", specifier = "==4.1.0" },
     { name = "tenacity", specifier = ">=9.1.2" },
     { name = "toml" },
@@ -6343,10 +6343,21 @@ wheels = [
 [[package]]
 name = "rollout-manager"
 version = "0.1.0"
-source = { git = "https://github.com/lyuwen/rollout-manager.git?rev=380427cfae49ac429c5cb7c5904982c7ab756ca6#380427cfae49ac429c5cb7c5904982c7ab756ca6" }
+source = { editable = "vendor/rollout-manager" }
 dependencies = [
     { name = "aiohttp" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp" },
+    { name = "black", marker = "extra == 'dev'" },
+    { name = "isort", marker = "extra == 'dev'" },
+    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "ruff", marker = "extra == 'dev'" },
+]
+provides-extras = ["test", "dev"]
 
 [[package]]
 name = "rpds-py"

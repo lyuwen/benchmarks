@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rollout-manager"
+version = "0.1.0"
+description = "Standalone request adapter that captures one agent session's trajectory series."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["aiohttp"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+dev = ["pytest", "black", "isort", "ruff"]
+
+[project.scripts]
+rollout-manager = "rollout_manager.server:main"
+
+[tool.setuptools.packages.find]
+include = ["rollout_manager*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 119
+
+[tool.isort]
+profile = "black"
+line_length = 119
+known_first_party = ["rollout_manager"]
+
+[tool.ruff]
+line-length = 119
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "UP"]
+ignore = ["E402", "E501"]
