@@ -1,0 +1,17 @@
+{% include "default.j2" %}
+
+<harness_instructions>
+This session is non-interactive: nobody will answer questions for you, so make
+your own decisions and keep going until the issue described above is resolved.
+
+Work directly in the repository at {{ instance.repo_path }}. Use your tools to
+read and edit files there, and run commands/tests to verify your changes.
+
+Your working-tree changes are captured automatically when you stop, so:
+- do NOT create a patch file and do NOT commit your changes;
+- leave the fix in the working tree;
+- do not modify test files, and do not try to install the project's
+  dependencies (the environment is already prepared for you).
+
+When the issue is fixed and you have verified it, end your turn.
+</harness_instructions>

@@ -219,3 +219,6 @@ workspace/
 # Evaluation outputs
 eval_outputs/
 builds/
+
+# Manual harness smoke-test scratch dirs (scripts/harness_smoke.py)
+/.harness-smoke-*/

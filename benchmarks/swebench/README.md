@@ -17,6 +17,19 @@ SWE-Bench is a benchmark for evaluating AI agents on real-world software enginee
 
 ## Usage
 
+### Blackbox harness runs (Claude Code)
+
+For running an external agent CLI inside the task container with trajectory
+capture through the rollout-manager proxy:
+
+```bash
+uv run swebench-infer-harnesses .llm_config/model.json \
+  --harness claude-code --n-limit 10 --num-workers 2 --judge swebench
+```
+
+See [docs/harnesses.md](../../docs/harnesses.md) for the architecture,
+compaction configuration, outputs and troubleshooting.
+
 ### Docker Workspace (Local Evaluation)
 
 #### Step 1: Build Docker Images

@@ -117,6 +117,26 @@ After setting up the environment and configuring your LLM, see the individual be
 - **[GAIA](benchmarks/gaia/)**: General AI assistant tasks requiring multi-step reasoning  
 - **[OpenAgentSafety](benchmarks/openagentsafety/)**: AI agent safety evaluation in workplace scenarios with NPC interactions
 
+### Blackbox harness runs (Claude Code + trajectory capture)
+
+In addition to the OpenHands agent runs, SWE-bench and SWE-rebench-V2 have
+`run_infer_harnesses.py` entry points that run an external agent CLI (Claude
+Code first) **inside the task container** and capture its model traffic through
+the [rollout-manager](https://github.com/lyuwen/rollout-manager) proxy. Each
+instance produces a trajectory export (main conversation, compactions,
+sub-agents) next to the evaluation outputs, and the collected patch is judged
+exactly like a normal run.
+
+```bash
+uv run swebench-infer-harnesses .llm_config/model.json --harness claude-code --judge swebench
+uv run swerebenchv2-infer-harnesses .llm_config/model.json --harness claude-code --judge swerebenchv2
+```
+
+Compaction is configured explicitly for these runs
+(`--harness-context-window`, `--harness-compaction-threshold`). See
+**[docs/harnesses.md](docs/harnesses.md)** for architecture, configuration,
+outputs and troubleshooting.
+
 ## Triggering Cloud Evals from This Repo
 
 This repo exposes a manual GitHub Actions workflow that dispatches the `run-eval.yml` workflow in the Software Agent SDK. It is useful when you want to launch evals from the benchmarks repo without switching to the SDK repo.
@@ -255,6 +275,7 @@ If this command returns output, that benchmarks commit requires an SDK version w
 ## Links
 
 - **Condenser wiring, tool-result pruning, and history export**: [docs/condenser-wiring.md](docs/condenser-wiring.md)
+- **Blackbox harness inference with trajectory capture**: [docs/harnesses.md](docs/harnesses.md)
 - **Original OpenHands**: https://github.com/OpenHands/OpenHands/
 - **Agent SDK**: https://github.com/OpenHands/software-agent-sdk
 - **SWE-Bench**: https://www.swebench.com/

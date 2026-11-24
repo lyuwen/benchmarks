@@ -42,12 +42,15 @@ dependencies = [
     "lmnr>=0.7.24",
     "multi-swe-bench>=1.1.1",
     "omegaconf",
+    "rollout-manager",
 ]
 
 [project.scripts]
 validate-cfg = "benchmarks.scripts.validate_cfg:main"
 swebench-infer = "benchmarks.swebench.run_infer:main"
+swebench-infer-harnesses = "benchmarks.swebench.run_infer_harnesses:main"
 swtbench-infer = "benchmarks.swtbench.run_infer:main"
+swerebenchv2-infer-harnesses = "benchmarks.swerebenchv2.run_infer_harnesses:main"
 swebench-eval = "benchmarks.swebench.eval_infer:main"
 swtbench-eval = "benchmarks.swtbench.eval_infer:main"
 gaia-infer = "benchmarks.gaia.run_infer:main"
@@ -104,6 +107,7 @@ force-single-line = false
 lines-after-imports = 2
 
 [tool.uv.sources]
+rollout-manager = { git = "https://github.com/lyuwen/rollout-manager.git", rev = "380427cfae49ac429c5cb7c5904982c7ab756ca6" }
 openhands-sdk = { workspace = true }
 openhands-tools = { workspace = true }
 openhands-workspace = { workspace = true }
