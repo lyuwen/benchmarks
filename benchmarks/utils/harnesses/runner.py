@@ -316,6 +316,7 @@ def _start_rollout_manager(
             model=upstream_model,
             metadata=metadata,
             exclude_request_classes=config.exclude_request_classes,
+            request_params=config.request_params,
             request_timeout_sec=config.rollout_request_timeout_sec,
             finish_wait_sec=config.rollout_finish_timeout_sec,
             start_timeout_sec=config.rollout_start_timeout_sec,

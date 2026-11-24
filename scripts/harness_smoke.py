@@ -46,6 +46,12 @@ from openhands.sdk import LLM
 
 TOOL_COMMAND = "echo smoke-ok > /testbed/smoke.txt"
 FINAL_TEXT = "Done: the smoke file has been created."
+FORCED_REQUEST_PARAMS = {
+    "temperature": 0.1,
+    "top_p": 0.9,
+    "reasoning_effort": "high",
+    "max_tokens": 2048,
+}
 
 
 class FakeUpstream:
@@ -208,6 +214,7 @@ def main() -> int:
         context_window=200_000,
         compaction_threshold=80,
         max_turns=6,
+        request_params=FORCED_REQUEST_PARAMS,
     )
 
     upstream = FakeUpstream(TOOL_COMMAND)
@@ -271,6 +278,12 @@ def main() -> int:
         assert history["stats"]["requests"] >= 1, "no captured requests"
         assert history["trajectories"], "no captured trajectories"
         assert upstream.requests, "upstream saw no traffic"
+        first_request = upstream.requests[0]
+        for key, value in FORCED_REQUEST_PARAMS.items():
+            assert first_request.get(key) == value, (
+                f"forced request param {key!r} missing from upstream request: "
+                f"{first_request.get(key)!r}"
+            )
         assert result.rollout_export_path is not None
         print(
             "SMOKE OK: "

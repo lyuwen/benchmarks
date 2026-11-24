@@ -75,6 +75,29 @@ def test_command_omits_optional_flags(tmp_path: Path) -> None:
     assert "--exclude-request-classes" not in argv
 
 
+def test_command_forwards_forced_request_params(tmp_path: Path) -> None:
+    argv = rollout_manager_command(
+        make_config(
+            tmp_path,
+            request_params={
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "reasoning_effort": "high",
+            },
+        )
+    )
+    index = argv.index("--request-params")
+    assert json.loads(argv[index + 1]) == {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "reasoning_effort": "high",
+    }
+
+
+def test_command_omits_forced_request_params_when_empty(tmp_path: Path) -> None:
+    assert "--request-params" not in rollout_manager_command(make_config(tmp_path))
+
+
 def test_normalize_upstream_base_url() -> None:
     assert normalize_upstream_base_url("https://api.example.com") == (
         "https://api.example.com/v1"

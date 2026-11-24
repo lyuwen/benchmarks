@@ -12,6 +12,7 @@ run each instance.
 
 from __future__ import annotations
 
+import json
 import os
 from argparse import ArgumentParser
 from typing import Any, Literal
@@ -57,6 +58,12 @@ HARNESS_PLATFORMS = (
 )
 
 SUPPORTED_HARNESSES = ("claude-code",)
+
+# Structural request fields the rollout manager refuses to override: the
+# benchmark supplies sampling parameters only, not the conversation/tools.
+REQUEST_PARAM_FORBIDDEN_KEYS = frozenset(
+    {"messages", "stream", "stream_options", "tools"}
+)
 
 
 def default_cache_dir() -> str:
@@ -168,6 +175,22 @@ class HarnessConfig(BaseModel):
         description=(
             "Extra HTTP headers sent by the harness to the proxy/upstream "
             "(e.g. provider beta flags); forwarded as ANTHROPIC_CUSTOM_HEADERS"
+        ),
+    )
+    request_params: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Fixed Chat-Completions parameters merged (overriding) into every "
+            "upstream model request by the rollout manager, e.g. temperature, "
+            "top_p, top_k, reasoning_effort, seed, max_tokens. Populated from "
+            "the LLM config and --request-param/--request-params overrides"
+        ),
+    )
+    use_llm_request_params: bool = Field(
+        default=True,
+        description=(
+            "Forward sampling parameters from the LLM config to the rollout "
+            "manager (disable with --no-llm-request-params)"
         ),
     )
 
@@ -378,6 +401,35 @@ def add_harness_args(parser: ArgumentParser) -> None:
         ),
     )
     group.add_argument(
+        "--request-param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Upstream request parameter to force, parsed as JSON when possible "
+            "(e.g. temperature=0.7, reasoning_effort=high); repeatable and "
+            "overrides values taken from the LLM config"
+        ),
+    )
+    group.add_argument(
+        "--request-params",
+        type=str,
+        default=None,
+        metavar="JSON",
+        help=(
+            "JSON object of upstream request parameters, e.g. "
+            '{"temperature": 0.7, "top_p": 0.95} (overrides LLM config)'
+        ),
+    )
+    group.add_argument(
+        "--no-llm-request-params",
+        action="store_true",
+        help=(
+            "Do not forward temperature/top_p/top_k/reasoning_effort/seed/"
+            "max_tokens/provider extra_body from the LLM config"
+        ),
+    )
+    group.add_argument(
         "--upstream-base-url",
         type=str,
         default=None,
@@ -447,6 +499,54 @@ def add_harness_args(parser: ArgumentParser) -> None:
     )
 
 
+def validate_request_params(params: dict[str, Any], *, origin: str) -> dict[str, Any]:
+    """Reject request-param overlays that would corrupt the capture."""
+    forbidden = set(params) & REQUEST_PARAM_FORBIDDEN_KEYS
+    if forbidden:
+        raise ValueError(
+            f"{origin} may not override structural fields: "
+            + ", ".join(sorted(forbidden))
+        )
+    return params
+
+
+def parse_request_params_json(raw: str | None) -> dict[str, Any]:
+    """Parse ``--request-params`` as a JSON object."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--request-params is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("--request-params must be a JSON object")
+    return validate_request_params(parsed, origin="--request-params")
+
+
+def parse_request_param_values(values: list[str]) -> dict[str, Any]:
+    """Parse repeated ``--request-param KEY=VALUE`` flags (JSON value or str)."""
+    params: dict[str, Any] = {}
+    for value in values:
+        key, separator, raw = value.partition("=")
+        if not separator or not key.strip():
+            raise ValueError(f"--request-param expects KEY=VALUE, got {value!r}")
+        try:
+            parsed: Any = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = raw
+        params[key.strip()] = parsed
+    return validate_request_params(params, origin="--request-param")
+
+
+def merge_request_params(
+    base: dict[str, Any], overrides: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge request-parameter dicts (later values win), validating the result."""
+    if not overrides:
+        return dict(base)
+    return validate_request_params({**base, **overrides}, origin="request parameters")
+
+
 def parse_extra_env(values: list[str]) -> dict[str, str]:
     """Parse repeated ``KEY=VALUE`` flags into a dict."""
     env: dict[str, str] = {}
@@ -491,6 +591,11 @@ def harness_config_from_args(args: Any) -> HarnessConfig:
         extra_env=parse_extra_env(args.harness_env),
         extra_args=list(args.harness_arg),
         custom_headers=parse_headers(args.harness_header),
+        request_params=merge_request_params(
+            parse_request_params_json(args.request_params),
+            parse_request_param_values(args.request_param),
+        ),
+        use_llm_request_params=not args.no_llm_request_params,
         upstream_base_url=args.upstream_base_url,
         upstream_api_key=args.upstream_api_key,
         upstream_model=args.upstream_model,
@@ -520,3 +625,10 @@ def validate_harness_args(parser: ArgumentParser, args: Any) -> None:
         parser.error("--harness-context-window must be >= 0")
     parse_extra_env(args.harness_env)
     parse_headers(args.harness_header)
+    try:
+        merge_request_params(
+            parse_request_params_json(args.request_params),
+            parse_request_param_values(args.request_param),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))

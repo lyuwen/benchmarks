@@ -218,6 +218,41 @@ reaches ~160k tokens. Compaction requests are captured as their own trajectory
 (kind `compaction`) and labelled in the export, so the trajectory series shows
 the pre-compaction conversation, the summary call, and the continuation.
 
+### Sampling / request parameters
+
+Harness CLIs do not necessarily send the sampling parameters a benchmark wants
+(and Claude Code may use its own defaults), so the pipeline forwards the LLM
+config's explicit generation settings to the rollout manager. By default these
+come from the LLM config:
+
+- top-level `temperature`, `top_p`, `top_k`, `seed`, `reasoning_effort`,
+  `max_tokens` / `max_output_tokens` (mapped to `max_tokens`), and
+  `presence_penalty` / `frequency_penalty` / `repetition_penalty`;
+- the same keys under `litellm_params` as fallbacks;
+- provider `extra_body` entries (top-level or under `litellm_params`), e.g.
+  `{"thinking": {"type": "enabled"}}`;
+- structural fields (`messages`, `stream`, `stream_options`, `tools`) are never
+  forwarded as parameters.
+
+The rollout manager overlays them onto **every** upstream Chat-Completions
+payload after protocol conversion (overriding values the harness sent), and the
+effective per-turn `request` in the trajectory export shows them. `--model`
+still wins over a `model` request-param.
+
+Override or extend on the command line:
+
+```bash
+# single key/value pairs, JSON-parsed when possible (repeatable)
+--request-param temperature=0.2 --request-param reasoning_effort=high
+# or a JSON object
+--request-params '{"temperature": 0.2, "top_p": 0.95, "thinking": {"type": "enabled"}}'
+# ignore the LLM config's sampling values (CLI values still apply)
+--no-llm-request-params
+```
+
+The proxy side lives in the vendored `vendor/rollout-manager` package (pinned
+upstream snapshot + the `--request-params` overlay; see its `VENDORED.md`).
+
 ### Upstream model resolution
 
 The rollout manager needs the OpenAI-compatible URL, key and model name:

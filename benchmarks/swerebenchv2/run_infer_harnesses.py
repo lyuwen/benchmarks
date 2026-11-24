@@ -40,13 +40,12 @@ from benchmarks.utils.harnesses import (
     HarnessRunRequest,
     add_harness_args,
     ensure_distribution,
-    harness_config_from_args,
     publish_canonical_histories,
     run_harness_instance,
     validate_harness_args,
 )
 from benchmarks.utils.harnesses.claude_code import build_distribution_bind_volumes
-from benchmarks.utils.harnesses.llm_config import load_llm_config
+from benchmarks.utils.harnesses.llm_config import build_harness_config
 from benchmarks.utils.harnesses.runner import env_from_setup_commands
 from benchmarks.utils.harnesses.workspace import DockerContainerWorkspace
 from benchmarks.utils.mirror_config import get_mirror_env_commands
@@ -189,11 +188,11 @@ def main() -> None:
     args = parser.parse_args()
     validate_harness_args(parser, args)
 
-    llm, config_headers = load_llm_config(args)
-    harness_config = harness_config_from_args(args)
-    if config_headers:
-        merged = {**config_headers, **harness_config.custom_headers}
-        harness_config = harness_config.model_copy(update={"custom_headers": merged})
+    llm, harness_config = build_harness_config(args)
+    logger.info(
+        "Forcing rollout request params: %s",
+        harness_config.request_params or "none",
+    )
 
     distribution = ensure_distribution(harness_config)
     logger.info(

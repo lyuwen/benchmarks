@@ -79,6 +79,7 @@ class RolloutManagerConfig:
     model: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     exclude_request_classes: str = "auxiliary"
+    request_params: dict[str, Any] = field(default_factory=dict)
     request_timeout_sec: float = 900.0
     finish_wait_sec: float = 60.0
     start_timeout_sec: float = 90.0
@@ -130,6 +131,13 @@ def rollout_manager_command(config: RolloutManagerConfig) -> list[str]:
         argv.extend(["--metadata", json.dumps(config.metadata, sort_keys=True)])
     if config.exclude_request_classes:
         argv.extend(["--exclude-request-classes", config.exclude_request_classes])
+    if config.request_params:
+        argv.extend(
+            [
+                "--request-params",
+                json.dumps(config.request_params, sort_keys=True),
+            ]
+        )
     return argv
 
 

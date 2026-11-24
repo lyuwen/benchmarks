@@ -381,3 +381,45 @@ def test_publish_canonical_histories(tmp_path: Path) -> None:
     assert json.loads((output_dir / "i2.history.json").read_text()) == {
         "instance_id": "i2"
     }
+
+
+def test_start_rollout_manager_passes_request_params(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeRolloutManager:
+        def __init__(self, config: Any) -> None:
+            captured["config"] = config
+
+        def start(self) -> None:
+            captured["started"] = True
+
+    monkeypatch.setattr(runner, "RolloutManager", FakeRolloutManager)
+    workspace = SimpleNamespace(
+        gateway_ip="172.17.0.1", host_alias="host.docker.internal"
+    )
+    config = HarnessConfig(
+        request_params={"temperature": 0.4, "reasoning_effort": "high"}
+    )
+    runner._start_rollout_manager(
+        workspace=cast(Any, workspace),
+        config=config,
+        instance_id="i1",
+        attempt=1,
+        output_path=str(tmp_path / "rollout.json"),
+        log_path=str(tmp_path / "rollout.log"),
+        upstream_url="http://127.0.0.1:9999/v1",
+        upstream_api_key=None,
+        upstream_model="served-model",
+        harness_name="claude-code",
+        harness_version="2.1.331",
+    )
+    assert captured["started"] is True
+    manager_config = captured["config"]
+    assert manager_config.request_params == {
+        "temperature": 0.4,
+        "reasoning_effort": "high",
+    }
+    assert manager_config.model == "served-model"
+    assert manager_config.host == "172.17.0.1"
