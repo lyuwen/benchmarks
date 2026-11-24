@@ -196,6 +196,8 @@ container and the proxy runs next to the local Docker daemon.
 | `--harness-api-timeout-ms` | `1200000` | Per-model-request timeout |
 | `--harness-bare` | off | Run Claude Code with `--bare` (no hooks/CLAUDE.md/skills/MCP discovery) |
 | `--harness-no-skip-permissions` | off | Do not use bypass-permissions mode |
+| `--harness-permission-mode` | unset | Claude Code permission mode: `auto`, `bypassPermissions`, `acceptEdits`, `default`, `plan` |
+| `--harness-auto-mode-model` | main agent model | Optional model ID for auto-mode classifier requests |
 | `--harness-env KEY=VALUE` | none | Extra environment variable (repeatable) |
 | `--harness-arg ARG` | none | Extra harness CLI argument (repeatable) |
 | `--harness-header 'Name: Value'` | from LLM config | Extra HTTP header sent by the harness (forwarded by the proxy to the upstream) |
@@ -252,6 +254,47 @@ Override or extend on the command line:
 
 The proxy side lives in the vendored `vendor/rollout-manager` package (pinned
 upstream snapshot + the `--request-params` overlay; see its `VENDORED.md`).
+
+### Permission modes, auto mode and auxiliary traffic
+
+By default the harness runs with bypass permissions (`--dangerously-skip-permissions`
+plus `IS_SANDBOX=1`). To run Claude Code's **auto mode** — where a second model,
+the classifier, reviews each action — use:
+
+```bash
+uv run swebench-infer-harnesses .llm_config/model.json \
+  --harness-permission-mode auto --judge swebench
+```
+
+How this is wired:
+
+- The classifier uses the **same model as the main agent**: no extra model is
+  configured by default, and the rollout manager forces the served backend model
+  on every upstream request anyway. `--harness-auto-mode-model <id>` pins a
+  different classifier model ID only if you need one.
+- `CLAUDE_CODE_AUTO_MODE_SERVER=0` forces client-side classifier requests so
+  they go through the capture proxy (server-side review is unavailable behind a
+  custom gateway and would not be visible to the capture).
+- Classifier calls are Claude Code **`auxiliary`** requests: the rollout manager
+  records them as their own trajectories/turns with `request_class: auxiliary`.
+  They are masked out of training by default (`--exclude-request-classes
+  auxiliary`): they stay in the export (`excluded_turns`,
+  `exclude_from_training=true`, `loss_mask=0`) but `harness-flatten-histories`
+  drops them unless you pass `--include-excluded`.
+
+Verified against Claude Code 2.1.331: with auto mode and a network Bash command
+that the classifier reviews, one run produced 12 requests — 2 `main` turns and
+10 `auxiliary` classifier calls — and the export contained the 10 auxiliary
+turns plus the main trajectory. Actions auto-approved by mode rules (for example
+simple file edits in the working directory) may not trigger a classifier call.
+
+**Session titles**: a `claude -p` run started from a shell/script does not
+generate a session title, so these entry points see no naming request. If
+Claude Code does emit an auxiliary request (titles, summaries, classifiers — in
+this or another harness), it is captured exactly like the classifier traffic and
+follows the same `--exclude-request-classes` rules. To make auxiliary traffic
+trainable end-to-end, run with `--exclude-request-classes ""` (capture nothing
+as excluded) and flatten without `--exclude` filtering.
 
 ### Upstream model resolution
 

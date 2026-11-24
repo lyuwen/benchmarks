@@ -162,6 +162,25 @@ class HarnessConfig(BaseModel):
         default=True,
         description="Run the harness in bypass-permissions mode",
     )
+    permission_mode: (
+        Literal["auto", "bypassPermissions", "acceptEdits", "default", "plan"] | None
+    ) = Field(
+        default=None,
+        description=(
+            "Optional Claude Code permission mode. 'auto' routes every action "
+            "through Claude Code's auto-mode classifier (captured as auxiliary "
+            "requests); unset keeps the bypass-permissions default"
+        ),
+    )
+    auto_mode_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional explicit model ID for auto-mode classifier requests "
+            "(CLAUDE_CODE_AUTO_MODE_MODEL). Unset means Claude Code uses the "
+            "session model (the main agent model); the rollout manager forces "
+            "the served backend model on every request either way"
+        ),
+    )
     extra_env: dict[str, str] = Field(
         default_factory=dict,
         description="Extra environment variables injected into the harness process",
@@ -377,6 +396,27 @@ def add_harness_args(parser: ArgumentParser) -> None:
         help="Do not run the harness in bypass-permissions mode",
     )
     group.add_argument(
+        "--harness-permission-mode",
+        type=str,
+        default=None,
+        choices=["auto", "bypassPermissions", "acceptEdits", "default", "plan"],
+        help=(
+            "Claude Code permission mode. 'auto' runs the auto-mode classifier "
+            "(its requests are captured as auxiliary); default: bypass "
+            "permissions (--dangerously-skip-permissions)"
+        ),
+    )
+    group.add_argument(
+        "--harness-auto-mode-model",
+        type=str,
+        default=None,
+        help=(
+            "Optional model ID for Claude Code's auto-mode classifier requests; "
+            "default: the main agent model (the proxy forces the served backend "
+            "model on every request anyway)"
+        ),
+    )
+    group.add_argument(
         "--harness-env",
         action="append",
         default=[],
@@ -588,6 +628,8 @@ def harness_config_from_args(args: Any) -> HarnessConfig:
         api_timeout_ms=args.harness_api_timeout_ms,
         bare=args.harness_bare,
         skip_permissions=not args.harness_no_skip_permissions,
+        permission_mode=args.harness_permission_mode,
+        auto_mode_model=args.harness_auto_mode_model,
         extra_env=parse_extra_env(args.harness_env),
         extra_args=list(args.harness_arg),
         custom_headers=parse_headers(args.harness_header),

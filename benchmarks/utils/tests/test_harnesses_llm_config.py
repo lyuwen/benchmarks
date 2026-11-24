@@ -137,6 +137,28 @@ def test_build_harness_config_merges_llm_and_cli_params(tmp_path: Path) -> None:
     assert config.custom_headers == {"anthropic-beta": "beta-flag", "x-extra": "1"}
 
 
+def test_build_harness_config_permission_mode(tmp_path: Path) -> None:
+    args = make_args(
+        tmp_path,
+        [
+            "--harness-permission-mode",
+            "auto",
+            "--harness-auto-mode-model",
+            "claude-opus-4-6",
+        ],
+    )
+    _, config = build_harness_config(args)
+    assert config.permission_mode == "auto"
+    assert config.auto_mode_model == "claude-opus-4-6"
+
+
+def test_build_harness_config_permission_mode_default_model(tmp_path: Path) -> None:
+    args = make_args(tmp_path, ["--harness-permission-mode", "auto"])
+    _, config = build_harness_config(args)
+    assert config.permission_mode == "auto"
+    assert config.auto_mode_model is None
+
+
 def test_build_harness_config_no_llm_params(tmp_path: Path) -> None:
     args = make_args(
         tmp_path, ["--no-llm-request-params", "--request-param", "seed=42"]

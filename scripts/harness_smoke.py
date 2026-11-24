@@ -15,6 +15,13 @@ It needs Docker and a container image with ``git`` and ``bash``::
 ``--claude-binary`` lets you reuse a locally downloaded native binary instead of
 downloading the ~380 MiB release again; without it the normal distribution
 cache/download path is exercised.
+
+To check that Claude Code's auto-mode classifier requests are captured, run with
+``--permission-mode auto`` and a Bash command the classifier has to review, e.g.
+``--tool-command 'curl -sS https://example.com -o /testbed/out.html'``. The
+scripted upstream answers classifier prompts with plain text, so the classifier
+may deny the command (no patch is produced) — the captured ``request_log`` then
+shows the ``auxiliary`` classifier turns, which is what the experiment checks.
 """
 
 from __future__ import annotations
@@ -183,8 +190,19 @@ def seed_distribution(cache_dir: str, version: str, binary: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True, help="Task image with git+bash")
+    parser.add_argument(
+        "--tool-command",
+        default=None,
+        help="Override the scripted Bash command (e.g. one auto mode classifies)",
+    )
     parser.add_argument("--claude-binary", type=Path, default=None)
     parser.add_argument("--dist-mode", choices=["copy", "mount"], default="mount")
+    parser.add_argument(
+        "--permission-mode",
+        choices=["auto", "bypassPermissions", "acceptEdits", "default", "plan"],
+        default=None,
+        help="Claude Code permission mode (e.g. auto to exercise the classifier)",
+    )
     parser.add_argument(
         "--tmp-dir",
         type=Path,
@@ -215,9 +233,10 @@ def main() -> int:
         compaction_threshold=80,
         max_turns=6,
         request_params=FORCED_REQUEST_PARAMS,
+        permission_mode=args.permission_mode,
     )
 
-    upstream = FakeUpstream(TOOL_COMMAND)
+    upstream = FakeUpstream(args.tool_command or TOOL_COMMAND)
     port = upstream.start()
     workspace: DockerContainerWorkspace | None = None
     try:
@@ -285,6 +304,13 @@ def main() -> int:
                 f"{first_request.get(key)!r}"
             )
         assert result.rollout_export_path is not None
+        request_classes = sorted(
+            {
+                str(entry.get("request_class"))
+                for entry in history.get("request_log") or []
+            }
+        )
+        print(f"captured request classes: {request_classes}")
         print(
             "SMOKE OK: "
             f"{history['stats']['requests']} request(s), "

@@ -138,8 +138,10 @@ Pre-download the pinned harness distribution ahead of a run with
 NFS). Compaction is configured explicitly for these runs
 (`--harness-context-window`, `--harness-compaction-threshold`), and
 Sampling parameters from the LLM config (temperature/top_p/reasoning_effort/…)
-are forced through the rollout manager; `uv run harness-flatten-histories`
-flattens the history dumps into OpenAI-format training trajectories. See **[docs/harnesses.md](docs/harnesses.md)** for
+are forced through the rollout manager, Claude Code's auto-mode classifier
+conversation can be captured with `--harness-permission-mode auto`, and
+`uv run harness-flatten-histories` flattens the history dumps into OpenAI-format
+training trajectories. See **[docs/harnesses.md](docs/harnesses.md)** for
 architecture, configuration, outputs, flattening and troubleshooting.
 
 ## Triggering Cloud Evals from This Repo

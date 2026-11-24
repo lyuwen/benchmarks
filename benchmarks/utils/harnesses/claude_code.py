@@ -200,6 +200,15 @@ class ClaudeCodeHarness:
             env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
         if config.compaction_threshold > 0:
             env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(config.compaction_threshold)
+        if config.permission_mode == "auto":
+            # Route auto-mode classification through the captured endpoint.
+            # The server-side reviewer is only available on Anthropic's API and
+            # would not be visible to the capture proxy. By default the
+            # classifier uses the session model (the main agent model); an
+            # explicit id can be pinned with --harness-auto-mode-model.
+            if config.auto_mode_model:
+                env["CLAUDE_CODE_AUTO_MODE_MODEL"] = config.auto_mode_model
+            env["CLAUDE_CODE_AUTO_MODE_SERVER"] = "0"
         if config.max_output_tokens is not None:
             env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(config.max_output_tokens)
         if config.custom_headers:
@@ -222,8 +231,11 @@ class ClaudeCodeHarness:
         }
         if compaction_window is not None and compaction_window >= 100_000:
             settings["autoCompactWindow"] = compaction_window
-        if config.skip_permissions:
-            settings["permissions"] = {"defaultMode": "bypassPermissions"}
+        permission_mode = config.permission_mode or (
+            "bypassPermissions" if config.skip_permissions else None
+        )
+        if permission_mode:
+            settings["permissions"] = {"defaultMode": permission_mode}
         return settings
 
     def build_command(
@@ -251,7 +263,11 @@ class ClaudeCodeHarness:
             harness_model,
             "--no-session-persistence",
         ]
-        if config.skip_permissions:
+        if config.permission_mode == "bypassPermissions":
+            argv.append("--dangerously-skip-permissions")
+        elif config.permission_mode:
+            argv.extend(["--permission-mode", config.permission_mode])
+        elif config.skip_permissions:
             argv.append("--dangerously-skip-permissions")
         if config.bare:
             argv.append("--bare")

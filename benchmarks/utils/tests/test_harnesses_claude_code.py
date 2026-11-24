@@ -213,3 +213,91 @@ def test_distribution_bind_volumes() -> None:
     ]
     copy_config = HarnessConfig(dist_mode="copy")
     assert build_distribution_bind_volumes(copy_config, distribution) == []
+
+
+def test_build_command_permission_modes(tmp_path: Path) -> None:
+    harness = ClaudeCodeHarness()
+    installed = make_installed(tmp_path)
+    auto = harness.build_command(
+        HarnessConfig(permission_mode="auto"),
+        installed,
+        instruction="x",
+        max_turns=1,
+        settings_path="/tmp/s.json",
+        harness_model="m",
+    )
+    assert "--permission-mode" in auto
+    assert auto[auto.index("--permission-mode") + 1] == "auto"
+    assert "--dangerously-skip-permissions" not in auto
+
+    accept_edits = harness.build_command(
+        HarnessConfig(permission_mode="acceptEdits"),
+        installed,
+        instruction="x",
+        max_turns=1,
+        settings_path="/tmp/s.json",
+        harness_model="m",
+    )
+    assert accept_edits[accept_edits.index("--permission-mode") + 1] == "acceptEdits"
+
+    bypass = harness.build_command(
+        HarnessConfig(permission_mode="bypassPermissions"),
+        installed,
+        instruction="x",
+        max_turns=1,
+        settings_path="/tmp/s.json",
+        harness_model="m",
+    )
+    assert "--dangerously-skip-permissions" in bypass
+    assert "--permission-mode" not in bypass
+
+    no_permissions = harness.build_command(
+        HarnessConfig(skip_permissions=False),
+        installed,
+        instruction="x",
+        max_turns=1,
+        settings_path="/tmp/s.json",
+        harness_model="m",
+    )
+    assert "--dangerously-skip-permissions" not in no_permissions
+    assert "--permission-mode" not in no_permissions
+
+
+def test_build_env_auto_mode_uses_main_model_by_default() -> None:
+    env = ClaudeCodeHarness().build_env(
+        HarnessConfig(permission_mode="auto"),
+        proxy_url="http://127.0.0.1:1",
+        harness_model="served-model",
+    )
+    assert env["CLAUDE_CODE_AUTO_MODE_SERVER"] == "0"
+    # No explicit classifier model: Claude Code uses the session/main model.
+    assert "CLAUDE_CODE_AUTO_MODE_MODEL" not in env
+
+    pinned = ClaudeCodeHarness().build_env(
+        HarnessConfig(permission_mode="auto", auto_mode_model="claude-sonnet-4-6"),
+        proxy_url="http://127.0.0.1:1",
+        harness_model="served-model",
+    )
+    assert pinned["CLAUDE_CODE_AUTO_MODE_MODEL"] == "claude-sonnet-4-6"
+
+    default_mode = ClaudeCodeHarness().build_env(
+        HarnessConfig(),
+        proxy_url="http://127.0.0.1:1",
+        harness_model="served-model",
+    )
+    assert "CLAUDE_CODE_AUTO_MODE_SERVER" not in default_mode
+    assert "CLAUDE_CODE_AUTO_MODE_MODEL" not in default_mode
+
+
+def test_build_settings_permission_mode() -> None:
+    harness = ClaudeCodeHarness()
+    assert harness.build_settings(HarnessConfig(permission_mode="auto"))[
+        "permissions"
+    ] == {"defaultMode": "auto"}
+    assert harness.build_settings(HarnessConfig(permission_mode="acceptEdits"))[
+        "permissions"
+    ] == {"defaultMode": "acceptEdits"}
+    assert (
+        harness.build_settings(HarnessConfig(skip_permissions=False)).get("permissions")
+        is None
+    )
