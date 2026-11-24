@@ -1,94 +1,133 @@
-"""Shared fakes for harness tests (no Docker, no network)."""
+"""Shared fakes for mini-swe-agent adapter tests."""
 
-from __future__ import annotations
+import json
+from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
-import re
-from dataclasses import dataclass, field
-from typing import Any, Callable
-
-from benchmarks.utils.harnesses.workspace import CommandResult
-
-
-PATCH = """diff --git a/pkg/module.py b/pkg/module.py
---- a/pkg/module.py
-+++ b/pkg/module.py
-@@ -1,2 +1,2 @@
--x = 1
-+x = 2
-"""
+from benchmarks.utils.miniswe.environment import SUBMISSION_MARKER
+from openhands.sdk.workspace.models import CommandResult, FileOperationResult
 
 
-@dataclass
+def ok_result(command: str, **overrides: Any) -> CommandResult:
+    """Build a successful ``CommandResult`` with optional overrides."""
+    payload: dict[str, Any] = {
+        "command": command,
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": "",
+        "timeout_occurred": False,
+    }
+    payload.update(overrides)
+    return CommandResult(**payload)
+
+
 class FakeWorkspace:
-    """Records docker-side calls and answers with scripted results."""
+    """Minimal stand-in for ``RemoteWorkspace`` recording executed commands."""
 
-    working_dir: str = "/"
-    host_alias: str = "host.docker.internal"
-    gateway_ip: str | None = "172.17.0.1"
-    dist_mount: str | None = None
-    result_for: Callable[[str], CommandResult] | None = None
-    calls: list[str] = field(default_factory=list)
-    copied: list[tuple[str, str]] = field(default_factory=list)
-    written: dict[str, str] = field(default_factory=dict)
-    streaming_runs: list[dict[str, Any]] = field(default_factory=list)
+    def __init__(
+        self,
+        responder: Callable[[str, Any], CommandResult] | None = None,
+        working_dir: str = "/workspace",
+    ) -> None:
+        self.working_dir = working_dir
+        self.calls: list[dict[str, Any]] = []
+        self.uploads: list[tuple[str, str]] = []
+        self._responder = responder or (lambda command, cwd: ok_result(command))
 
     def execute_command(
-        self, command: str, cwd: str | None = None, timeout: float = 60.0
+        self,
+        command: str,
+        cwd: str | Path | None = None,
+        timeout: float = 30.0,
     ) -> CommandResult:
-        self.calls.append(command)
-        if self.result_for is not None:
-            return self.result_for(command)
-        return CommandResult(stdout="", stderr="", exit_code=0)
+        self.calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        return self._responder(command, cwd)
 
-    def copy_in(self, local_path: str, remote_path: str) -> None:
-        self.copied.append((str(local_path), remote_path))
+    def file_upload(
+        self, source_path: str | Path, destination_path: str | Path
+    ) -> FileOperationResult:
+        self.uploads.append((str(source_path), str(destination_path)))
+        return FileOperationResult(
+            success=True,
+            source_path=str(source_path),
+            destination_path=str(destination_path),
+        )
 
-    def write_text(self, content: str, remote_path: str) -> None:
-        self.written[remote_path] = content
-
-    def path_exists(self, remote_path: str) -> bool:
-        return remote_path in self.written or bool(self.copied)
-
-    def container_logs(self, tail: int = 100) -> str:
-        return "container logs"
-
-    def cleanup(self) -> None:
-        pass
+    @property
+    def commands(self) -> list[str]:
+        return [call["command"] for call in self.calls]
 
 
-def command_result(
-    stdout: str = "", stderr: str = "", exit_code: int = 0
-) -> CommandResult:
-    return CommandResult(stdout=stdout, stderr=stderr, exit_code=exit_code)
+PATCH = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n"
 
 
-def repo_workspace(
-    *,
-    base_commit: str = "base123",
-    untracked: str = "",
-    diff: str = PATCH,
-) -> FakeWorkspace:
-    """A workspace whose git commands behave like a clean task container."""
+def submission_workspace(normal_output: str = "ok") -> FakeWorkspace:
+    """Workspace that returns a submitted patch when the marker is observed."""
 
-    def result_for(command: str) -> CommandResult:
-        if "rev-parse" in command and "^{commit}" in command:
-            return command_result(stdout=f"{base_commit}\n")
-        if "git reset --hard" in command:
-            return command_result()
-        if "git ls-files --others" in command:
-            return command_result(stdout=untracked)
-        if "git add -A" in command:
-            return command_result()
-        if "git commit" in command:
-            return command_result(exit_code=1)
-        if "git --no-pager diff" in command:
-            return command_result(stdout=diff)
-        return command_result()
+    def responder(command: str, cwd: Any) -> CommandResult:
+        if SUBMISSION_MARKER in command:
+            return ok_result(command, stdout=f"{SUBMISSION_MARKER}\n{PATCH}")
+        return ok_result(command, stdout=normal_output)
 
-    return FakeWorkspace(result_for=result_for)
+    return FakeWorkspace(responder=responder)
 
 
-def assert_matches(pattern: str, command: str) -> re.Match[str]:
-    match = re.search(pattern, command)
-    assert match is not None, f"{pattern!r} not found in {command!r}"
-    return match
+class ScriptedModel:
+    """Minimal mini ``Model`` protocol implementation driven by commands."""
+
+    def __init__(self, commands: list[str], *, fail: bool = False) -> None:
+        self.config = SimpleNamespace(model_name="scripted/test")
+        self._commands = list(commands)
+        self._calls = 0
+        self._fail = fail
+
+    def query(self, messages: list[dict], **kwargs: Any) -> dict:
+        if self._fail:
+            raise RuntimeError("provider exploded")
+        index = min(self._calls, len(self._commands) - 1)
+        command = self._commands[index]
+        self._calls += 1
+        call_id = f"call_{self._calls}"
+        return {
+            "role": "assistant",
+            "content": f"step {self._calls}",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps({"command": command}),
+                    },
+                }
+            ],
+            "extra": {
+                "actions": [{"command": command, "tool_call_id": call_id}],
+                "response": {"usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+                "cost": 0.001,
+            },
+        }
+
+    def format_message(self, **kwargs: Any) -> dict:
+        return dict(kwargs)
+
+    def format_observation_messages(
+        self, message: dict, outputs: list[dict], template_vars: dict | None = None
+    ) -> list[dict]:
+        actions = message.get("extra", {}).get("actions", [])
+        return [
+            {
+                "role": "tool",
+                "content": output.get("output", ""),
+                "tool_call_id": action["tool_call_id"],
+            }
+            for action, output in zip(actions, outputs)
+        ]
+
+    def get_template_vars(self, **kwargs: Any) -> dict:
+        return {}
+
+    def serialize(self) -> dict:
+        return {"info": {"config": {"model": {"model_name": self.config.model_name}}}}

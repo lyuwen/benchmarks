@@ -16,7 +16,7 @@ from benchmarks.utils.harnesses.claude_code import (
 from benchmarks.utils.harnesses.config import HarnessConfig
 from benchmarks.utils.harnesses.distribution import HarnessDistribution
 from benchmarks.utils.harnesses.rollout import RolloutManagerError
-from benchmarks.utils.tests.fakes import FakeWorkspace, command_result
+from benchmarks.utils.tests.harness_fakes import FakeWorkspace, command_result
 
 
 def make_installed(tmp_path: Path) -> InstalledHarness:

@@ -45,12 +45,23 @@ dependencies = [
     "rollout-manager",
 ]
 
+[project.optional-dependencies]
+# mini-swe-agent agent loop, used by the run_infer_miniswe entry points.
+# Install with: uv sync --extra miniswe
+miniswe = [
+    "mini-swe-agent==2.4.6",
+]
+
 [project.scripts]
 validate-cfg = "benchmarks.scripts.validate_cfg:main"
 harness-prepare = "benchmarks.utils.harnesses.prepare:main"
 harness-flatten-histories = "benchmarks.utils.harnesses.flatten:main"
 swebench-infer = "benchmarks.swebench.run_infer:main"
 swebench-infer-harnesses = "benchmarks.swebench.run_infer_harnesses:main"
+swebench-infer-miniswe = "benchmarks.swebench.run_infer_miniswe:main"
+scaleswe-infer-miniswe = "benchmarks.scaleswe.run_infer_miniswe:main"
+z021data-infer-miniswe = "benchmarks.z021data.run_infer_miniswe:main"
+swerebenchv2-infer-miniswe = "benchmarks.swerebenchv2.run_infer_miniswe:main"
 swtbench-infer = "benchmarks.swtbench.run_infer:main"
 swerebenchv2-infer-harnesses = "benchmarks.swerebenchv2.run_infer_harnesses:main"
 swebench-eval = "benchmarks.swebench.eval_infer:main"

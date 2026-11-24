@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import uuid
 from pathlib import Path
 from typing import List
@@ -24,6 +25,7 @@ from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
 from benchmarks.utils.dataset import get_dataset
+from benchmarks.utils.docker_workspace import BenchDockerWorkspace
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
     construct_eval_output_dir,
@@ -60,7 +62,7 @@ from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.legacy import get_legacy_tools
-from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
+from openhands.workspace import APIRemoteWorkspace, FlexWorkspace
 
 
 logger = get_logger(__name__)
@@ -214,7 +216,7 @@ class SWEBenchEvaluation(Evaluation):
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
                         ":ro"
                     )
-            workspace = DockerWorkspace(
+            workspace = BenchDockerWorkspace(
                 server_image=agent_server_image,
                 working_dir="/workspace",
                 forward_env=forward_env or [],
@@ -280,32 +282,97 @@ class SWEBenchEvaluation(Evaluation):
                 f"Unsupported workspace_type: {self.metadata.workspace_type}"
             )
 
-        for cmd in self.metadata.env_setup_commands or []:
-            res = workspace.execute_command(cmd)
-            if res.exit_code != 0:
-                raise RuntimeError(
-                    f"Failed to run env setup command '{cmd}': {res.stderr}"
-                )
-            logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
-
-        # psf/requests tests hit the flaky public httpbin.org; stand up a local
-        # httpbin so the agent's own test runs are deterministic. Non-fatal:
-        # on failure we degrade to external httpbin rather than losing the
-        # instance. See benchmarks/utils/httpbin_fix.py.
-        if instance.data.get("repo") == "psf/requests":
-            for cmd in make_httpbin_setup_commands():
+        try:
+            for cmd in self.metadata.env_setup_commands or []:
                 res = workspace.execute_command(cmd)
                 if res.exit_code != 0:
-                    logger.warning(
-                        "httpbin setup command failed (continuing): %r: %s",
-                        cmd,
-                        res.stderr,
+                    raise RuntimeError(
+                        f"Failed to run env setup command '{cmd}': {res.stderr}"
                     )
-                else:
-                    logger.debug("Ran httpbin setup command '%s': %s", cmd, res.stdout)
+                logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
 
-        maybe_disable_network(workspace)
+            # psf/requests tests hit the flaky public httpbin.org; stand up a
+            # local httpbin so the agent's own test runs are deterministic.
+            # Non-fatal: on failure we degrade to external httpbin rather than
+            # losing the instance. See benchmarks/utils/httpbin_fix.py.
+            if instance.data.get("repo") == "psf/requests":
+                for cmd in make_httpbin_setup_commands():
+                    res = workspace.execute_command(cmd)
+                    if res.exit_code != 0:
+                        logger.warning(
+                            "httpbin setup command failed (continuing): %r: %s",
+                            cmd,
+                            res.stderr,
+                        )
+                    else:
+                        logger.debug(
+                            "Ran httpbin setup command '%s': %s", cmd, res.stdout
+                        )
+
+            maybe_disable_network(workspace)
+        except Exception:
+            # Release the freshly created workspace: Evaluation only sees
+            # workspaces returned from this method, so a raised setup failure
+            # would otherwise leak the container/remote runtime.
+            workspace.__exit__(None, None, None)
+            raise
         return workspace
+
+    # ---- Hook: prepare the task checkout ----------------------------------------
+    def prepare_repo(
+        self,
+        workspace: RemoteWorkspace,
+        instance: EvalInstance,
+        *,
+        checkout_commit: str | None = None,
+    ) -> str:
+        """Copy ``/testbed`` into the workspace repo dir, link it back, and reset.
+
+        Returns the repository path the agent works in. Kept separate from
+        ``evaluate_instance`` so the mini-swe-agent sibling entry point reuses the
+        identical checkout preparation while the OpenHands path keeps its own
+        conversation/history wiring.
+
+        Args:
+            checkout_commit: When given, reset the checkout to this baseline.
+                SWE-bench's official instance images are built with
+                ``git reset --hard {base_commit}``, but agent-server images built
+                on other image sources can sit at an environment-setup commit
+                instead. Resetting guarantees the agent edits (and submits its
+                ``git diff``) relative to the same baseline the judge applies the
+                patch to. Defaults to None (keep image HEAD), preserving the
+                legacy OpenHands runner's behavior.
+        """
+        repo_path = f"/workspace/{instance.data['repo'].split('/')[-1]}/"
+        instance.data["repo_path"] = repo_path
+        logger.info("repo_path: %s", repo_path)
+
+        cp_testebed_repo = workspace.execute_command(
+            (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}"),
+            timeout=60,
+        )
+        assert cp_testebed_repo.exit_code == 0, (
+            f"cp_testebed_repo failed: {cp_testebed_repo.stderr}"
+        )
+
+        logger.info("linking workspace to testbed: %s", repo_path)
+        cp_testebed_repo = workspace.execute_command(
+            (f"sudo rm -rf /testbed ; sudo ln -s {repo_path} /testbed"),
+            timeout=60,
+        )
+        assert cp_testebed_repo.exit_code == 0, (
+            f"ln_testebed_repo failed: {cp_testebed_repo.stderr}"
+        )
+
+        # git reset (optionally to the dataset baseline)
+        reset_target = f" {shlex.quote(checkout_commit)}" if checkout_commit else ""
+        git_reset = workspace.execute_command(
+            f"cd {repo_path} ; git reset --hard{reset_target}"
+        )
+        assert git_reset.exit_code == 0, (
+            f"git reset --hard{reset_target} failed: {git_reset.stderr}"
+        )
+        return repo_path
 
     # ---- Hook: evaluate one instance ---------------------------------------------
     def evaluate_instance(
@@ -341,9 +408,6 @@ class SWEBenchEvaluation(Evaluation):
 
         assert isinstance(workspace, RemoteWorkspace)
 
-        repo_path = f"/workspace/{instance.data['repo'].split('/')[-1]}/"
-        instance.data["repo_path"] = repo_path
-
         persist_callback = build_event_persistence_callback(
             run_id=self.metadata.eval_output_dir,
             instance_id=instance.id,
@@ -357,27 +421,10 @@ class SWEBenchEvaluation(Evaluation):
             max_iteration_per_run=self.metadata.max_iterations,
         )
 
-        logger.info("repo_path: %s", repo_path)
-        cp_testebed_repo = workspace.execute_command(
-            (f"mkdir -p {repo_path} ; cp -r /testbed/. {repo_path}"),
-            timeout=60,
-        )
-        assert cp_testebed_repo.exit_code == 0, (
-            f"cp_testebed_repo failed: {cp_testebed_repo.stderr}"
-        )
-
-        logger.info("linking workspace to testbed: %s", repo_path)
-        cp_testebed_repo = workspace.execute_command(
-            (f"sudo rm -rf /testbed ; sudo ln -s {repo_path} /testbed"),
-            timeout=60,
-        )
-        assert cp_testebed_repo.exit_code == 0, (
-            f"ln_testebed_repo failed: {cp_testebed_repo.stderr}"
-        )
-
-        # git reset
-        git_reset = workspace.execute_command(f"cd {repo_path} ; git reset --hard")
-        assert git_reset.exit_code == 0, f"git reset failed: {git_reset.stderr}"
+        # Conversation construction stays before the checkout on purpose: remote
+        # conversations need a moment to attach their event subscription before
+        # the first user message is sent (see CLAUDE.local.md).
+        repo_path = self.prepare_repo(workspace, instance)
 
         instruction = get_instruction(
             instance=instance.data,

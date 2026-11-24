@@ -144,6 +144,22 @@ conversation can be captured with `--harness-permission-mode auto`, and
 training trajectories. See **[docs/harnesses.md](docs/harnesses.md)** for
 architecture, configuration, outputs, flattening and troubleshooting.
 
+### mini-swe-agent harness
+
+SWE-bench, Scale-SWE, z021data and SWE-rebench-V2 also have mini-swe-agent
+variants that keep the same `Evaluation` orchestration and swap in the
+mini-swe-agent bash loop:
+
+```bash
+uv sync --extra miniswe
+uv run python -m benchmarks.swebench.run_infer_miniswe model.json \
+  --dataset princeton-nlp/SWE-bench_Verified --split test \
+  --workspace docker --n-limit 1 --judge swebench
+```
+
+See **[docs/miniswe.md](docs/miniswe.md)** for CLI mapping, history format,
+patch/submission semantics and the verification matrix.
+
 ## Triggering Cloud Evals from This Repo
 
 This repo exposes a manual GitHub Actions workflow that dispatches the `run-eval.yml` workflow in the Software Agent SDK. It is useful when you want to launch evals from the benchmarks repo without switching to the SDK repo.

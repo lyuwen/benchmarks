@@ -14,7 +14,7 @@ from benchmarks.utils.harnesses.distribution import HarnessDistribution
 from benchmarks.utils.harnesses.runner import HarnessRunResult
 from benchmarks.utils.harnesses.workspace import DockerContainerWorkspace
 from benchmarks.utils.models import EvalInstance, EvalMetadata
-from benchmarks.utils.tests.fakes import PATCH, FakeWorkspace
+from benchmarks.utils.tests.harness_fakes import PATCH, FakeWorkspace
 from openhands.sdk.critic import PassCritic
 from openhands.sdk.llm import LLM
 

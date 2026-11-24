@@ -15,6 +15,7 @@ from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
 from benchmarks.utils.conversation import build_event_persistence_callback
 from benchmarks.utils.critics import create_critic
 from benchmarks.utils.dataset import get_dataset
+from benchmarks.utils.docker_workspace import BenchDockerWorkspace
 from benchmarks.utils.evaluation import Evaluation
 from benchmarks.utils.evaluation_utils import (
     construct_eval_output_dir,
@@ -49,7 +50,7 @@ from openhands.sdk.tool.tool import ToolDefinition
 from openhands.sdk.workspace import RemoteWorkspace
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.legacy import get_legacy_tools
-from openhands.workspace import APIRemoteWorkspace, DockerWorkspace, FlexWorkspace
+from openhands.workspace import APIRemoteWorkspace, FlexWorkspace
 
 
 logger = get_logger(__name__)
@@ -231,7 +232,7 @@ class ScaleSWEEvaluation(Evaluation):
                         f"/agent-server/.venv/lib/python3.12/site-packages/openhands/{module.replace('-', '_')}"
                         ":ro"
                     )
-            workspace = DockerWorkspace(
+            workspace = BenchDockerWorkspace(
                 server_image=agent_server_image,
                 working_dir="/workspace",
                 forward_env=forward_env or [],
@@ -274,14 +275,67 @@ class ScaleSWEEvaluation(Evaluation):
                 f"Unsupported workspace_type: {self.metadata.workspace_type}"
             )
 
-        for cmd in self.metadata.env_setup_commands or []:
-            res = workspace.execute_command(cmd)
-            if res.exit_code != 0:
-                raise RuntimeError(
-                    f"Failed to run env setup command '{cmd}': {res.stderr}"
-                )
-            logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
+        try:
+            for cmd in self.metadata.env_setup_commands or []:
+                res = workspace.execute_command(cmd)
+                if res.exit_code != 0:
+                    raise RuntimeError(
+                        f"Failed to run env setup command '{cmd}': {res.stderr}"
+                    )
+                logger.debug(f"Ran env setup command '{cmd}': {res.stdout}")
+        except Exception:
+            # Release the freshly created workspace; a raised setup failure
+            # would otherwise leak the container/remote runtime.
+            workspace.__exit__(None, None, None)
+            raise
         return workspace
+
+    # ---- Hook: prepare the task checkout ----------------------------------------
+    def prepare_repo(self, workspace: RemoteWorkspace, instance: EvalInstance) -> str:
+        """Normalize dataset fields, apply ``pre_commands``, return the workdir.
+
+        Returns the repository path the agent works in. Kept separate from
+        ``evaluate_instance`` so the mini-swe-agent sibling entry point reuses the
+        identical checkout preparation while the OpenHands path keeps its own
+        conversation/history wiring.
+        """
+        # Scale-SWE: repo is already at workdir (no /testbed copy needed)
+        repo_path = instance.data.get("workdir", "/workspace")
+        if not repo_path.endswith("/"):
+            repo_path += "/"
+
+        # Normalize fields for prompt template compatibility
+        instance.data["repo_path"] = repo_path
+        instance.data["base_commit"] = instance.data.get(
+            "parent_commit", instance.data.get("base_commit", "")
+        )
+        # Combine user/repo into full repo name if not already present
+        if "repo" not in instance.data or "/" not in instance.data.get("repo", ""):
+            user = instance.data.get("user", "")
+            repo = instance.data.get("repo", "")
+            if user and repo:
+                instance.data["repo"] = f"{user}/{repo}"
+
+        # Run pre_commands from dataset (git checkout, branch setup, etc.)
+        pre_commands = instance.data.get("pre_commands", "")
+        if pre_commands and pre_commands.strip():
+            pre_cmd = pre_commands.strip().removesuffix("\\n")
+            logger.info("Running pre_commands for %s", instance.id)
+            pre_result = workspace.execute_command(f"cd {repo_path} && {pre_cmd}")
+            if pre_result.exit_code != 0:
+                logger.warning(
+                    "pre_commands returned non-zero exit code %d: %s",
+                    pre_result.exit_code,
+                    pre_result.stderr,
+                )
+
+        breif_history = workspace.execute_command(
+            (f"cd {repo_path} ; git --no-pager log --oneline -10")
+        )
+        logger.info(
+            f"Repo status:\n* Current commit: {instance.data['base_commit']}\n* Top 10 history:\n{breif_history.stdout.strip()}"
+        )
+        return repo_path
 
     # ---- Hook: evaluate one instance ---------------------------------------------
     def evaluate_instance(
@@ -324,42 +378,10 @@ class ScaleSWEEvaluation(Evaluation):
             max_iteration_per_run=self.metadata.max_iterations,
         )
 
-        # Scale-SWE: repo is already at workdir (no /testbed copy needed)
-        repo_path = instance.data.get("workdir", "/workspace")
-        if not repo_path.endswith("/"):
-            repo_path += "/"
-
-        # Normalize fields for prompt template compatibility
-        instance.data["repo_path"] = repo_path
-        instance.data["base_commit"] = instance.data.get(
-            "parent_commit", instance.data.get("base_commit", "")
-        )
-        # Combine user/repo into full repo name if not already present
-        if "repo" not in instance.data or "/" not in instance.data.get("repo", ""):
-            user = instance.data.get("user", "")
-            repo = instance.data.get("repo", "")
-            if user and repo:
-                instance.data["repo"] = f"{user}/{repo}"
-
-        # Run pre_commands from dataset (git checkout, branch setup, etc.)
-        pre_commands = instance.data.get("pre_commands", "")
-        if pre_commands and pre_commands.strip():
-            pre_cmd = pre_commands.strip().removesuffix("\\n")
-            logger.info("Running pre_commands for %s", instance.id)
-            pre_result = workspace.execute_command(f"cd {repo_path} && {pre_cmd}")
-            if pre_result.exit_code != 0:
-                logger.warning(
-                    "pre_commands returned non-zero exit code %d: %s",
-                    pre_result.exit_code,
-                    pre_result.stderr,
-                )
-
-        breif_history = workspace.execute_command(
-            (f"cd {repo_path} ; git --no-pager log --oneline -10")
-        )
-        logger.info(
-            f"Repo status:\n* Current commit: {instance.data['base_commit']}\n* Top 10 history:\n{breif_history.stdout.strip()}"
-        )
+        # Conversation construction stays before the checkout on purpose: remote
+        # conversations need a moment to attach their event subscription before
+        # the first user message is sent (see CLAUDE.local.md).
+        repo_path = self.prepare_repo(workspace, instance)
 
         instruction = get_instruction(
             instance=instance.data,

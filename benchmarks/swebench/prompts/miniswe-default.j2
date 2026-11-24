@@ -1,0 +1,63 @@
+I have access to a python code repository in the directory {{ instance.repo_path }} .
+Consider the following issue description:
+
+<issue_description>
+{{ instance.problem_statement }}
+</issue_description>
+
+Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue_description> are met?
+I've already taken care of all changes to any of the test files described in the <issue_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+Your task is to make the minimal changes to non-test files in the {{ instance.repo_path }} directory to ensure the <issue_description> is satisfied.
+
+The development environment is a conda environment named `testbed`. Activate it in every
+command that needs it:
+
+```bash
+. /opt/miniconda3/etc/profile.d/conda.sh ; conda activate testbed
+```
+
+## Recommended workflow
+
+Work step by step so you can iterate on your changes and any problems:
+
+1. Analyze the repository and find the files related to the issue.
+2. Create a small script to reproduce the issue, then run it.
+3. Edit the source code to fix the issue (minimal, focused changes).
+4. Re-run your reproduction script and the relevant existing tests.
+5. Review `git diff` to confirm the change is complete and limited to source files.
+
+## Important boundaries
+
+- MODIFY: regular non-test source files under {{ instance.repo_path }}.
+- DO NOT MODIFY tests, and do not leave reproduction scripts or helper files in the repository.
+- Do not commit your changes.
+
+## Submission
+
+When you are done, submit your changes as a git patch. Follow these steps IN ORDER, as
+SEPARATE commands:
+
+Step 1 — create the patch, listing only the source files you modified:
+
+```bash
+cd {{ instance.repo_path }} && git diff -- path/to/file1 path/to/file2 > /tmp/patch.txt
+```
+
+Step 2 — verify the patch only contains your intended source changes (headers show
+`--- a/` and `+++ b/`):
+
+```bash
+cat /tmp/patch.txt
+```
+
+Step 3 — submit with this EXACT command (it must be a single command and must exit 0):
+
+```bash
+echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt
+```
+
+The marker `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` MUST be the first line of the command
+output; everything after it is treated as your final patch. If the command fails
+(non-zero exit status) nothing is submitted. After submitting you cannot continue working
+on this task.

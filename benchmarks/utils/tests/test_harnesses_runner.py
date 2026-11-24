@@ -18,7 +18,7 @@ from benchmarks.utils.harnesses.distribution import HarnessDistribution
 from benchmarks.utils.harnesses.rollout import RolloutManagerError
 from benchmarks.utils.harnesses.workspace import ProcessOutcome
 from benchmarks.utils.models import EvalInstance
-from benchmarks.utils.tests.fakes import (
+from benchmarks.utils.tests.harness_fakes import (
     PATCH,
     FakeWorkspace,
     command_result,
