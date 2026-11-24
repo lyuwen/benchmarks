@@ -59,6 +59,8 @@ multiswebench-eval = "benchmarks.multiswebench.eval_infer:main"
 openagentsafety-infer = "benchmarks.openagentsafety.run_infer:main"
 swebenchmultimodal-infer = "benchmarks.swebenchmultimodal.run_infer:main"
 swebenchmultimodal-eval = "benchmarks.swebenchmultimodal.eval_infer:main"
+harbor-infer = "benchmarks.harbor.run_infer:main"
+harbor-eval = "benchmarks.harbor.eval_infer:main"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
