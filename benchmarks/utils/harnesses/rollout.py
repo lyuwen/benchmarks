@@ -27,7 +27,7 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from openhands.sdk.llm import Metrics
 from openhands.sdk.llm.utils.metrics import TokenUsage
@@ -593,12 +593,13 @@ def build_metrics(export: dict[str, Any], model_name: str) -> Metrics | None:
 
 
 def main_trajectory(export: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the main conversation trajectory (longest ``conversation`` branch)."""
+    """Return the main conversation trajectory (longest non-excluded branch)."""
     candidates = [
         trajectory
         for trajectory in export.get("trajectories") or []
         if isinstance(trajectory, dict)
         and trajectory.get("kind", "conversation") == "conversation"
+        and not trajectory.get("exclude_from_training")
     ]
     if not candidates:
         return None
@@ -609,6 +610,60 @@ def main_trajectory(export: dict[str, Any]) -> dict[str, Any] | None:
             len(trajectory.get("messages") or []),
         ),
     )
+
+
+def is_openai_tool_list(value: Any) -> TypeGuard[list[dict[str, Any]]]:
+    """Whether ``value`` is a non-empty OpenAI function-tool list."""
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(
+            isinstance(tool, dict) and str(tool.get("type")) == "function"
+            for tool in value
+        )
+    )
+
+
+def resolve_trajectory_tools(
+    trajectory: dict[str, Any], history: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Resolve the OpenAI function-tool list a captured trajectory used.
+
+    The export keeps deduplicated variants in ``tool_sets`` and a per-turn
+    ``tool_set`` index; this picks the variant of the last turn (tools can change
+    mid-session), ``[]`` for explicitly tool-less requests (auto-mode
+    classifier/security monitor), and falls back to the root ``tools`` view only
+    for older dumps without per-trajectory sets.
+    """
+    tool_sets = trajectory.get("tool_sets")
+    turns = [turn for turn in trajectory.get("turns") or [] if isinstance(turn, dict)]
+    if isinstance(tool_sets, list):
+        if not tool_sets:
+            # Requests carried no tools at all; never inherit another
+            # trajectory's tool list.
+            return []
+        for turn in reversed(turns):
+            index = turn.get("tool_set")
+            if (
+                isinstance(index, int)
+                and 0 <= index < len(tool_sets)
+                and is_openai_tool_list(tool_sets[index])
+            ):
+                return tool_sets[index]
+        for candidate in tool_sets:
+            if is_openai_tool_list(candidate):
+                return candidate
+        return []
+
+    # Fallbacks for older/foreign history dumps without per-trajectory sets.
+    top_tools = history.get("tools")
+    if is_openai_tool_list(top_tools):
+        return top_tools
+    if isinstance(top_tools, list):
+        for candidate in top_tools:
+            if is_openai_tool_list(candidate):
+                return candidate
+    return []
 
 
 def collect_tool_sets(export: dict[str, Any]) -> list[list[dict[str, Any]]]:

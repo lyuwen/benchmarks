@@ -21,10 +21,12 @@ from benchmarks.utils.harnesses.rollout import (
     export_summary,
     find_free_port,
     http_json,
+    is_openai_tool_list,
     load_rollout_export,
     main_trajectory,
     normalize_upstream_base_url,
     parse_stream_json_result,
+    resolve_trajectory_tools,
     resolve_upstream_model,
     rollout_manager_command,
     upstream_credentials,
@@ -340,6 +342,56 @@ def test_build_metrics_sums_turns(tmp_path: Path) -> None:
 
 def test_build_metrics_without_usage(tmp_path: Path) -> None:
     assert build_metrics({"trajectories": []}, "m") is None
+
+
+def test_resolve_trajectory_tools() -> None:
+    tools_a = [{"type": "function", "function": {"name": "Bash"}}]
+    tools_b = [{"type": "function", "function": {"name": "Read"}}]
+    trajectory = {
+        "tool_sets": [tools_a, tools_b],
+        "turns": [{"tool_set": 0}, {"tool_set": 1}],
+    }
+    assert resolve_trajectory_tools(trajectory, {}) == tools_b
+    assert is_openai_tool_list(tools_a) is True
+    assert is_openai_tool_list([]) is False
+
+    # Explicitly tool-less requests (auto-mode classifier) must not inherit
+    # another trajectory's tools.
+    tool_less = {"tool_sets": [], "turns": [{"tool_set": None}]}
+    assert resolve_trajectory_tools(tool_less, {"tools": [tools_a]}) == []
+
+    # Older dumps without per-trajectory tool_sets fall back to the root view,
+    # accepting both the resolved list and the legacy list-of-lists shape.
+    assert resolve_trajectory_tools({}, {"tools": tools_a}) == tools_a
+    assert resolve_trajectory_tools({}, {"tools": [tools_a]}) == tools_a
+    assert resolve_trajectory_tools({}, {}) == []
+
+
+def test_main_trajectory_skips_excluded_branches() -> None:
+    tools = [{"type": "function", "function": {"name": "Bash"}}]
+    export = {
+        "trajectories": [
+            {
+                "trajectory_id": "s:1",
+                "kind": "conversation",
+                "exclude_from_training": False,
+                "leaf_turn_index": 2,
+                "messages": [{"role": "user", "content": "x"}],
+                "tool_sets": [tools],
+            },
+            {
+                "trajectory_id": "s:2",
+                "kind": "conversation",
+                "exclude_from_training": True,
+                "leaf_turn_index": 99,
+                "messages": [{"role": "user", "content": "aux"}],
+                "tool_sets": [],
+            },
+        ]
+    }
+    trajectory = main_trajectory(export)
+    assert trajectory is not None
+    assert trajectory["trajectory_id"] == "s:1"
 
 
 def test_main_trajectory_and_tool_sets(tmp_path: Path) -> None:

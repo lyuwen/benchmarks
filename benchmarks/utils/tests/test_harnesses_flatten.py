@@ -238,6 +238,8 @@ def test_resolve_tools_falls_back_to_top_level_tools() -> None:
         "tool_sets": None,
     }
     assert flatten.resolve_tools(trajectory, history) == [TOOL]
+    # New-format history dumps already resolve the root tools field.
+    assert flatten.resolve_tools({}, {"tools": [TOOL]}) == [TOOL]
     assert flatten.resolve_tools({"tool_sets": []}, {"tools": []}) == []
 
 

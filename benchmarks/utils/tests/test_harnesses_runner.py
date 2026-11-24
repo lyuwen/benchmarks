@@ -294,6 +294,11 @@ def test_run_harness_instance_success(
     assert history["test_result"]["git_patch"].strip() == PATCH.strip()
     assert history["messages"][0]["role"] == "user"
     assert history["stats"]["requests"] == 2
+    # Root history tools is a resolved OpenAI tool list; raw variants are kept
+    # separately for provenance.
+    assert history["tools"] == EXPORT["trajectories"][0]["tool_sets"][0]
+    assert history["tool_sets"] == EXPORT["trajectories"][0]["tool_sets"]
+    assert all(isinstance(tool, dict) for tool in history["tools"])
     assert history["run"]["exit_code"] == 0
     assert history["evaluation"] is True
     assert history["repository"]["base_commit"] == "base123"

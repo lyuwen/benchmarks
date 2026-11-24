@@ -402,7 +402,8 @@ The per-instance **history JSON** mirrors the other benchmarks' dumps:
 | Key | Content |
 | --- | --- |
 | `messages` | messages of the main conversation trajectory |
-| `tools` | deduplicated tool lists captured for the session |
+| `tools` | OpenAI function-tool list resolved for the main trajectory (directly usable by a trainer) |
+| `tool_sets` | deduplicated raw tool-list variants seen in the session (provenance; per-turn mapping lives in the export's `turns[].tool_set`) |
 | `trajectories`, `request_log`, `stats` | the rollout export's trajectory data |
 | `test_result.git_patch` | candidate patch (also in `output.jsonl`) |
 | `evaluation` | judge verdict (`true`/`false`/`null`), when a judge ran |
@@ -475,8 +476,9 @@ Notes:
   `trajectories[].tool_sets` with a `turns[].tool_set` index. The flattened
   `tools` field is the variant used by the trajectory's last turn (falling back
   to the first variant), or `[]` when the request was tool-less. The root-level
-  `tools` in `*.history.json` is only a union/provenance view of all variants;
-  do not feed it to a trainer directly.
+  `tools` in `*.history.json` is already the resolved list for the main
+  trajectory; `tool_sets` keeps all variants for provenance (older dumps without
+  per-trajectory sets may still expose the legacy list-of-lists `tools`).
 - `tool.message` ids are checked against preceding assistant calls; trailing
   assistant tool calls without results are allowed (that continuation lives in
   the next fragment).

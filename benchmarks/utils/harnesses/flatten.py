@@ -39,7 +39,9 @@ import logging
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any
+
+from benchmarks.utils.harnesses.rollout import resolve_trajectory_tools
 
 
 logger = logging.getLogger(__name__)
@@ -96,54 +98,11 @@ def iter_json_documents(path: str | Path) -> Iterator[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _is_openai_tool_list(
-    value: Any,
-) -> TypeGuard[list[dict[str, Any]]]:
-    return (
-        isinstance(value, list)
-        and bool(value)
-        and all(
-            isinstance(tool, dict) and str(tool.get("type")) == "function"
-            for tool in value
-        )
-    )
-
-
 def resolve_tools(
     trajectory: dict[str, Any], history: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """Resolve the OpenAI function-tool list used by one captured trajectory."""
-    tool_sets = trajectory.get("tool_sets")
-    turns = [turn for turn in trajectory.get("turns") or [] if isinstance(turn, dict)]
-    if isinstance(tool_sets, list):
-        # An explicit empty list means the requests carried no tools at all
-        # (e.g. auto-mode classifier / security-monitor calls). Never fall back
-        # to another trajectory's tools in that case.
-        if not tool_sets:
-            return []
-        # Prefer the tool set of the last turn (tools can change mid-session).
-        for turn in reversed(turns):
-            index = turn.get("tool_set")
-            if (
-                isinstance(index, int)
-                and 0 <= index < len(tool_sets)
-                and _is_openai_tool_list(tool_sets[index])
-            ):
-                return tool_sets[index]
-        for candidate in tool_sets:
-            if _is_openai_tool_list(candidate):
-                return candidate
-        return []
-
-    # Fallbacks for older/foreign history dumps without per-trajectory sets.
-    top_tools = history.get("tools")
-    if _is_openai_tool_list(top_tools):
-        return top_tools
-    if isinstance(top_tools, list):
-        for candidate in top_tools:
-            if _is_openai_tool_list(candidate):
-                return candidate
-    return []
+    return resolve_trajectory_tools(trajectory, history)
 
 
 def _aligned(value: Any, size: int) -> list[Any] | None:

@@ -38,6 +38,7 @@ from benchmarks.utils.harnesses.rollout import (
     export_summary,
     load_rollout_export,
     main_trajectory,
+    resolve_trajectory_tools,
     upstream_credentials,
 )
 from benchmarks.utils.harnesses.workspace import DockerContainerWorkspace
@@ -484,7 +485,15 @@ def build_history_payload(
 ) -> dict[str, Any]:
     """History JSON compatible with the other benchmark history dumps."""
     messages = (main_trajectory_payload or {}).get("messages") or []
-    tools = collect_tool_sets(export) if export else []
+    # ``tools`` is the OpenAI tool list actually used by the main trajectory
+    # (directly usable by trainers); the deduplicated raw variants are kept
+    # alongside as ``tool_sets`` for provenance.
+    tools = (
+        resolve_trajectory_tools(main_trajectory_payload, export)
+        if export is not None and main_trajectory_payload is not None
+        else []
+    )
+    tool_sets = collect_tool_sets(export) if export else []
     try:
         rollout_relative = os.path.relpath(rollout_export_path, request.output_dir)
     except ValueError:  # pragma: no cover - different drives on Windows
@@ -503,6 +512,7 @@ def build_history_payload(
         "instruction": request.instruction,
         "messages": messages,
         "tools": tools,
+        "tool_sets": tool_sets,
         "trajectories": (export or {}).get("trajectories") or [],
         "request_log": (export or {}).get("request_log") or [],
         "stats": stats,
