@@ -553,10 +553,13 @@ exported as many prefix fragments (6 fragments for a 23-request run). The
 `harness-streamline-histories` tool merges them **in the history JSON**, next to
 the flattening step:
 
-- fragments are grouped when one message list is a prefix of the other modulo
-  exactly those replay normalizations (Bash `cd` prefix, Edit `replace_all` and
-  trailing whitespace); this covers the main conversation, sub-agents and other
-  side conversations;
+- fragments are grouped when one message list is a prefix of the other after
+  both sides' tool calls are restored to the captured originals (the matching
+  view is the same one written to the output, so any client replay rewrite is
+  tolerated as long as the captured response recovers the original; Bash `cd`,
+  Edit `replace_all` and trailing whitespace are recognized for contexts whose
+  original response is missing); this covers the main conversation, sub-agents
+  and other side conversations;
 - a merged trajectory reuses the longest fragment's messages, restores the
   tool-call arguments the model originally generated (recovered from the
   captured responses, so the `cd <cwd> &&` prefix is back), unions the fragments'

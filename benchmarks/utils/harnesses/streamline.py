@@ -293,6 +293,22 @@ def _restore_original_tool_calls(
     return restored
 
 
+def _restored_messages_for_matching(
+    trajectory: dict[str, Any], responses: dict[tuple[str, ...], dict]
+) -> list[dict[str, Any]]:
+    """Messages with captured original tool arguments, for prefix matching.
+
+    Replayed copies carry whatever normalization the client applied; the final
+    output restores the captured originals, so matching must run on the same
+    restored view. Otherwise a fragment whose replay rewrite is not in the small
+    normalization whitelist would be kept as a spurious branch leaf even though
+    it becomes a strict prefix after restoration.
+    """
+    messages = list(_messages(trajectory))
+    _restore_original_tool_calls(messages, responses)
+    return messages
+
+
 def _merge_group(
     history: dict[str, Any],
     base: dict[str, Any],
@@ -464,6 +480,12 @@ def streamline_history(
         and _messages(trajectory)
     ]
 
+    comparable = {
+        str(trajectory.get("trajectory_id")): _restored_messages_for_matching(
+            trajectory, responses
+        )
+        for trajectory in eligible
+    }
     absorbed_ids: set[str] = set()
     groups: dict[str, list[dict[str, Any]]] = {}
     # Longest fragments are the canonical bases; shorter fragments are prefix
@@ -479,13 +501,13 @@ def streamline_history(
         base_id = str(base.get("trajectory_id"))
         if base_id in absorbed_ids:
             continue
-        base_messages = _messages(base)
+        base_messages = comparable[base_id]
         absorbed: list[dict[str, Any]] = []
         for candidate in eligible:
             candidate_id = str(candidate.get("trajectory_id"))
             if candidate_id == base_id or candidate_id in absorbed_ids:
                 continue
-            candidate_messages = _messages(candidate)
+            candidate_messages = comparable[candidate_id]
             if len(candidate_messages) > len(base_messages):
                 continue
             if not _is_message_prefix(base_messages, candidate_messages):

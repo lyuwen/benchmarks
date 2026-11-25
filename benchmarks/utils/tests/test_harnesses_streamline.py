@@ -321,7 +321,7 @@ def test_streamline_keeps_divergent_branches() -> None:
     tool_1 = tool_result("call_1", "ok")
     original_2 = assistant(calls=[call("call_2", "Bash", {"command": "cd /x && pwd"})])
     other_2 = assistant(
-        calls=[call("call_2", "Bash", {"command": "cd /x && git diff"})]
+        calls=[call("call_3", "Bash", {"command": "cd /x && git diff"})]
     )
 
     base = trajectory(
@@ -459,3 +459,49 @@ def test_argument_normalization_matches_replay_rewrites_only() -> None:
         call("c2", "Edit", {"file_path": "/x", "old_string": "a", "new_string": "c"}),
         edit_replayed,
     )
+
+
+def test_prefix_matching_uses_restored_original_arguments() -> None:
+    """A replay rewrite outside the small whitelist must not keep a branch."""
+    original = call("call_read", "Read", {"file_path": "/x"})
+    replayed = call("call_read", "Read", {"file_path": "/x", "limit": 2000})
+    result = tool_result("call_read", "contents")
+    later = call("call_2", "Bash", {"command": "cd /x && pwd"})
+
+    fragment_a = trajectory(
+        "run:1",
+        [SYSTEM, USER, assistant(calls=[original])],
+        [turn(1, 2, trained=True, response=assistant(calls=[original]))],
+        leaf=1,
+        trajectory_index=0,
+    )
+    fragment_b = trajectory(
+        "run:2",
+        [SYSTEM, USER, assistant(calls=[replayed]), result, assistant(calls=[later])],
+        [
+            turn(1, 2, trained=False, response=assistant(calls=[replayed])),
+            turn(2, 4, trained=True, response=assistant(calls=[later])),
+        ],
+        leaf=2,
+        trajectory_index=1,
+    )
+    # Raw replay copies differ beyond the known normalizations...
+    assert not streamline._messages_match(
+        fragment_b["messages"][2], fragment_a["messages"][2]
+    )
+
+    history = {
+        "instance_id": "owner__repo-1",
+        "messages": [],
+        "tools": [BASH],
+        "trajectories": [fragment_a, fragment_b],
+    }
+    streamlined = streamline.streamline_history(history)
+    # ... but restoring the captured original arguments makes them a prefix.
+    assert len(streamlined["trajectories"]) == 1
+    merged = streamlined["trajectories"][0]
+    assert merged["streamlined"]["absorbed_trajectory_ids"] == ["run:1"]
+    assert merged["loss_mask"] == [0, 0, 1, 0, 1]
+    assert json.loads(
+        merged["messages"][2]["tool_calls"][0]["function"]["arguments"]
+    ) == {"file_path": "/x"}
