@@ -48,7 +48,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from benchmarks.utils.harnesses.rollout import resolve_trajectory_tools
+from benchmarks.utils.harnesses.rollout import (
+    resolve_trajectory_tools,
+    restore_stop_sequences as attach_stop_sequences,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -164,59 +167,6 @@ def _base_record(history: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
-def _restore_stop_sequences(
-    trajectory: dict[str, Any], messages: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Reattach single stop sequences the API stripped from assistant replies.
-
-    Chat-Completions (like the Anthropic Messages API) removes the matched stop
-    sequence from the returned content. Claude Code's auto-mode classifier, for
-    example, sends ``stop: ["</block>"]`` and receives ``"<block>no"``; for
-    training the model output should be ``"<block>no</block>"``. Only turns
-    whose request configured exactly one stop sequence and that finished with
-    ``finish_reason == "stop"`` are changed, and only for non-empty text
-    assistant messages without tool calls. Multiple stop sequences are
-    ambiguous (the API does not report which one matched), so they are left
-    untouched.
-    """
-    turns_by_message: dict[int, dict[str, Any]] = {}
-    for turn in trajectory.get("turns") or []:
-        if isinstance(turn, dict) and isinstance(turn.get("message_index"), int):
-            turns_by_message[int(turn["message_index"])] = turn
-    restored: list[dict[str, Any]] = []
-    for index, message in enumerate(messages):
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            continue
-        if message.get("tool_calls"):
-            continue
-        turn = turns_by_message.get(index)
-        if turn is None or turn.get("finish_reason") != "stop":
-            continue
-        request = turn.get("request")
-        stop = request.get("stop") if isinstance(request, dict) else None
-        if isinstance(stop, str):
-            candidates = [stop]
-        elif isinstance(stop, list):
-            candidates = [value for value in stop if isinstance(value, str) and value]
-        else:
-            candidates = []
-        if len(candidates) != 1:
-            continue
-        sequence = candidates[0]
-        content = message.get("content")
-        if not isinstance(content, str) or not content or content.endswith(sequence):
-            continue
-        messages[index] = {**message, "content": content + sequence}
-        restored.append(
-            {
-                "message_index": index,
-                "turn_index": turn.get("turn_index"),
-                "stop_sequence": sequence,
-            }
-        )
-    return restored
-
-
 def flatten_trajectory(
     history: dict[str, Any],
     trajectory: dict[str, Any],
@@ -226,7 +176,7 @@ def flatten_trajectory(
     """Flatten one captured trajectory fragment into a training-ready record."""
     messages = [message for message in trajectory.get("messages") or [] if message]
     restored = (
-        _restore_stop_sequences(trajectory, messages) if restore_stop_sequences else []
+        attach_stop_sequences(trajectory, messages) if restore_stop_sequences else []
     )
     record = _base_record(history)
     record.update(
@@ -450,7 +400,7 @@ def stitch_row(
         return None
     messages = [message for message in trajectory.get("messages") or [] if message]
     restored = (
-        _restore_stop_sequences(trajectory, messages) if restore_stop_sequences else []
+        attach_stop_sequences(trajectory, messages) if restore_stop_sequences else []
     )
     if verbatim:
         messages = restore_verbatim_messages(messages, history)

@@ -141,8 +141,12 @@ Sampling parameters from the LLM config (temperature/top_p/reasoning_effort/…)
 are forced through the rollout manager, Claude Code's auto-mode classifier
 conversation can be captured with `--harness-permission-mode auto`, and
 `uv run harness-flatten-histories` flattens the history dumps into OpenAI-format
-training trajectories. See **[docs/harnesses.md](docs/harnesses.md)** for
-architecture, configuration, outputs, flattening and troubleshooting.
+training trajectories. Task finalization writes each history as one compact JSON
+line (`cat *.history.json` is valid JSONL), re-attaches stripped stop sequences,
+and emits a streamlined companion with fragmented trajectories merged and the
+model's original tool arguments restored. See
+**[docs/harnesses.md](docs/harnesses.md)** for architecture, configuration,
+outputs, flattening and troubleshooting.
 
 ### mini-swe-agent harness
 

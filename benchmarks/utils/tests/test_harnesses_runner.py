@@ -289,7 +289,9 @@ def test_run_harness_instance_success(
     assert result.metrics.accumulated_token_usage is not None
     assert result.metrics.accumulated_token_usage.prompt_tokens == 30
     assert Path(result.history_path).is_file()
-    history = json.loads(Path(result.history_path).read_text())
+    raw_text = Path(result.history_path).read_text()
+    assert raw_text.endswith("\n") and raw_text.count("\n") == 1
+    history = json.loads(raw_text)
     assert history["instance_id"] == "i1"
     assert history["test_result"]["git_patch"].strip() == PATCH.strip()
     assert history["messages"][0]["role"] == "user"
@@ -304,6 +306,15 @@ def test_run_harness_instance_success(
     assert history["repository"]["base_commit"] == "base123"
     assert judge.calls[0]["git_patch"].strip() == PATCH.strip()
     # The harness ran inside the container, pointed at the proxy.
+    # Finalization also writes a one-line streamlined companion.
+    assert result.streamlined_history_path is not None
+    streamlined_text = Path(result.streamlined_history_path).read_text()
+    assert streamlined_text.endswith("\n") and streamlined_text.count("\n") == 1
+    streamlined = json.loads(streamlined_text)
+    assert streamlined["streamlined"]["fragments_before"] == 1
+    assert streamlined["streamlined"]["trajectories_after"] == 1
+    assert history["streamlined_history"] == "i1.attempt1.history.streamlined.json"
+
     run_kwargs = harness.ran[0]
     assert run_kwargs["proxy_url"] == "http://host.docker.internal:34567"
     assert run_kwargs["max_turns"] == 50
@@ -381,11 +392,16 @@ def test_publish_canonical_histories(tmp_path: Path) -> None:
         )
     runner.publish_canonical_histories(str(output_dir), str(output_path))
     assert json.loads((output_dir / "i1.history.json").read_text()) == {
-        "instance_id": "i1"
+        "instance_id": "i1",
+        "streamlined_history": "i1.history.streamlined.json",
     }
     assert json.loads((output_dir / "i2.history.json").read_text()) == {
-        "instance_id": "i2"
+        "instance_id": "i2",
+        "streamlined_history": "i2.history.streamlined.json",
     }
+    streamlined = json.loads((output_dir / "i1.history.streamlined.json").read_text())
+    assert streamlined["streamlined"]["fragments_before"] == 0
+    assert streamlined["trajectories"] == []
 
 
 def test_start_rollout_manager_passes_request_params(

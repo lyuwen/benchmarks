@@ -159,6 +159,16 @@ def test_build_harness_config_permission_mode_default_model(tmp_path: Path) -> N
     assert config.auto_mode_model is None
 
 
+def test_build_harness_config_streamlined_history_default(tmp_path: Path) -> None:
+    args = make_args(tmp_path, [])
+    _, config = build_harness_config(args)
+    assert config.write_streamlined_history is True
+
+    args = make_args(tmp_path, ["--no-streamline-history"])
+    _, config = build_harness_config(args)
+    assert config.write_streamlined_history is False
+
+
 def test_build_harness_config_upstream_logging(tmp_path: Path) -> None:
     args = make_args(
         tmp_path,

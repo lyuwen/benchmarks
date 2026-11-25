@@ -472,6 +472,88 @@ def _status_from_payload(payload: dict[str, Any]) -> RolloutManagerStatus:
     )
 
 
+def restore_stop_sequences(
+    trajectory: dict[str, Any], messages: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Reattach single stop sequences the API stripped from assistant replies.
+
+    Chat-Completions (like the Anthropic Messages API) removes the matched stop
+    sequence from the returned content. Claude Code's auto-mode classifier, for
+    example, sends ``stop: ["</block>"]`` and receives ``"<block>no"``; for
+    training the model output should be ``"<block>no</block>"``. Only turns
+    whose request configured exactly one stop sequence and that finished with
+    ``finish_reason == "stop"`` are changed, and only for non-empty text
+    assistant messages without tool calls. Multiple stop sequences are
+    ambiguous (the API does not report which one matched), so they are left
+    untouched.
+    """
+    turns_by_message: dict[int, dict[str, Any]] = {}
+    for turn in trajectory.get("turns") or []:
+        if isinstance(turn, dict) and isinstance(turn.get("message_index"), int):
+            turns_by_message[int(turn["message_index"])] = turn
+    restored: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if message.get("tool_calls"):
+            continue
+        turn = turns_by_message.get(index)
+        if turn is None or turn.get("finish_reason") != "stop":
+            continue
+        request = turn.get("request")
+        stop = request.get("stop") if isinstance(request, dict) else None
+        if isinstance(stop, str):
+            candidates = [stop]
+        elif isinstance(stop, list):
+            candidates = [value for value in stop if isinstance(value, str) and value]
+        else:
+            candidates = []
+        if len(candidates) != 1:
+            continue
+        sequence = candidates[0]
+        content = message.get("content")
+        if not isinstance(content, str) or not content or content.endswith(sequence):
+            continue
+        messages[index] = {**message, "content": content + sequence}
+        restored.append(
+            {
+                "message_index": index,
+                "turn_index": turn.get("turn_index"),
+                "stop_sequence": sequence,
+            }
+        )
+    return restored
+
+
+def attach_stop_sequences_to_history(history: dict[str, Any]) -> int:
+    """Reattach stripped stop sequences in every trajectory of a history dump.
+
+    Returns the number of assistant messages changed. The history's top-level
+    ``messages`` are refreshed from the main trajectory so they stay consistent.
+    """
+    trajectories = history.get("trajectories")
+    if not isinstance(trajectories, list):
+        return 0
+    changed = 0
+    for index, trajectory in enumerate(trajectories):
+        if not isinstance(trajectory, dict):
+            continue
+        messages = list(trajectory.get("messages") or [])
+        restored = restore_stop_sequences(trajectory, messages)
+        if not restored:
+            continue
+        updated = dict(trajectory)
+        updated["messages"] = messages
+        updated["restored_stop_sequences"] = restored
+        trajectories[index] = updated
+        changed += len(restored)
+    if changed:
+        main = main_trajectory(history)
+        if main is not None:
+            history["messages"] = main.get("messages") or []
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # upstream resolution
 # ---------------------------------------------------------------------------

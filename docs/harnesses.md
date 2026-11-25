@@ -380,8 +380,10 @@ attempt bookkeeping never mix):
 ├── output.jsonl                          # EvalOutput per instance (test_result.git_patch)
 ├── output_errors.jsonl
 ├── output.critic_attempt_<N>.jsonl
-├── <instance>.attempt<N>.history.json    # trajectory + patch + run metadata
-├── <instance>.history.json               # winning attempt (published after the run)
+├── <instance>.attempt<N>.history.json              # trajectory + patch + run metadata
+├── <instance>.attempt<N>.history.streamlined.json  # auto-streamlined companion
+├── <instance>.history.json                         # winning attempt (published after the run)
+├── <instance>.history.streamlined.json             # streamlined winning attempt
 ├── rollout/
 │   └── <instance>.attempt<N>.json        # rollout-manager trajectory export (schema v2)
 ├── logs/
@@ -413,14 +415,32 @@ The per-instance **history JSON** mirrors the other benchmarks' dumps:
 | `rollout_export` | relative path to the trajectory export |
 | `repository` | repo path, base commit, ignored pre-existing untracked files |
 | `warnings` | non-fatal harness/proxy problems (e.g. no captures) |
+| `streamlined_history` | relative path to the auto-streamlined companion file |
+| `restored_stop_sequences` | number of stripped stop sequences re-attached (when any) |
+
+Every history dump is written as **one compact JSON document per file, terminated
+by a newline**, so files can be concatenated directly into a JSONL corpus:
+
+```bash
+cat <eval_output_dir>/harnesses/claude-code/*.history.json > histories.jsonl
+```
+
+Task finalization also writes the streamlined companion
+`<instance>.attempt<N>.history.streamlined.json` (and
+`<instance>.history.streamlined.json` for the canonically published winning
+attempt): prefix fragments merged, original tool arguments restored and stripped
+stop sequences re-attached. Disable that companion with
+`--no-streamline-history`; the raw history is always written. See
+[Streamlining fragmented histories](#streamlining-fragmented-histories).
 
 ## Building training data: flattening histories
 
 `harness-flatten-histories` turns per-instance history dumps into JSONL records
 that carry **OpenAI Chat-Completions `messages` and `tools`** directly.
 
-Collect the history files first (a real JSONL file, or plain `cat` of the
-pretty-printed JSON files — the reader handles both):
+Collect the history files first (each history file is already a one-line JSON
+document, so plain `cat` works; the reader also accepts JSONL or older
+pretty-printed dumps):
 
 ```bash
 # either real JSONL ...
@@ -517,8 +537,9 @@ Notes:
   in `restored_stop_sequences: [{message_index, turn_index, stop_sequence}]`.
   Multiple stop sequences are ambiguous (the API does not report which matched)
   and are left verbatim; use `--no-restore-stop-sequences` to disable the
-  normalization entirely (the raw capture and `*.history.json` are never
-  modified — this is a flatten-time, training-oriented change).
+  normalization entirely. New runs already have stop sequences re-attached at
+  task finalization (raw and streamlined histories), so flattening is a no-op
+  there — it is kept for older captures and for the capture export.
 - A summary (`histories=… emitted=… warnings=…`) is printed to stderr; warnings
   never change stdout, which is pure JSONL.
 
@@ -552,8 +573,9 @@ the flattening step:
   pre-compaction leaf (`:N+1.parent = :N`), so a long session with 6 compactions
   keeps 7 merged chains plus the 6 pre-compaction branch leaves — both are needed
   because their trained turns are disjoint;
-- output is written next to the input as `<id>.history.streamlined.json`; the
-  original history is never modified and existing outputs are skipped unless
+- output is written next to the input as `<id>.history.streamlined.json` (one
+  compact JSON line + trailing newline, like the raw dumps); the original
+  history is never modified and existing outputs are skipped unless
   `--overwrite` is passed.
 
 ```bash
@@ -564,9 +586,10 @@ uv run harness-streamline-histories --dir \
 # recursively discover directories for a job-array list
 uv run harness-streamline-histories --root /path/to/run --list > dirs.txt
 
-# dry-run / include per-attempt histories
+# dry-run / include per-attempt histories / keep API-verbatim aux replies
 uv run harness-streamline-histories --dir ... --dry-run
 uv run harness-streamline-histories --dir ... --include-attempts
+uv run harness-streamline-histories --dir ... --no-restore-stop-sequences
 ```
 
 ### Distributed SLURM job array

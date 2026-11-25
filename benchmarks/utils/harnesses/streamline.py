@@ -17,7 +17,10 @@ This tool merges such fragments back:
   prefix is present again;
 - the training mask is the union of the fragments' trained turns;
 - auxiliary requests (auto-mode classifier / security monitor) and
-  compaction/summarization trajectories are kept unchanged;
+  compaction/summarization trajectories are not merged; stripped stop
+  sequences are re-attached to every final trajectory, so classifier replies
+  become ``<block>no</block>`` again (``--no-restore-stop-sequences`` keeps the
+  API-verbatim text);
 - the history's root ``messages`` (and ``tools``/``tool_sets``) are taken from
   the last non-auxiliary conversation trajectory, matching the final
   conversation state;
@@ -46,6 +49,7 @@ from typing import Any
 from benchmarks.utils.harnesses.rollout import (
     collect_tool_sets,
     resolve_trajectory_tools,
+    restore_stop_sequences as attach_stop_sequences,
 )
 
 
@@ -441,7 +445,9 @@ def _latest_conversation_trajectory(
     return max(pool, key=_last_turn_index)
 
 
-def streamline_history(history: dict[str, Any]) -> dict[str, Any]:
+def streamline_history(
+    history: dict[str, Any], *, restore_stop_sequences: bool = True
+) -> dict[str, Any]:
     """Return a copy of ``history`` with fragmented conversations merged."""
     trajectories = [
         trajectory
@@ -525,6 +531,19 @@ def streamline_history(history: dict[str, Any]) -> dict[str, Any]:
         streamlined[index] = updated
         branch_restored += restored
 
+    stop_sequence_restorations = 0
+    if restore_stop_sequences:
+        for index, trajectory in enumerate(streamlined):
+            messages = list(_messages(trajectory))
+            restored = attach_stop_sequences(trajectory, messages)
+            if not restored:
+                continue
+            updated = dict(trajectory)
+            updated["messages"] = messages
+            updated["restored_stop_sequences"] = restored
+            streamlined[index] = updated
+            stop_sequence_restorations += len(restored)
+
     root = _latest_conversation_trajectory(streamlined)
     merged_summaries = [
         {
@@ -574,6 +593,7 @@ def streamline_history(history: dict[str, Any]) -> dict[str, Any]:
         )
         + branch_restored,
         "branch_trajectories_restored": branch_restored,
+        "restored_stop_sequences": stop_sequence_restorations,
     }
     return result
 
@@ -584,7 +604,11 @@ def streamline_history(history: dict[str, Any]) -> dict[str, Any]:
 
 
 def streamline_history_file(
-    path: str | os.PathLike[str], *, overwrite: bool = False, dry_run: bool = False
+    path: str | os.PathLike[str],
+    *,
+    overwrite: bool = False,
+    dry_run: bool = False,
+    restore_stop_sequences: bool = True,
 ) -> dict[str, Any] | None:
     """Streamline one ``*.history.json`` file next to it; return the summary."""
     source = Path(path)
@@ -593,7 +617,7 @@ def streamline_history_file(
         logger.info("skip (exists): %s", target)
         return None
     history = json.loads(source.read_text(encoding="utf-8"))
-    result = streamline_history(history)
+    result = streamline_history(history, restore_stop_sequences=restore_stop_sequences)
     summary = {
         "input": str(source),
         "output": str(target),
@@ -607,6 +631,7 @@ def streamline_history_file(
             "root_messages_from_trajectory_id"
         ],
         "auxiliary_kept": result["streamlined"]["auxiliary_kept"],
+        "restored_stop_sequences": result["streamlined"]["restored_stop_sequences"],
         "compaction_kept": result["streamlined"]["compaction_kept"],
     }
     if dry_run:
@@ -615,12 +640,14 @@ def streamline_history_file(
     _write_json_atomic(target, result)
     logger.info(
         "streamlined %s: %d -> %d trajectories, %d merged group(s), "
-        "%d restored tool-call message(s), root from %s",
+        "%d restored tool-call message(s), %d restored stop sequence(s), "
+        "root from %s",
         source,
         summary["fragments_before"],
         summary["trajectories_after"],
         summary["merged_groups"],
         summary["restored_tool_call_messages"],
+        summary["restored_stop_sequences"],
         summary["root_messages_from_trajectory_id"],
     )
     return summary
@@ -638,7 +665,9 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     )
     try:
         with handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            # One JSON document per line (+ trailing newline), like the raw
+            # history dumps, so streamlined files are cat-able JSONL too.
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -737,6 +766,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Report what would be written without writing files.",
     )
     parser.add_argument(
+        "--no-restore-stop-sequences",
+        dest="restore_stop_sequences",
+        action="store_false",
+        help=(
+            "Keep assistant content exactly as the API returned it instead of "
+            "re-attaching single configured stop sequences (e.g. the auto-mode "
+            "classifier's </block>)"
+        ),
+    )
+    parser.add_argument(
         "--log-level", default="INFO", help="Logging level (default INFO)."
     )
     return parser
@@ -794,7 +833,10 @@ def main(argv: list[str] | None = None) -> int:
     for path in files:
         try:
             summary = streamline_history_file(
-                path, overwrite=args.overwrite, dry_run=args.dry_run
+                path,
+                overwrite=args.overwrite,
+                dry_run=args.dry_run,
+                restore_stop_sequences=args.restore_stop_sequences,
             )
         except Exception:  # noqa: BLE001 - report and continue with other files
             logger.exception("failed to streamline %s", path)

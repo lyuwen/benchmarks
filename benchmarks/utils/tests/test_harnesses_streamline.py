@@ -278,17 +278,30 @@ def test_streamline_merges_fragments_and_restores_original_arguments() -> None:
     assert sub["loss_mask"] == [0, 0, 1, 0, 1]
 
 
-def test_streamline_keeps_auxiliary_and_compaction_trajectories_unchanged() -> None:
+def test_streamline_reattaches_stop_sequences_but_does_not_merge_aux() -> None:
     history = make_history()
     before = by_id(history)
     result = streamline.streamline_history(history)
     after = by_id(result)
 
-    for trajectory_id in ("run:aux", "run:comp"):
-        assert after[trajectory_id] == before[trajectory_id]
-        assert "streamlined" not in after[trajectory_id]
+    # Auxiliary request: not merged, but its stripped stop sequence is re-attached.
+    auxiliary = after["run:aux"]
+    assert auxiliary["messages"][2]["content"] == "<block>no</block>"
+    assert auxiliary["restored_stop_sequences"] == [
+        {"message_index": 2, "turn_index": 3, "stop_sequence": "</block>"}
+    ]
+    assert "streamlined" not in auxiliary
+
+    # Compaction trajectory: untouched (no stop sequence configured).
+    assert after["run:comp"] == before["run:comp"]
+
     assert result["streamlined"]["auxiliary_kept"] == 1
     assert result["streamlined"]["compaction_kept"] == 1
+    assert result["streamlined"]["restored_stop_sequences"] == 1
+
+    # Opt-out keeps the API-verbatim assistant text.
+    verbatim = streamline.streamline_history(history, restore_stop_sequences=False)
+    assert by_id(verbatim)["run:aux"]["messages"][2]["content"] == "<block>no"
 
 
 def test_streamline_root_messages_from_latest_main_trajectory() -> None:
@@ -369,7 +382,9 @@ def test_streamline_history_file_and_attempt_skip(tmp_path: Path) -> None:
     assert summary is not None
     target = tmp_path / "owner__repo-1.history.streamlined.json"
     assert target.is_file()
-    data = json.loads(target.read_text(encoding="utf-8"))
+    text = target.read_text(encoding="utf-8")
+    assert text.endswith("\n") and text.count("\n") == 1
+    data = json.loads(text)
     assert data["streamlined"]["fragments_before"] == 6
     assert data["streamlined"]["trajectories_after"] == 4
 
