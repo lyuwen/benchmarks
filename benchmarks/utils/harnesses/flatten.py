@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.utils.harnesses.rollout import (
+    embed_reasoning_into_messages,
     resolve_trajectory_tools,
     restore_stop_sequences as attach_stop_sequences,
 )
@@ -175,6 +176,7 @@ def flatten_trajectory(
 ) -> dict[str, Any]:
     """Flatten one captured trajectory fragment into a training-ready record."""
     messages = [message for message in trajectory.get("messages") or [] if message]
+    embed_reasoning_into_messages(messages, trajectory.get("reasoning_content"))
     restored = (
         attach_stop_sequences(trajectory, messages) if restore_stop_sequences else []
     )
@@ -399,11 +401,12 @@ def stitch_row(
     if trajectory is None:
         return None
     messages = [message for message in trajectory.get("messages") or [] if message]
+    if verbatim:
+        messages = restore_verbatim_messages(messages, history)
+    embed_reasoning_into_messages(messages, trajectory.get("reasoning_content"))
     restored = (
         attach_stop_sequences(trajectory, messages) if restore_stop_sequences else []
     )
-    if verbatim:
-        messages = restore_verbatim_messages(messages, history)
     record = _base_record(history)
     fragment_ids = [
         fragment.get("trajectory_id")

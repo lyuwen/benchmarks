@@ -151,7 +151,11 @@ def test_flatten_trajectories_mode_has_messages_and_tools() -> None:
     assert len(records) == 2
     first = records[0]
     assert first["source"] == "trajectory"
-    assert first["messages"] == [SYSTEM, USER, ASSISTANT_1_REPLAYED]
+    assert first["messages"][:2] == [SYSTEM, USER]
+    assert first["messages"][2] == {
+        **ASSISTANT_1_REPLAYED,
+        "reasoning_content": "thinking",
+    }
     assert first["tools"] == [TOOL]
     assert first["loss_mask"] == [0, 0, 1]
     assert first["reasoning_content"] == [None, None, "thinking"]

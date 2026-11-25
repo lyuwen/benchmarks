@@ -36,6 +36,7 @@ from benchmarks.utils.harnesses.rollout import (
     attach_stop_sequences_to_history,
     build_metrics,
     collect_tool_sets,
+    embed_history_reasoning,
     export_summary,
     load_rollout_export,
     main_trajectory,
@@ -238,6 +239,15 @@ def run_harness_instance(
                 exc,
                 exc_info=True,
             )
+    try:
+        embedded_reasoning = embed_history_reasoning(history)
+        if embedded_reasoning:
+            history["reasoning_embedded_messages"] = embedded_reasoning
+    except Exception as exc:  # noqa: BLE001 - best-effort normalization
+        warnings.append(f"reasoning embedding failed: {exc}")
+        logger.warning(
+            "Reasoning embedding failed for %s: %s", instance_id, exc, exc_info=True
+        )
     try:
         restored_stops = attach_stop_sequences_to_history(history)
         if restored_stops:
@@ -644,6 +654,7 @@ def publish_canonical_histories(output_dir: str, output_path: str) -> None:
             logger.warning("Failed to publish history for %s: %s", instance_id, exc)
             continue
         try:
+            embed_history_reasoning(payload)
             restored_stops = attach_stop_sequences_to_history(payload)
             if restored_stops:
                 payload["restored_stop_sequences"] = restored_stops

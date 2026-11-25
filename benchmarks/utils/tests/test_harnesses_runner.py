@@ -52,6 +52,7 @@ EXPORT = {
                 {"role": "user", "content": "fix it"},
                 {"role": "assistant", "content": "done"},
             ],
+            "reasoning_content": [None, "thought about it"],
             "tool_sets": [[{"type": "function", "function": {"name": "Bash"}}]],
             "turns": [
                 {
@@ -295,6 +296,12 @@ def test_run_harness_instance_success(
     assert history["instance_id"] == "i1"
     assert history["test_result"]["git_patch"].strip() == PATCH.strip()
     assert history["messages"][0]["role"] == "user"
+    assert list(history["messages"][1].keys()) == [
+        "role",
+        "reasoning_content",
+        "content",
+    ]
+    assert history["messages"][1]["reasoning_content"] == "thought about it"
     assert history["stats"]["requests"] == 2
     # Root history tools is a resolved OpenAI tool list; raw variants are kept
     # separately for provenance.
@@ -313,6 +320,13 @@ def test_run_harness_instance_success(
     streamlined = json.loads(streamlined_text)
     assert streamlined["streamlined"]["fragments_before"] == 1
     assert streamlined["streamlined"]["trajectories_after"] == 1
+    assert list(streamlined["trajectories"][0]["messages"][1].keys()) == [
+        "role",
+        "reasoning_content",
+        "content",
+    ]
+    # New-format marker used to distinguish finalized output from stale files.
+    assert "reasoning_embedded_messages" in streamlined["streamlined"]
     assert history["streamlined_history"] == "i1.attempt1.history.streamlined.json"
 
     run_kwargs = harness.ran[0]

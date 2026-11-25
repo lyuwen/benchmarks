@@ -48,6 +48,7 @@ from typing import Any
 
 from benchmarks.utils.harnesses.rollout import (
     collect_tool_sets,
+    embed_reasoning_into_messages,
     resolve_trajectory_tools,
     restore_stop_sequences as attach_stop_sequences,
 )
@@ -577,6 +578,19 @@ def streamline_history(
             streamlined[index] = updated
             stop_sequence_restorations += len(restored)
 
+    reasoning_embedded = 0
+    for index, trajectory in enumerate(streamlined):
+        messages = list(_messages(trajectory))
+        embedded = embed_reasoning_into_messages(
+            messages, trajectory.get("reasoning_content")
+        )
+        if not embedded:
+            continue
+        updated = dict(trajectory)
+        updated["messages"] = messages
+        streamlined[index] = updated
+        reasoning_embedded += embedded
+
     root = _latest_conversation_trajectory(streamlined)
     merged_summaries = [
         {
@@ -627,6 +641,7 @@ def streamline_history(
         + branch_restored,
         "branch_trajectories_restored": branch_restored,
         "restored_stop_sequences": stop_sequence_restorations,
+        "reasoning_embedded_messages": reasoning_embedded,
     }
     return result
 
@@ -634,6 +649,24 @@ def streamline_history(
 # ---------------------------------------------------------------------------
 # files and CLI
 # ---------------------------------------------------------------------------
+
+
+def _is_current_streamlined(path: Path) -> bool:
+    """Whether an existing streamlined file was produced by the current code.
+
+    Older outputs (before reasoning embedding / branch restoration / compact
+    dumps) lack the ``reasoning_embedded_messages`` marker in the trailing
+    summary. Checking the tail avoids loading multi-hundred-MB files just to
+    decide whether to skip them.
+    """
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as handle:
+            handle.seek(max(0, size - 65536))
+            tail = handle.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return False
+    return '"reasoning_embedded_messages"' in tail
 
 
 def streamline_history_file(
@@ -647,8 +680,10 @@ def streamline_history_file(
     source = Path(path)
     target = source.with_name(source.name[: -len(HISTORY_SUFFIX)] + STREAMLINED_SUFFIX)
     if target.exists() and not overwrite:
-        logger.info("skip (exists): %s", target)
-        return None
+        if _is_current_streamlined(target):
+            logger.info("skip (up to date): %s", target)
+            return None
+        logger.info("stale streamlined output, regenerating: %s", target)
     history = json.loads(source.read_text(encoding="utf-8"))
     result = streamline_history(history, restore_stop_sequences=restore_stop_sequences)
     summary = {

@@ -397,15 +397,21 @@ attempt bookkeeping never mix):
 The **trajectory export** is the primary artifact: `trajectories` (prefix-tree
 order) with strict OpenAI Chat-Completions `messages`, `loss_mask`,
 `reasoning_content`, per-turn `request`/`response`, plus `request_log` (capture
-order) and `stats`. `reasoning_content` is **not embedded in `messages`** (strict
-OpenAI messages only carry `role`/`content`/`tool_calls`/`tool_call_id`/`name`):
-each trajectory has a message-aligned `reasoning_content` array (`null` where the
-model produced none), and the flattened JSONL records expose the same aligned
-array next to `messages`. The history's top-level `messages` field therefore has
-no reasoning; read it from `trajectories[].reasoning_content` or the flattened
-records. See the upstream
+order) and `stats`. In the **raw export** `messages` stays strict OpenAI
+(`role`/`content`/`tools`/`tool_call_id`/`name`) and reasoning lives in the
+message-aligned `reasoning_content` array (`null` where the model produced none).
+The **assembled** artifacts (finalized history dumps, streamlined companions and
+flattened records) mirror the model-facing request representation: assistant
+messages carry the reasoning field right after `role`:
+
+```json
+{"role": "assistant", "reasoning_content": "...", "content": "...", "tool_calls": [...]}
+```
+
+The aligned `reasoning_content` arrays are kept on the trajectories for
+provenance and older consumers. See the upstream
 [rollout-manager README](https://github.com/lyuwen/rollout-manager#export-format)
-for the full schema.
+for the export schema.
 
 The per-instance **history JSON** mirrors the other benchmarks' dumps:
 
@@ -493,9 +499,9 @@ Each output record contains at least:
 
 | Key | Meaning |
 | --- | --- |
-| `messages` | strict OpenAI Chat-Completions messages (`role`, `content`, assistant `tool_calls` with JSON-string `function.arguments`, `tool_call_id`) |
+| `messages` | OpenAI Chat-Completions messages (`role`, `content`, assistant `tool_calls` with JSON-string `function.arguments`, `tool_call_id`); assistant messages additionally carry `reasoning_content` right after `role` when the model produced reasoning |
 | `tools` | one OpenAI function-tool list, resolved from the trajectory's `tool_sets`/`turn.tool_set`; `[]` for requests that carried no tools (auto-mode classifier/security monitor) |
-| `loss_mask`, `reasoning_content` | message-aligned arrays from the capture (`reasoning_content` is kept out of `messages` by design) |
+| `loss_mask`, `reasoning_content` | message-aligned arrays from the capture (`reasoning_content` also mirrored inside the assistant messages; the array is kept for back-compat) |
 | `loss_mask` sum / `trained_turns` | which turns of the record are training targets |
 | `instance_id`, `attempt`, `harness`, `harness_version`, `model`, `instruction` | provenance |
 | `test_result.git_patch`, `evaluation`, `rollout_export`, `stats` | patch, judge verdict, raw capture path |
@@ -624,6 +630,30 @@ The launcher forwards extra arguments (`--overwrite`, `--dry-run`, ...), runs th
 module via `uv run`, and falls back to the active Python interpreter when `uv`
 is not on `PATH`. Run `uv sync` once on the cluster so the project environment
 is available; the job itself needs no GPU and only reads/writes the run tree.
+
+### Repairing runs produced before finalization existed
+
+New runs need no post-processing: the runner writes the finalized raw history
+and the streamlined companion itself. Older runs can be brought to the same
+format by re-running the streamliner over the run tree; it detects streamlined
+files written by old code (the `reasoning_embedded_messages` marker is missing),
+regenerates those, and skips up-to-date ones:
+
+```bash
+# one task per job directory, repairing stale companions (add --include-attempts
+# for runs that only have <id>.attemptN.history.json files)
+uv run harness-streamline-histories --root <run-root> --list > dirs.txt
+sbatch --array=0-$(($(wc -l < dirs.txt) - 1)) \
+  /path/to/repo/scripts/streamline_histories_slurm.sh dirs.txt
+# or locally in one process
+uv run harness-streamline-histories --root <run-root> [--include-attempts]
+```
+
+The old raw `*.history.json` files are left untouched (they are still valid
+inputs); the repaired `<id>.history.streamlined.json` companion is the compact,
+merged, reasoning-embedded artifact to use downstream. `harness-flatten-histories`
+also upgrades old raw histories on the fly (one-line records with reasoning
+embedded, restored tool arguments and stop sequences).
 
 Reference effects:
 

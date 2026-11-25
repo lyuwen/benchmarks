@@ -545,3 +545,42 @@ def test_merge_fills_reasoning_missing_from_base_context() -> None:
         None,
         "own thought",
     ]
+    assert merged["messages"][2]["reasoning_content"] == "absorbed thought"
+    assert merged["messages"][4]["reasoning_content"] == "own thought"
+    # reasoning_content sits right after role, before content/tool_calls.
+    assert list(merged["messages"][2].keys()) == [
+        "role",
+        "reasoning_content",
+        "content",
+        "tool_calls",
+    ]
+    assert list(merged["messages"][4].keys()) == [
+        "role",
+        "reasoning_content",
+        "content",
+    ]
+    assert (
+        streamline.streamline_history(history)["streamlined"][
+            "reasoning_embedded_messages"
+        ]
+        == 2
+    )
+
+
+def test_streamline_regenerates_stale_companion(tmp_path: Path) -> None:
+    source = tmp_path / "owner__repo-1.history.json"
+    source.write_text(json.dumps(make_history()), encoding="utf-8")
+    stale = tmp_path / "owner__repo-1.history.streamlined.json"
+    # An older output: pretty-printed and without the new summary marker.
+    stale.write_text(
+        json.dumps({"streamlined": {"fragments_before": 99}}, indent=2),
+        encoding="utf-8",
+    )
+
+    summary = streamline.streamline_history_file(source)
+    assert summary is not None
+    refreshed = json.loads(stale.read_text(encoding="utf-8"))
+    assert refreshed["streamlined"]["trajectories_after"] == 4
+    assert "reasoning_embedded_messages" in refreshed["streamlined"]
+    # A current companion is skipped on the next run.
+    assert streamline.streamline_history_file(source) is None

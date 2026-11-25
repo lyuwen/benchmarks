@@ -525,6 +525,82 @@ def restore_stop_sequences(
     return restored
 
 
+def embed_reasoning_into_messages(
+    messages: list[dict[str, Any]], reasoning_content: Any
+) -> int:
+    """Embed the aligned ``reasoning_content`` strings into assistant messages.
+
+    The rollout export keeps strict OpenAI messages and stores reasoning in a
+    parallel array, but the model-facing request messages carry
+    ``reasoning_content`` on assistant turns (Claude Code's replayed thinking
+    blocks convert to it). Assembled training histories/flattened records mirror
+    that representation, with the field placed right after ``role``:
+
+    ``{"role": "assistant", "reasoning_content": ..., "content": ...,
+    "tool_calls": [...]}``
+
+    Returns the number of messages whose shape changed.
+    """
+    reasoning = reasoning_content if isinstance(reasoning_content, list) else []
+    changed = 0
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        captured = reasoning[index] if index < len(reasoning) else None
+        existing = message.get("reasoning_content")
+        value = captured or existing
+        if not value:
+            continue
+        replacement: dict[str, Any] = {
+            "role": "assistant",
+            "reasoning_content": value,
+            "content": message.get("content"),
+        }
+        if message.get("name") is not None:
+            replacement["name"] = message["name"]
+        if message.get("tool_calls"):
+            replacement["tool_calls"] = message["tool_calls"]
+        for key, extra in message.items():
+            if key not in {
+                "role",
+                "content",
+                "reasoning_content",
+                "name",
+                "tool_calls",
+            }:
+                replacement[key] = extra
+        if replacement != message or list(replacement) != list(message):
+            messages[index] = replacement
+            changed += 1
+    return changed
+
+
+def embed_history_reasoning(history: dict[str, Any]) -> int:
+    """Embed reasoning in every trajectory's messages and refresh root messages."""
+    trajectories = history.get("trajectories")
+    if not isinstance(trajectories, list):
+        return 0
+    changed = 0
+    for index, trajectory in enumerate(trajectories):
+        if not isinstance(trajectory, dict):
+            continue
+        messages = list(trajectory.get("messages") or [])
+        embedded = embed_reasoning_into_messages(
+            messages, trajectory.get("reasoning_content")
+        )
+        if not embedded:
+            continue
+        updated = dict(trajectory)
+        updated["messages"] = messages
+        trajectories[index] = updated
+        changed += embedded
+    if changed:
+        main = main_trajectory(history)
+        if main is not None:
+            history["messages"] = main.get("messages") or []
+    return changed
+
+
 def attach_stop_sequences_to_history(history: dict[str, Any]) -> int:
     """Reattach stripped stop sequences in every trajectory of a history dump.
 

@@ -18,6 +18,8 @@ from benchmarks.utils.harnesses.rollout import (
     RolloutManagerError,
     build_metrics,
     collect_tool_sets,
+    embed_history_reasoning,
+    embed_reasoning_into_messages,
     export_summary,
     find_free_port,
     http_json,
@@ -359,6 +361,62 @@ def test_build_metrics_sums_turns(tmp_path: Path) -> None:
 
 def test_build_metrics_without_usage(tmp_path: Path) -> None:
     assert build_metrics({"trajectories": []}, "m") is None
+
+
+def test_embed_reasoning_into_messages() -> None:
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": "done"},
+    ]
+    changed = embed_reasoning_into_messages(
+        messages, [None, "thought", "answer reasoning"]
+    )
+    assert changed == 2
+    assert "reasoning_content" not in messages[0]
+    assert messages[1]["reasoning_content"] == "thought"
+    assert messages[2]["reasoning_content"] == "answer reasoning"
+    assert list(messages[1].keys()) == ["role", "reasoning_content", "content"]
+    assert list(messages[2].keys()) == ["role", "reasoning_content", "content"]
+
+    with_calls = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "Bash", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+    assert embed_reasoning_into_messages(with_calls, ["plan"]) == 1
+    assert list(with_calls[0].keys()) == [
+        "role",
+        "reasoning_content",
+        "content",
+        "tool_calls",
+    ]
+
+    history = {
+        "trajectories": [
+            {
+                "trajectory_id": "s:1",
+                "kind": "conversation",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "done"},
+                ],
+                "turns": [{"message_index": 1, "trained": True}],
+                "reasoning_content": [None, "thought"],
+            }
+        ]
+    }
+    assert embed_history_reasoning(history) == 1
+    assert history["trajectories"][0]["messages"][1]["reasoning_content"] == "thought"
+    assert history["messages"][1]["reasoning_content"] == "thought"
 
 
 def test_resolve_trajectory_tools() -> None:
