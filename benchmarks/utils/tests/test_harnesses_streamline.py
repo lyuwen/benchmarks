@@ -505,3 +505,43 @@ def test_prefix_matching_uses_restored_original_arguments() -> None:
     assert json.loads(
         merged["messages"][2]["tool_calls"][0]["function"]["arguments"]
     ) == {"file_path": "/x"}
+
+
+def test_merge_fills_reasoning_missing_from_base_context() -> None:
+    original = assistant(calls=[call("call_1", "Bash", {"command": "cd /x && ls"})])
+    replayed = assistant(calls=[call("call_1", "Bash", {"command": "ls"})])
+    later = assistant(content="done")
+    fragment_a = trajectory(
+        "run:1",
+        [SYSTEM, USER, original],
+        [turn(1, 2, trained=True, response=original)],
+        leaf=1,
+        trajectory_index=0,
+    )
+    fragment_a["reasoning_content"] = [None, None, "absorbed thought"]
+    fragment_b = trajectory(
+        "run:2",
+        [SYSTEM, USER, replayed, tool_result("call_1", "ok"), later],
+        [
+            turn(1, 2, trained=False, response=replayed),
+            turn(2, 4, trained=True, response=later),
+        ],
+        leaf=2,
+        trajectory_index=1,
+    )
+    fragment_b["reasoning_content"] = [None, None, None, None, "own thought"]
+    history = {
+        "instance_id": "owner__repo-1",
+        "messages": [],
+        "tools": [BASH],
+        "trajectories": [fragment_a, fragment_b],
+    }
+    merged = streamline.streamline_history(history)["trajectories"][0]
+    assert merged["streamlined"]["absorbed_trajectory_ids"] == ["run:1"]
+    assert merged["reasoning_content"] == [
+        None,
+        None,
+        "absorbed thought",
+        None,
+        "own thought",
+    ]

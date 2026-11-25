@@ -397,7 +397,13 @@ attempt bookkeeping never mix):
 The **trajectory export** is the primary artifact: `trajectories` (prefix-tree
 order) with strict OpenAI Chat-Completions `messages`, `loss_mask`,
 `reasoning_content`, per-turn `request`/`response`, plus `request_log` (capture
-order) and `stats`. See the upstream
+order) and `stats`. `reasoning_content` is **not embedded in `messages`** (strict
+OpenAI messages only carry `role`/`content`/`tool_calls`/`tool_call_id`/`name`):
+each trajectory has a message-aligned `reasoning_content` array (`null` where the
+model produced none), and the flattened JSONL records expose the same aligned
+array next to `messages`. The history's top-level `messages` field therefore has
+no reasoning; read it from `trajectories[].reasoning_content` or the flattened
+records. See the upstream
 [rollout-manager README](https://github.com/lyuwen/rollout-manager#export-format)
 for the full schema.
 

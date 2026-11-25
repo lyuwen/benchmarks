@@ -415,7 +415,18 @@ def _merge_group(
         merged["parent_trajectory_id"] = None
     reasoning = base.get("reasoning_content")
     if isinstance(reasoning, list) and len(reasoning) == len(messages):
-        merged["reasoning_content"] = reasoning
+        merged_reasoning = list(reasoning)
+        # Context copies in the base fragment can lack reasoning that the
+        # owning fragment captured; fill those positions from the absorbed
+        # fragments (their message lists are prefixes of the base).
+        for fragment in absorbed:
+            fragment_reasoning = fragment.get("reasoning_content")
+            if not isinstance(fragment_reasoning, list):
+                continue
+            for index in range(min(len(fragment_reasoning), len(merged_reasoning))):
+                if merged_reasoning[index] is None and fragment_reasoning[index]:
+                    merged_reasoning[index] = fragment_reasoning[index]
+        merged["reasoning_content"] = merged_reasoning
     return merged
 
 
