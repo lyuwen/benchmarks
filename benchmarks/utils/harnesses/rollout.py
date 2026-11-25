@@ -601,6 +601,62 @@ def embed_history_reasoning(history: dict[str, Any]) -> int:
     return changed
 
 
+def embed_loss_mask_into_messages(
+    messages: list[dict[str, Any]], loss_mask: Any
+) -> int:
+    """Fold the aligned ``loss_mask`` array into each message as an int field.
+
+    Assembled artifacts carry per-message training targets so downstream code
+    does not have to keep two aligned lists; the array stays on the trajectory
+    for provenance. Returns the number of messages changed.
+    """
+    if not isinstance(loss_mask, list):
+        return 0
+    changed = 0
+    limit = min(len(messages), len(loss_mask))
+    for index in range(limit):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            # Non-assistant messages are never training targets.
+            continue
+        value = 1 if loss_mask[index] else 0
+        if message.get("loss_mask") == value and "loss_mask" in message:
+            # Keep it as the last key for a stable shape.
+            if list(message)[-1] == "loss_mask":
+                continue
+        replacement = {
+            key: extra for key, extra in message.items() if key != "loss_mask"
+        }
+        replacement["loss_mask"] = value
+        messages[index] = replacement
+        changed += 1
+    return changed
+
+
+def embed_history_loss_mask(history: dict[str, Any]) -> int:
+    """Fold ``loss_mask`` into every trajectory's messages and refresh root messages."""
+    trajectories = history.get("trajectories")
+    if not isinstance(trajectories, list):
+        return 0
+    changed = 0
+    for index, trajectory in enumerate(trajectories):
+        if not isinstance(trajectory, dict):
+            continue
+        messages = list(trajectory.get("messages") or [])
+        embedded = embed_loss_mask_into_messages(messages, trajectory.get("loss_mask"))
+        if not embedded:
+            continue
+        updated = dict(trajectory)
+        updated["messages"] = messages
+        trajectories[index] = updated
+        changed += embedded
+    if changed:
+        main = main_trajectory(history)
+        if main is not None:
+            history["messages"] = main.get("messages") or []
+    return changed
+
+
 def attach_stop_sequences_to_history(history: dict[str, Any]) -> int:
     """Reattach stripped stop sequences in every trajectory of a history dump.
 

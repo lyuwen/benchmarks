@@ -146,6 +146,16 @@ def test_iter_json_documents_rejects_truncated(tmp_path: Path) -> None:
         list(flatten.iter_json_documents(path))
 
 
+def with_loss_mask(messages: list[dict], loss_mask: list[int]) -> list[dict]:
+    """Expected messages with the per-message assistant loss_mask folded in."""
+    return [
+        {**message, "loss_mask": int(bool(value))}
+        if message.get("role") == "assistant"
+        else message
+        for message, value in zip(messages, loss_mask)
+    ]
+
+
 def test_flatten_trajectories_mode_has_messages_and_tools() -> None:
     records = list(flatten.iter_records(iter([make_history()])))
     assert len(records) == 2
@@ -155,6 +165,7 @@ def test_flatten_trajectories_mode_has_messages_and_tools() -> None:
     assert first["messages"][2] == {
         **ASSISTANT_1_REPLAYED,
         "reasoning_content": "thinking",
+        "loss_mask": 1,
     }
     assert first["tools"] == [TOOL]
     assert first["loss_mask"] == [0, 0, 1]
@@ -180,13 +191,10 @@ def test_projects_total_turn_set_into_single_stitched_record() -> None:
     assert record["stitched"] is True
     assert record["fragmented"] is True
     assert record["num_fragments"] == 2
-    assert record["messages"] == [
-        SYSTEM,
-        USER,
-        ASSISTANT_1_REPLAYED,
-        TOOL_RESULT,
-        ASSISTANT_2,
-    ]
+    assert record["messages"] == with_loss_mask(
+        [SYSTEM, USER, ASSISTANT_1_REPLAYED, TOOL_RESULT, ASSISTANT_2],
+        [0, 0, 1, 0, 1],
+    )
     assert record["loss_mask"] == [0, 0, 1, 0, 1]
     assert record["tools"] == [TOOL]
     assert record["turn_indices"] == [1, 2]
@@ -290,7 +298,7 @@ def test_stitch_ignores_excluded_trajectories() -> None:
     main = [t for t in history["trajectories"] if not t.get("exclude_from_training")][
         -1
     ]
-    assert record["messages"] == main["messages"]
+    assert record["messages"] == with_loss_mask(main["messages"], record["loss_mask"])
     assert record["tools"] == [TOOL]
 
 
@@ -441,14 +449,18 @@ def test_split_tool_sets_emits_segment_per_tool_phase() -> None:
     assert first["turn_indices"] == [1, 2]
     assert first["trained_turns"] == [1, 2]
     # Context up to the last turn of the phase, only its turns are targets.
-    assert first["messages"] == history["trajectories"][0]["messages"][:5]
+    assert first["messages"] == with_loss_mask(
+        history["trajectories"][0]["messages"][:5], first["loss_mask"]
+    )
     assert first["loss_mask"] == [0, 0, 1, 0, 1]
 
     assert second["tools"] == [TOOL, TOOL_B]
     assert second["tool_set_index"] == 1
     assert second["split_index"] == 1
     assert second["turn_indices"] == [3]
-    assert second["messages"] == history["trajectories"][0]["messages"]
+    assert second["messages"] == with_loss_mask(
+        history["trajectories"][0]["messages"], second["loss_mask"]
+    )
     assert second["loss_mask"] == [0, 0, 0, 0, 0, 0, 1]
     for record in records:
         assert flatten.validate_record(record) == []

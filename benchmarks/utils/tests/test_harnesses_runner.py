@@ -53,6 +53,7 @@ EXPORT = {
                 {"role": "assistant", "content": "done"},
             ],
             "reasoning_content": [None, "thought about it"],
+            "loss_mask": [0, 1],
             "tool_sets": [[{"type": "function", "function": {"name": "Bash"}}]],
             "turns": [
                 {
@@ -300,8 +301,10 @@ def test_run_harness_instance_success(
         "role",
         "reasoning_content",
         "content",
+        "loss_mask",
     ]
     assert history["messages"][1]["reasoning_content"] == "thought about it"
+    assert history["messages"][1]["loss_mask"] == 1
     assert history["stats"]["requests"] == 2
     # Root history tools is a resolved OpenAI tool list; raw variants are kept
     # separately for provenance.
@@ -324,6 +327,7 @@ def test_run_harness_instance_success(
         "role",
         "reasoning_content",
         "content",
+        "loss_mask",
     ]
     # New-format marker used to distinguish finalized output from stale files.
     assert "reasoning_embedded_messages" in streamlined["streamlined"]

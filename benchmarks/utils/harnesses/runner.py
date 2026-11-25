@@ -36,6 +36,7 @@ from benchmarks.utils.harnesses.rollout import (
     attach_stop_sequences_to_history,
     build_metrics,
     collect_tool_sets,
+    embed_history_loss_mask,
     embed_history_reasoning,
     export_summary,
     load_rollout_export,
@@ -247,6 +248,15 @@ def run_harness_instance(
         warnings.append(f"reasoning embedding failed: {exc}")
         logger.warning(
             "Reasoning embedding failed for %s: %s", instance_id, exc, exc_info=True
+        )
+    try:
+        embedded_loss_mask = embed_history_loss_mask(history)
+        if embedded_loss_mask:
+            history["loss_mask_embedded_messages"] = embedded_loss_mask
+    except Exception as exc:  # noqa: BLE001 - best-effort normalization
+        warnings.append(f"loss-mask embedding failed: {exc}")
+        logger.warning(
+            "Loss-mask embedding failed for %s: %s", instance_id, exc, exc_info=True
         )
     try:
         restored_stops = attach_stop_sequences_to_history(history)
@@ -655,6 +665,7 @@ def publish_canonical_histories(output_dir: str, output_path: str) -> None:
             continue
         try:
             embed_history_reasoning(payload)
+            embed_history_loss_mask(payload)
             restored_stops = attach_stop_sequences_to_history(payload)
             if restored_stops:
                 payload["restored_stop_sequences"] = restored_stops

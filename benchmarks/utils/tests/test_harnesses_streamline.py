@@ -292,8 +292,15 @@ def test_streamline_reattaches_stop_sequences_but_does_not_merge_aux() -> None:
     ]
     assert "streamlined" not in auxiliary
 
-    # Compaction trajectory: untouched (no stop sequence configured).
-    assert after["run:comp"] == before["run:comp"]
+    # Compaction trajectory: no stop sequence configured; only the folded
+    # per-message loss_mask is added to its assistant message.
+    compaction_before = before["run:comp"]
+    compaction_after = after["run:comp"]
+    assert [
+        {**message, "loss_mask": 1} if message.get("role") == "assistant" else message
+        for message in compaction_before["messages"]
+    ] == compaction_after["messages"]
+    assert compaction_after["turns"] == compaction_before["turns"]
 
     assert result["streamlined"]["auxiliary_kept"] == 1
     assert result["streamlined"]["compaction_kept"] == 1
@@ -553,12 +560,22 @@ def test_merge_fills_reasoning_missing_from_base_context() -> None:
         "reasoning_content",
         "content",
         "tool_calls",
+        "loss_mask",
     ]
     assert list(merged["messages"][4].keys()) == [
         "role",
         "reasoning_content",
         "content",
+        "loss_mask",
     ]
+    assert merged["messages"][2]["loss_mask"] == 1
+    assert merged["messages"][4]["loss_mask"] == 1
+    assert (
+        streamline.streamline_history(history)["streamlined"][
+            "loss_mask_embedded_messages"
+        ]
+        == 2
+    )
     assert (
         streamline.streamline_history(history)["streamlined"][
             "reasoning_embedded_messages"
@@ -572,8 +589,16 @@ def test_streamline_regenerates_stale_companion(tmp_path: Path) -> None:
     source.write_text(json.dumps(make_history()), encoding="utf-8")
     stale = tmp_path / "owner__repo-1.history.streamlined.json"
     # An older output: pretty-printed and without the new summary marker.
+    # Older outputs may have the reasoning marker but not the loss-mask one.
     stale.write_text(
-        json.dumps({"streamlined": {"fragments_before": 99}}, indent=2),
+        json.dumps(
+            {
+                "streamlined": {
+                    "fragments_before": 99,
+                    "reasoning_embedded_messages": 1,
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -582,5 +607,6 @@ def test_streamline_regenerates_stale_companion(tmp_path: Path) -> None:
     refreshed = json.loads(stale.read_text(encoding="utf-8"))
     assert refreshed["streamlined"]["trajectories_after"] == 4
     assert "reasoning_embedded_messages" in refreshed["streamlined"]
+    assert "loss_mask_embedded_messages" in refreshed["streamlined"]
     # A current companion is skipped on the next run.
     assert streamline.streamline_history_file(source) is None

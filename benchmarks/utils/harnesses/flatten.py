@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.utils.harnesses.rollout import (
+    embed_loss_mask_into_messages,
     embed_reasoning_into_messages,
     resolve_trajectory_tools,
     restore_stop_sequences as attach_stop_sequences,
@@ -204,6 +205,7 @@ def flatten_trajectory(
     loss_mask = _aligned(trajectory.get("loss_mask"), len(messages))
     if loss_mask is not None:
         record["loss_mask"] = loss_mask
+        embed_loss_mask_into_messages(messages, loss_mask)
     reasoning = _aligned(trajectory.get("reasoning_content"), len(messages))
     if reasoning is not None:
         record["reasoning_content"] = reasoning
@@ -263,6 +265,7 @@ def split_trajectory_by_tool_sets(
                 ):
                     base["loss_mask"][index] = 1
             base["loss_mask_recomputed"] = True
+            embed_loss_mask_into_messages(base["messages"], base["loss_mask"])
         return [base]
 
     records: list[dict[str, Any]] = []
@@ -296,6 +299,7 @@ def split_trajectory_by_tool_sets(
         record["messages"] = segment_messages
         record["tools"] = tools
         record["loss_mask"] = segment_loss
+        embed_loss_mask_into_messages(segment_messages, segment_loss)
         if full_reasoning is not None:
             record["reasoning_content"] = full_reasoning[:end_index]
         record["turn_indices"] = [
@@ -438,6 +442,7 @@ def stitch_row(
             ],
         }
     )
+    embed_loss_mask_into_messages(messages, record["loss_mask"])
     if restored:
         record["restored_stop_sequences"] = restored
     reasoning = _aligned(trajectory.get("reasoning_content"), len(messages))
@@ -493,6 +498,7 @@ def iter_records(
                     for message in record["messages"]
                 ]
                 record["loss_mask_recomputed"] = True
+                embed_loss_mask_into_messages(record["messages"], record["loss_mask"])
             yield record
 
 
@@ -529,6 +535,27 @@ def validate_record(record: dict[str, Any]) -> list[str]:
         role = message.get("role")
         if role not in VALID_ROLES:
             problems.append(f"{label}: message[{index}] has invalid role {role!r}")
+        if "loss_mask" in message:
+            folded = message.get("loss_mask")
+            if role != "assistant":
+                problems.append(
+                    f"{label}: message[{index}] non-assistant message has loss_mask"
+                )
+            elif folded not in (0, 1):
+                problems.append(
+                    f"{label}: message[{index}] loss_mask is not 0/1 ({folded!r})"
+                )
+            else:
+                aligned = record.get("loss_mask")
+                if (
+                    isinstance(aligned, list)
+                    and index < len(aligned)
+                    and aligned[index] != folded
+                ):
+                    problems.append(
+                        f"{label}: message[{index}] loss_mask disagrees with "
+                        "the record loss_mask"
+                    )
         if role == "tool":
             call_id = message.get("tool_call_id")
             if not call_id:

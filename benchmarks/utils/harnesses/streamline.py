@@ -48,6 +48,7 @@ from typing import Any
 
 from benchmarks.utils.harnesses.rollout import (
     collect_tool_sets,
+    embed_loss_mask_into_messages,
     embed_reasoning_into_messages,
     resolve_trajectory_tools,
     restore_stop_sequences as attach_stop_sequences,
@@ -591,6 +592,17 @@ def streamline_history(
         streamlined[index] = updated
         reasoning_embedded += embedded
 
+    loss_mask_embedded = 0
+    for index, trajectory in enumerate(streamlined):
+        messages = list(_messages(trajectory))
+        embedded = embed_loss_mask_into_messages(messages, trajectory.get("loss_mask"))
+        if not embedded:
+            continue
+        updated = dict(trajectory)
+        updated["messages"] = messages
+        streamlined[index] = updated
+        loss_mask_embedded += embedded
+
     root = _latest_conversation_trajectory(streamlined)
     merged_summaries = [
         {
@@ -642,6 +654,7 @@ def streamline_history(
         "branch_trajectories_restored": branch_restored,
         "restored_stop_sequences": stop_sequence_restorations,
         "reasoning_embedded_messages": reasoning_embedded,
+        "loss_mask_embedded_messages": loss_mask_embedded,
     }
     return result
 
@@ -666,7 +679,10 @@ def _is_current_streamlined(path: Path) -> bool:
             tail = handle.read().decode("utf-8", errors="ignore")
     except OSError:
         return False
-    return '"reasoning_embedded_messages"' in tail
+    return (
+        '"reasoning_embedded_messages"' in tail
+        and '"loss_mask_embedded_messages"' in tail
+    )
 
 
 def streamline_history_file(

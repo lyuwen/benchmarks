@@ -405,8 +405,12 @@ flattened records) mirror the model-facing request representation: assistant
 messages carry the reasoning field right after `role`:
 
 ```json
-{"role": "assistant", "reasoning_content": "...", "content": "...", "tool_calls": [...]}
+{"role": "assistant", "reasoning_content": "...", "content": "...", "tool_calls": [...], "loss_mask": 0}
 ```
+
+`loss_mask` is folded into assistant messages (`0`/`1`, last field) so each
+sample carries its training targets directly; non-assistant messages have no
+`loss_mask`, and the aligned trajectory array is kept for provenance.
 
 The aligned `reasoning_content` arrays are kept on the trajectories for
 provenance and older consumers. See the upstream
@@ -499,9 +503,9 @@ Each output record contains at least:
 
 | Key | Meaning |
 | --- | --- |
-| `messages` | OpenAI Chat-Completions messages (`role`, `content`, assistant `tool_calls` with JSON-string `function.arguments`, `tool_call_id`); assistant messages additionally carry `reasoning_content` right after `role` when the model produced reasoning |
+| `messages` | OpenAI Chat-Completions messages (`role`, `content`, assistant `tool_calls` with JSON-string `function.arguments`, `tool_call_id`); assistant messages additionally carry `reasoning_content` right after `role` when present and `loss_mask` (0/1) as the last field |
 | `tools` | one OpenAI function-tool list, resolved from the trajectory's `tool_sets`/`turn.tool_set`; `[]` for requests that carried no tools (auto-mode classifier/security monitor) |
-| `loss_mask`, `reasoning_content` | message-aligned arrays from the capture (`reasoning_content` also mirrored inside the assistant messages; the array is kept for back-compat) |
+| `loss_mask`, `reasoning_content` | message-aligned arrays from the capture (`reasoning_content` and the assistant `loss_mask` are also folded into the messages; the arrays are kept for back-compat) |
 | `loss_mask` sum / `trained_turns` | which turns of the record are training targets |
 | `instance_id`, `attempt`, `harness`, `harness_version`, `model`, `instruction` | provenance |
 | `test_result.git_patch`, `evaluation`, `rollout_export`, `stats` | patch, judge verdict, raw capture path |
@@ -636,8 +640,9 @@ is available; the job itself needs no GPU and only reads/writes the run tree.
 New runs need no post-processing: the runner writes the finalized raw history
 and the streamlined companion itself. Older runs can be brought to the same
 format by re-running the streamliner over the run tree; it detects streamlined
-files written by old code (the `reasoning_embedded_messages` marker is missing),
-regenerates those, and skips up-to-date ones:
+files written by old code (the `reasoning_embedded_messages` /
+`loss_mask_embedded_messages` markers are missing), regenerates those, and skips
+up-to-date ones:
 
 ```bash
 # one task per job directory, repairing stale companions (add --include-attempts

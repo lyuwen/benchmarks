@@ -18,7 +18,9 @@ from benchmarks.utils.harnesses.rollout import (
     RolloutManagerError,
     build_metrics,
     collect_tool_sets,
+    embed_history_loss_mask,
     embed_history_reasoning,
+    embed_loss_mask_into_messages,
     embed_reasoning_into_messages,
     export_summary,
     find_free_port,
@@ -361,6 +363,49 @@ def test_build_metrics_sums_turns(tmp_path: Path) -> None:
 
 def test_build_metrics_without_usage(tmp_path: Path) -> None:
     assert build_metrics({"trajectories": []}, "m") is None
+
+
+def test_embed_loss_mask_into_messages() -> None:
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "Bash", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert embed_loss_mask_into_messages(messages, [0, 1, 0, 0]) == 2
+    assert "loss_mask" not in messages[0]
+    assert "loss_mask" not in messages[2]
+    assert list(messages[1].keys()) == ["role", "content", "tool_calls", "loss_mask"]
+    assert messages[1]["loss_mask"] == 1
+    assert messages[3]["loss_mask"] == 0
+
+    history = {
+        "trajectories": [
+            {
+                "trajectory_id": "s:1",
+                "kind": "conversation",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "done"},
+                ],
+                "turns": [{"message_index": 1, "trained": True}],
+                "loss_mask": [0, 1],
+            }
+        ]
+    }
+    assert embed_history_loss_mask(history) == 1
+    assert history["trajectories"][0]["messages"][1]["loss_mask"] == 1
+    assert history["messages"][1]["loss_mask"] == 1
 
 
 def test_embed_reasoning_into_messages() -> None:
