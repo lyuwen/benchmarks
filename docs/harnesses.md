@@ -522,6 +522,77 @@ Notes:
 - A summary (`histories=… emitted=… warnings=…`) is printed to stderr; warnings
   never change stdout, which is pure JSONL.
 
+## Streamlining fragmented histories
+
+Claude Code replays the conversation on every request but normalizes the replayed
+tool arguments first (strips a leading `cd <cwd> &&` from Bash, adds
+`replace_all: false` and trims trailing whitespace in Edit). Those replays no
+longer match the stored assistant responses, so one logical conversation can be
+exported as many prefix fragments (6 fragments for a 23-request run). The
+`harness-streamline-histories` tool merges them **in the history JSON**, next to
+the flattening step:
+
+- fragments are grouped when one message list is a prefix of the other modulo
+  exactly those replay normalizations (Bash `cd` prefix, Edit `replace_all` and
+  trailing whitespace); this covers the main conversation, sub-agents and other
+  side conversations;
+- a merged trajectory reuses the longest fragment's messages, restores the
+  tool-call arguments the model originally generated (recovered from the
+  captured responses, so the `cd <cwd> &&` prefix is back), unions the fragments'
+  trained turns into `loss_mask`, re-interns `tool_sets`, and records the merge
+  under `streamlined`;
+- auxiliary requests (auto-mode classifier/security monitor) and
+  compaction/summarization trajectories are kept unchanged (never merged);
+- the root `messages`/`tools` come from the latest main-agent conversation
+  trajectory (auxiliary and compaction trajectories are excluded);
+- divergent conversation branches that are not prefixes of the chosen canonical
+  fragment are kept as separate trajectories (no data is silently dropped);
+- output is written next to the input as `<id>.history.streamlined.json`; the
+  original history is never modified and existing outputs are skipped unless
+  `--overwrite` is passed.
+
+```bash
+# one claude-code dir
+uv run harness-streamline-histories --dir \
+  eval_outputs/.../harnesses/claude-code
+
+# recursively discover directories for a job-array list
+uv run harness-streamline-histories --root /path/to/run --list > dirs.txt
+
+# dry-run / include per-attempt histories
+uv run harness-streamline-histories --dir ... --dry-run
+uv run harness-streamline-histories --dir ... --include-attempts
+```
+
+### Distributed SLURM job array
+
+`scripts/streamline_histories_slurm.sh` processes one job directory per array
+task. It is meant to run with the **run root** (the directory containing the
+`{i}` job directories) as its working directory; `SLURM_ARRAY_TASK_ID` selects
+`{i}` (zero-padded names like `00000` are handled, otherwise the i-th sorted
+sub-directory is used):
+
+```bash
+cd logs/dsv41f1017-high-synth-cc-swerebenchv2-osr-all-run2
+sbatch --array=0-$(($(find . -maxdepth 1 -mindepth 1 -type d | wc -l) - 1)) \
+  /path/to/repo/scripts/streamline_histories_slurm.sh          # extra flags OK
+
+# or one task per precomputed claude-code directory
+uv run harness-streamline-histories --root "$PWD" --list > dirs.txt
+sbatch --array=0-$(($(wc -l < dirs.txt) - 1)) \
+  /path/to/repo/scripts/streamline_histories_slurm.sh dirs.txt
+```
+
+The launcher forwards extra arguments (`--overwrite`, `--dry-run`, ...), runs the
+module via `uv run`, and falls back to the active Python interpreter when `uv`
+is not on `PATH`. Run `uv sync` once on the cluster so the project environment
+is available; the job itself needs no GPU and only reads/writes the run tree.
+
+Reference effect: the `unidata__netcdf-c-1692` history went from 6 fragment
+trajectories (11 MB) to 1 merged trajectory with 23 trained turns (4.4 MB), with
+22 restored tool-call messages and the root messages taken from the last (23rd)
+trajectory.
+
 ## Reliability notes
 
 - Harness-level failures (non-zero exit, timeout, empty capture) are **outcomes,

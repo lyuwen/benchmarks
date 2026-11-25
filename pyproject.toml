@@ -56,6 +56,7 @@ miniswe = [
 validate-cfg = "benchmarks.scripts.validate_cfg:main"
 harness-prepare = "benchmarks.utils.harnesses.prepare:main"
 harness-flatten-histories = "benchmarks.utils.harnesses.flatten:main"
+harness-streamline-histories = "benchmarks.utils.harnesses.streamline:main"
 swebench-infer = "benchmarks.swebench.run_infer:main"
 swebench-infer-harnesses = "benchmarks.swebench.run_infer_harnesses:main"
 swebench-infer-miniswe = "benchmarks.swebench.run_infer_miniswe:main"
