@@ -351,6 +351,12 @@ def test_streamline_keeps_divergent_branches() -> None:
     assert {"run:2", "run:3"} <= set(trajectories)
     assert result["streamlined"]["fragments_before"] == 3
     assert result["streamlined"]["trajectories_after"] == 2
+    # The branch leaf that was not merged still gets the model's original args.
+    branch = trajectories["run:2"]
+    assert (
+        "cd /x && ls" in branch["messages"][2]["tool_calls"][0]["function"]["arguments"]
+    )
+    assert branch["restored_tool_call_messages"] == 1
 
 
 def test_streamline_history_file_and_attempt_skip(tmp_path: Path) -> None:

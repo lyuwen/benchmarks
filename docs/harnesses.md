@@ -540,13 +540,18 @@ the flattening step:
   tool-call arguments the model originally generated (recovered from the
   captured responses, so the `cd <cwd> &&` prefix is back), unions the fragments'
   trained turns into `loss_mask`, re-interns `tool_sets`, and records the merge
-  under `streamlined`;
+  under `streamlined`; kept branch leaves that were not merged also get their
+  original tool-call arguments restored;
 - auxiliary requests (auto-mode classifier/security monitor) and
   compaction/summarization trajectories are kept unchanged (never merged);
 - the root `messages`/`tools` come from the latest main-agent conversation
   trajectory (auxiliary and compaction trajectories are excluded);
 - divergent conversation branches that are not prefixes of the chosen canonical
-  fragment are kept as separate trajectories (no data is silently dropped);
+  fragment are kept as separate trajectories (no data is silently dropped).
+  Auto-compaction is the common case: the compaction request branches from the
+  pre-compaction leaf (`:N+1.parent = :N`), so a long session with 6 compactions
+  keeps 7 merged chains plus the 6 pre-compaction branch leaves — both are needed
+  because their trained turns are disjoint;
 - output is written next to the input as `<id>.history.streamlined.json`; the
   original history is never modified and existing outputs are skipped unless
   `--overwrite` is passed.
@@ -588,10 +593,17 @@ module via `uv run`, and falls back to the active Python interpreter when `uv`
 is not on `PATH`. Run `uv sync` once on the cluster so the project environment
 is available; the job itself needs no GPU and only reads/writes the run tree.
 
-Reference effect: the `unidata__netcdf-c-1692` history went from 6 fragment
-trajectories (11 MB) to 1 merged trajectory with 23 trained turns (4.4 MB), with
-22 restored tool-call messages and the root messages taken from the last (23rd)
-trajectory.
+Reference effects:
+
+- `unidata__netcdf-c-1692` (23 requests): 6 fragments / 11 MB → 1 merged
+  trajectory / 4.4 MB, 23 trained turns, 22 restored tool-call messages, root
+  messages from the last (23rd) trajectory.
+- `unidata__netcdf-c-2106` (506 requests, 6 compactions): 47 fragments / 566 MB
+  → 13 trajectories / 358 MB (7 merged chains + 6 pre-compaction branch leaves),
+  all 506 trained turns conserved, 500 unique tool-call messages restored (994
+  restorations in total because branch-leaf contexts are duplicated; see
+  `branch_trajectories_restored` in the `streamlined` summary), root messages
+  from the last (506th) trajectory.
 
 ## Reliability notes
 

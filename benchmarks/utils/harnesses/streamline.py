@@ -504,6 +504,27 @@ def streamline_history(history: dict[str, Any]) -> dict[str, Any]:
         else:
             streamlined.append(trajectory)
 
+    # Leftover fragments (divergent branch leaves, e.g. the pre-compaction leaf
+    # next to an auto-compaction branch) are final trajectories too: restore the
+    # model's original tool arguments in them as well.
+    branch_restored = 0
+    for index, trajectory in enumerate(streamlined):
+        if (
+            not _is_conversation(trajectory)
+            or is_auxiliary_trajectory(trajectory)
+            or is_compaction_trajectory(trajectory)
+        ):
+            continue
+        messages = [copy.deepcopy(message) for message in _messages(trajectory)]
+        restored = _restore_original_tool_calls(messages, responses)
+        if not restored:
+            continue
+        updated = dict(trajectory)
+        updated["messages"] = messages
+        updated["restored_tool_call_messages"] = restored
+        streamlined[index] = updated
+        branch_restored += restored
+
     root = _latest_conversation_trajectory(streamlined)
     merged_summaries = [
         {
@@ -550,7 +571,9 @@ def streamline_history(history: dict[str, Any]) -> dict[str, Any]:
         ),
         "restored_tool_call_messages": sum(
             summary["restored_tool_call_messages"] for summary in merged_summaries
-        ),
+        )
+        + branch_restored,
+        "branch_trajectories_restored": branch_restored,
     }
     return result
 
