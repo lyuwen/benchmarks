@@ -7,12 +7,12 @@ requires-python = ">=3.12"
 dependencies = [
     "datasets",
     "orjson",
+    "tqdm",
     "huggingface-hub",
     "jinja2",
     "pandas",
     "Pillow",
     "toml",
-    "tqdm",
     "openhands-sdk",
     "openhands-tools",
     "unidiff>=0.7.5,<0.8.0",

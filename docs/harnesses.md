@@ -491,11 +491,15 @@ uv run harness-flatten-histories histories.jsonl -o flat-raw.jsonl \
 Classifier samples can only be split into a file: when writing the main output
 to stdout, either pass ``-o FILE`` or ``--classifier-output FILE``.
 
-Both tools print periodic progress lines to stderr while working (enabled
-automatically when stderr is a TTY), e.g.
-`[flatten] 12.3s histories=2 emitted_main=14 emitted_classifier=3`. Use
-`--progress` to force them in a log file, `--no-progress` to disable them and
-`--progress-interval N` to change the cadence.
+Both tools report progress on stderr (enabled automatically when stderr is a
+TTY). Serial flattening and streamline print periodic status lines such as
+`[flatten] 12.3s histories=2 emitted_main=14 emitted_classifier=3`; `--workers`
+mode shows a **tqdm progress bar** over input rows with a live record count,
+e.g. `flatten: 63%|██████ | 10310/16384 [04:12<02:28, 41.2row/s, records=20311]`.
+Use `--progress` to force progress in a log file, `--no-progress` to disable
+it and `--progress-interval N` to change the cadence. In workers mode pass
+`--total-rows N` (e.g. `--total-rows 16384`) so the bar has a total, percentage
+and ETA; without it you still get rows done and rate but no ETA.
 
 ### Large NFS corpora (speed)
 
@@ -523,7 +527,7 @@ For a 126 GB / 16k-row corpus on NFS:
 ```bash
 # N = physical cores you can spare; each worker reads a disjoint byte range
 uv run harness-flatten-histories histories.jsonl -o flat.jsonl \
-  --workers 16 --progress
+  --workers 16 --total-rows 16384 --progress
 # outputs: flat.part000.jsonl ... flat.part015.jsonl (+ classifier parts)
 # load with HuggingFace: data_files="flat.part*.jsonl"
 ```

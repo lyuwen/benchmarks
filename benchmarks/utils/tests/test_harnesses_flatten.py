@@ -919,3 +919,29 @@ def test_workers_require_file_output(tmp_path: Path) -> None:
     source = _write_corpus(tmp_path, [make_history()])
     with pytest.raises(SystemExit):
         flatten.main([str(source), "--workers", "2"])
+
+
+def test_workers_tqdm_progress_bar(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = _write_corpus(tmp_path, make_corpus())
+    output = tmp_path / "flat.jsonl"
+    assert (
+        flatten.main(
+            [
+                str(source),
+                "-o",
+                str(output),
+                "--workers",
+                "2",
+                "--merge-parts",
+                "--progress",
+                "--total-rows",
+                "7",
+            ]
+        )
+        == 0
+    )
+    stderr = capsys.readouterr().err
+    assert "flatten" in stderr
+    assert "7/7" in stderr

@@ -47,11 +47,13 @@ import multiprocessing
 import os
 import sys
 from collections.abc import Iterator
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, wait
 from pathlib import Path
+from queue import Empty
 from typing import Any
 
 import orjson
+from tqdm import tqdm
 
 from benchmarks.utils.harnesses.normalize import classifier_label, normalize_record
 from benchmarks.utils.harnesses.progress import (
@@ -768,6 +770,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--total-rows",
+        type=int,
+        default=0,
+        help=(
+            "Number of rows in a JSONL corpus, used for the --workers progress "
+            "bar's ETA (0 = unknown; counts/rate still shown)"
+        ),
+    )
+    parser.add_argument(
         "--merge-parts",
         action="store_true",
         help=(
@@ -902,6 +913,7 @@ def _flatten_byte_range(job: tuple[Any, ...]) -> dict[str, Any]:
         main_part,
         classifier_part,
         options,
+        progress_queue,
     ) = job
     histories = 0
     emitted_main = 0
@@ -956,6 +968,7 @@ def _flatten_byte_range(job: tuple[Any, ...]) -> dict[str, Any]:
                     emitted_classifier += len(classifier_lines)
                 if records == 0:
                     skipped += 1
+                progress_queue.put((1, len(main_lines) + len(classifier_lines)))
     finally:
         if main_handle is not None:
             main_handle.close()
@@ -1009,8 +1022,21 @@ def _run_parallel(args: Any, parser: Any) -> int:
         _part_path(classifier_path, index) for index in range(len(ranges))
     ]
     options = _record_options(args)
-    reporter = reporter_from_args(args, "flatten")
-    reporter.update(workers=len(ranges), mode=args.mode)
+    progress_enabled = (
+        args.progress if args.progress is not None else sys.stderr.isatty()
+    )
+    manager = multiprocessing.Manager()
+    progress_queue = manager.Queue()
+    total_rows = args.total_rows if args.total_rows > 0 else None
+    progress_bar = tqdm(
+        total=total_rows,
+        desc="flatten",
+        unit="row",
+        file=sys.stderr,
+        disable=not progress_enabled,
+        dynamic_ncols=True,
+        mininterval=max(0.1, float(args.progress_interval)),
+    )
 
     warnings: list[str] = []
     histories = emitted_main = emitted_classifier = skipped = failures = 0
@@ -1023,33 +1049,61 @@ def _run_parallel(args: Any, parser: Any) -> int:
             main_parts[index],
             classifier_parts[index],
             options,
+            progress_queue,
         )
         for index, (start, end) in enumerate(ranges)
     ]
+    rows_done = 0
+    records_done = 0
     try:
         if jobs:
             with ProcessPoolExecutor(
                 max_workers=len(jobs),
                 mp_context=multiprocessing.get_context("spawn"),
             ) as pool:
-                futures = [pool.submit(_flatten_byte_range, job) for job in jobs]
-                # Start the progress thread after the workers are forked.
-                reporter.start()
-                for future in futures:
-                    try:
-                        result = future.result()
-                    except Exception as exc:  # noqa: BLE001 - report and fail
-                        logger.exception("flatten worker failed")
-                        warnings.append(f"flatten worker failed: {exc}")
-                        failures += 1
-                        continue
-                    histories += result["histories"]
-                    emitted_main += result["emitted_main"]
-                    emitted_classifier += result["emitted_classifier"]
-                    skipped += result["skipped"]
-                    warnings.extend(result["warnings"])
+                pending = {pool.submit(_flatten_byte_range, job) for job in jobs}
+                while pending:
+                    done, pending = wait(pending, timeout=0.5)
+                    for future in done:
+                        try:
+                            result = future.result()
+                        except Exception as exc:  # noqa: BLE001 - report and fail
+                            logger.exception("flatten worker failed")
+                            warnings.append(f"flatten worker failed: {exc}")
+                            failures += 1
+                            continue
+                        histories += result["histories"]
+                        emitted_main += result["emitted_main"]
+                        emitted_classifier += result["emitted_classifier"]
+                        skipped += result["skipped"]
+                        warnings.extend(result["warnings"])
+                    while True:
+                        try:
+                            row_increment, record_increment = (
+                                progress_queue.get_nowait()
+                            )
+                        except Empty:
+                            break
+                        rows_done += int(row_increment)
+                        records_done += int(record_increment)
+                    progress_bar.n = (
+                        rows_done if total_rows is None else min(rows_done, total_rows)
+                    )
+                    progress_bar.set_postfix(records=records_done, refresh=False)
+                    progress_bar.refresh()
+            # Drain any progress items queued right before worker exit.
+            while True:
+                try:
+                    row_increment, record_increment = progress_queue.get_nowait()
+                except Empty:
+                    break
+                rows_done += int(row_increment)
+                records_done += int(record_increment)
     finally:
-        reporter.stop()
+        progress_bar.n = rows_done if total_rows is None else min(rows_done, total_rows)
+        progress_bar.set_postfix(records=records_done, refresh=False)
+        progress_bar.close()
+        manager.shutdown()
 
     existing_main = [path for path in main_parts if Path(path).is_file()]
     existing_classifier = [path for path in classifier_parts if Path(path).is_file()]
