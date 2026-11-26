@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import pytest
 
-from benchmarks.utils.harnesses import flatten
+from benchmarks.utils.harnesses import flatten, history_io, streamline
 
 
 TOOL = {
@@ -945,3 +945,53 @@ def test_workers_tqdm_progress_bar(
     stderr = capsys.readouterr().err
     assert "flatten" in stderr
     assert "7/7" in stderr
+
+
+def test_iter_json_documents_reads_gzip(tmp_path: Path) -> None:
+    history = make_history()
+    source = tmp_path / "histories.jsonl.gz"
+    history_io.write_json_atomic(source, history)
+    assert source.read_bytes()[:2] == b"\x1f\x8b"
+    documents = list(flatten.iter_json_documents(source))
+    assert documents == [history]
+
+
+def test_flatten_streamlined_lite_matches_full_records() -> None:
+    history = make_history()
+    full = streamline.streamline_history(history)
+    lite = streamline.build_streamlined_lite(full)
+
+    full_records = list(flatten.iter_records(iter([full])))
+    lite_records = list(flatten.iter_records(iter([lite])))
+    assert len(lite_records) == len(full_records)
+    for full_record, lite_record in zip(full_records, lite_records):
+        assert lite_record["messages"] == full_record["messages"]
+        assert lite_record["tools"] == full_record["tools"]
+        assert lite_record["loss_mask"] == full_record["loss_mask"]
+        assert flatten.validate_record(lite_record) == []
+
+
+def test_flatten_recovers_arrays_from_folded_message_fields() -> None:
+    history = make_history()
+    trajectory = {
+        "trajectory_id": "s:lite",
+        "kind": "conversation",
+        "exclude_from_training": False,
+        "messages": [
+            SYSTEM,
+            USER,
+            {
+                "role": "assistant",
+                "reasoning_content": "thought",
+                "content": "done",
+                "loss_mask": 1,
+            },
+        ],
+        "tool_sets": [[TOOL]],
+    }
+    history["trajectories"] = [trajectory]
+    record = flatten.flatten_trajectory(history, trajectory)
+    assert record["loss_mask"] == [0, 0, 1]
+    assert record["reasoning_content"] == [None, None, "thought"]
+    assert record["messages"][2]["loss_mask"] == 1
+    assert flatten.validate_record(record) == []

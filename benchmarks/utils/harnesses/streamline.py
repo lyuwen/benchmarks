@@ -24,7 +24,11 @@ This tool merges such fragments back:
 - the history's root ``messages`` (and ``tools``/``tool_sets``) are taken from
   the last non-auxiliary conversation trajectory, matching the final
   conversation state;
-- the result is written next to the input as ``<name>.history.streamlined.json``.
+- the result is written next to the input as gzipped
+  ``<name>.history.streamlined.json.gz``, plus a plain-text
+  ``<name>.history.streamlined-lite.json`` that drops per-trajectory ``turns``
+  and the aligned ``reasoning_content``/``loss_mask``/``path_turn_indices``
+  arrays (already folded into the messages).
 
 Run one directory per SLURM array task (see
 ``scripts/streamline_histories_slurm.sh``)::
@@ -35,17 +39,26 @@ Run one directory per SLURM array task (see
 from __future__ import annotations
 
 import argparse
-import contextlib
 import copy
 import json
 import logging
 import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
+from benchmarks.utils.harnesses.history_io import (
+    ATTEMPTS_DIRNAME,
+    HISTORY_GZ_SUFFIX,
+    HISTORY_SUFFIX,
+    STREAMLINED_GZ_SUFFIX,
+    STREAMLINED_LITE_SUFFIX,
+    STREAMLINED_SUFFIX,
+    read_json,
+    tail_text,
+    write_json_atomic,
+)
 from benchmarks.utils.harnesses.progress import (
     add_progress_arguments,
     reporter_from_args,
@@ -61,9 +74,18 @@ from benchmarks.utils.harnesses.rollout import (
 
 logger = logging.getLogger(__name__)
 
-HISTORY_SUFFIX = ".history.json"
-STREAMLINED_SUFFIX = ".history.streamlined.json"
-_ATTEMPT_RE = re.compile(r"\.attempt\d+\.history\.json$")
+_ATTEMPT_RE = re.compile(r"\.attempt\d+\.history\.json(?:\.gz)?$")
+
+# Trajectory fields omitted from the compact ``streamlined-lite`` companion.
+# ``turns`` holds the per-exchange requests/metadata; the others are folded into
+# the message dicts by the streamliner (assistant messages carry ``loss_mask``
+# and ``reasoning_content``) so downstream flattening does not need the arrays.
+LITE_OMITTED_TRAJECTORY_FIELDS = (
+    "turns",
+    "reasoning_content",
+    "loss_mask",
+    "path_turn_indices",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -677,16 +699,70 @@ def _is_current_streamlined(path: Path) -> bool:
     decide whether to skip them.
     """
     try:
-        size = path.stat().st_size
-        with open(path, "rb") as handle:
-            handle.seek(max(0, size - 65536))
-            tail = handle.read().decode("utf-8", errors="ignore")
+        tail = tail_text(path)
     except OSError:
         return False
     return (
         '"reasoning_embedded_messages"' in tail
         and '"loss_mask_embedded_messages"' in tail
     )
+
+
+def streamlined_target(source: Path) -> Path:
+    """Where the streamlined companion of ``source`` is written (gzipped)."""
+    if source.name.endswith(HISTORY_GZ_SUFFIX):
+        stem = source.name[: -len(HISTORY_GZ_SUFFIX)]
+    elif source.name.endswith(HISTORY_SUFFIX):
+        stem = source.name[: -len(HISTORY_SUFFIX)]
+    else:
+        raise ValueError(f"not a history file: {source.name}")
+    return source.with_name(stem + STREAMLINED_GZ_SUFFIX)
+
+
+def streamlined_lite_target(streamlined: Path) -> Path:
+    """Where the plain-text lite companion of a streamlined file is written."""
+    if streamlined.name.endswith(STREAMLINED_GZ_SUFFIX):
+        stem = streamlined.name[: -len(STREAMLINED_GZ_SUFFIX)]
+    elif streamlined.name.endswith(STREAMLINED_SUFFIX):
+        stem = streamlined.name[: -len(STREAMLINED_SUFFIX)]
+    else:
+        raise ValueError(f"not a streamlined history file: {streamlined.name}")
+    return streamlined.with_name(stem + STREAMLINED_LITE_SUFFIX)
+
+
+def build_streamlined_lite(history: dict[str, Any]) -> dict[str, Any]:
+    """Compact a streamlined history by dropping per-trajectory turn metadata.
+
+    The lite file is plain text and is meant for streaming downstream
+    processing: ``turns`` (request/response bookkeeping) and the aligned
+    ``reasoning_content``/``loss_mask``/``path_turn_indices`` arrays are omitted
+    because the streamliner already folded reasoning and loss masks into the
+    message dicts. Identifier/filter fields (``trajectory_id``,
+    ``exclude_from_training``, ``kind``, ``tool_sets``, ...) are preserved, so
+    auxiliary/compaction trajectories remain distinguishable.
+    """
+    result = dict(history)
+    trajectories: list[Any] = []
+    for trajectory in history.get("trajectories") or []:
+        if isinstance(trajectory, dict):
+            trajectories.append(
+                {
+                    key: value
+                    for key, value in trajectory.items()
+                    if key not in LITE_OMITTED_TRAJECTORY_FIELDS
+                }
+            )
+        else:
+            trajectories.append(trajectory)
+    result["trajectories"] = trajectories
+    result["streamlined_lite"] = {
+        "omitted_trajectory_fields": list(LITE_OMITTED_TRAJECTORY_FIELDS),
+        "note": (
+            "turns/reasoning_content/loss_mask/path_turn_indices omitted; "
+            "assistant messages carry loss_mask and reasoning_content"
+        ),
+    }
+    return result
 
 
 def streamline_history_file(
@@ -696,16 +772,22 @@ def streamline_history_file(
     dry_run: bool = False,
     restore_stop_sequences: bool = True,
 ) -> dict[str, Any] | None:
-    """Streamline one ``*.history.json`` file next to it; return the summary."""
+    """Streamline one ``*.history.json[.gz]`` file next to it; return the summary."""
     source = Path(path)
-    target = source.with_name(source.name[: -len(HISTORY_SUFFIX)] + STREAMLINED_SUFFIX)
+    target = streamlined_target(source)
+    lite_target = streamlined_lite_target(target)
     if target.exists() and not overwrite:
         if _is_current_streamlined(target):
+            if not lite_target.exists():
+                write_json_atomic(
+                    lite_target, build_streamlined_lite(read_json(target))
+                )
+                logger.info("wrote missing lite companion: %s", lite_target)
             logger.info("skip (up to date): %s", target)
             return None
         logger.info("stale streamlined output, regenerating: %s", target)
     logger.info("streamlining %s", source)
-    history = json.loads(source.read_text(encoding="utf-8"))
+    history = read_json(source)
     result = streamline_history(history, restore_stop_sequences=restore_stop_sequences)
     summary = {
         "input": str(source),
@@ -726,7 +808,8 @@ def streamline_history_file(
     if dry_run:
         logger.info("dry-run: %s", summary)
         return summary
-    _write_json_atomic(target, result)
+    write_json_atomic(target, result)
+    write_json_atomic(lite_target, build_streamlined_lite(result))
     logger.info(
         "streamlined %s: %d -> %d trajectories, %d merged group(s), "
         "%d restored tool-call message(s), %d restored stop sequence(s), "
@@ -742,31 +825,6 @@ def streamline_history_file(
     return summary
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=path.name + ".",
-        suffix=".tmp",
-        delete=False,
-    )
-    try:
-        with handle:
-            # One JSON document per line (+ trailing newline), like the raw
-            # history dumps, so streamlined files are cat-able JSONL too.
-            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(handle.name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(handle.name)
-        raise
-
-
 def _is_attempt_history(path: Path) -> bool:
     return bool(_ATTEMPT_RE.search(path.name))
 
@@ -779,21 +837,35 @@ def _history_files(directory: Path, *, include_attempts: bool) -> list[Path]:
 
     def collect(candidate_dir: Path) -> list[Path]:
         files = []
-        for path in sorted(candidate_dir.glob("*" + HISTORY_SUFFIX)):
-            if not path.is_file() or path.name.endswith(STREAMLINED_SUFFIX):
-                continue
-            if not include_attempts and _is_attempt_history(path):
-                continue
-            files.append(path)
+        for pattern in ("*" + HISTORY_GZ_SUFFIX, "*" + HISTORY_SUFFIX):
+            for path in sorted(candidate_dir.glob(pattern)):
+                if not path.is_file():
+                    continue
+                if path.name.endswith(
+                    (STREAMLINED_GZ_SUFFIX, STREAMLINED_SUFFIX, STREAMLINED_LITE_SUFFIX)
+                ):
+                    continue
+                if not include_attempts and _is_attempt_history(path):
+                    continue
+                if path not in files:
+                    files.append(path)
         return files
 
     files = collect(directory)
+    if include_attempts:
+        attempts_dir = directory / ATTEMPTS_DIRNAME
+        if attempts_dir.is_dir():
+            files.extend(path for path in collect(attempts_dir) if path not in files)
     if files:
         return files
     files = []
     for candidate in sorted(directory.glob("**/harnesses/claude-code")):
         if candidate.is_dir():
             files.extend(collect(candidate))
+            if include_attempts:
+                attempts_dir = candidate / ATTEMPTS_DIRNAME
+                if attempts_dir.is_dir():
+                    files.extend(collect(attempts_dir))
     return files
 
 
@@ -813,7 +885,8 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Merge fragment trajectories split by Claude Code's replayed-tool "
             "normalization (leading 'cd ... &&' and Edit defaults) and write "
-            "<name>.history.streamlined.json next to each final history file."
+            "<name>.history.streamlined.json.gz next to each final history file "
+            "(plus its plain-text streamlined-lite companion)."
         ),
     )
     parser.add_argument(
@@ -842,12 +915,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Re-create *.history.streamlined.json files that already exist.",
+        help="Re-create *.history.streamlined.json.gz files that already exist.",
     )
     parser.add_argument(
         "--include-attempts",
         action="store_true",
-        help="Also process per-attempt (*.attemptN.history.json) files.",
+        help="Also process per-attempt histories (attempts/*.attemptN.history.json.gz).",
     )
     parser.add_argument(
         "--dry-run",
@@ -906,7 +979,7 @@ def main(argv: list[str] | None = None) -> int:
             failures += 1
             continue
         if not discovered:
-            logger.warning("no final *.history.json files under %s", directory)
+            logger.warning("no final *.history.json[.gz] files under %s", directory)
         for path in discovered:
             if path in seen:
                 continue

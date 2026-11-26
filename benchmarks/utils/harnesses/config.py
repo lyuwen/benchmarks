@@ -324,9 +324,10 @@ class HarnessConfig(BaseModel):
     write_streamlined_history: bool = Field(
         default=True,
         description=(
-            "Write a streamlined <id>.attemptN.history.streamlined.json (merged "
+            "Write a gzipped streamlined "
+            "attempts/<id>.attemptN.history.streamlined.json.gz (merged "
             "fragments, original tool arguments, stop sequences re-attached) "
-            "next to the raw history at task finalization"
+            "plus its plain-text streamlined-lite companion at task finalization"
         ),
     )
     exclude_request_classes: str = Field(

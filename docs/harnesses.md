@@ -467,10 +467,13 @@ OpenHands runs, so resume and attempt bookkeeping never mix):
 ├── output.jsonl                          # EvalOutput per instance (test_result.git_patch)
 ├── output_errors.jsonl
 ├── output.critic_attempt_<N>.jsonl
-├── <instance>.attempt<N>.history.json              # trajectory + patch + run metadata
-├── <instance>.attempt<N>.history.streamlined.json  # auto-streamlined companion
-├── <instance>.history.json                         # winning attempt (published after the run)
-├── <instance>.history.streamlined.json             # streamlined winning attempt
+├── attempts/
+│   ├── <instance>.attempt<N>.history.json.gz              # trajectory + patch + run metadata
+│   ├── <instance>.attempt<N>.history.streamlined.json.gz  # auto-streamlined companion
+│   └── <instance>.attempt<N>.history.streamlined-lite.json  # plain-text lite companion
+├── <instance>.history.json.gz                         # winning attempt (published after the run)
+├── <instance>.history.streamlined.json.gz             # streamlined winning attempt
+├── <instance>.history.streamlined-lite.json           # plain-text lite winning attempt
 ├── rollout/
 │   └── <instance>.attempt<N>.json        # rollout-manager trajectory export (schema v2)
 ├── logs/
@@ -518,21 +521,34 @@ The per-instance **history JSON** mirrors the other benchmarks' dumps:
 | `rollout_export` | relative path to the trajectory export |
 | `repository` | repo path, base commit, ignored pre-existing untracked files |
 | `warnings` | non-fatal harness/proxy problems (e.g. no captures) |
-| `streamlined_history` | relative path to the auto-streamlined companion file |
+| `streamlined_history` | relative path to the gzipped auto-streamlined companion file |
+| `streamlined_lite_history` | relative path to the plain-text streamlined-lite companion file |
 | `restored_stop_sequences` | number of stripped stop sequences re-attached (when any) |
 
 Every history dump is written as **one compact JSON document per file, terminated
-by a newline**, so files can be concatenated directly into a JSONL corpus:
+by a newline**. Raw and streamlined histories are gzipped; the lite companion is
+plain text. Concatenate them directly into a JSONL corpus:
 
 ```bash
-cat <eval_output_dir>/harnesses/claude-code/*.history.json > histories.jsonl
+# raw winning attempts (gzipped JSONL)
+zcat <eval_output_dir>/harnesses/claude-code/*.history.json.gz > histories.jsonl
+# or the plain-text lite companions, without per-trajectory turn bookkeeping
+cat <eval_output_dir>/harnesses/claude-code/*.history.streamlined-lite.json > lite.jsonl
 ```
 
-Task finalization also writes the streamlined companion
-`<instance>.attempt<N>.history.streamlined.json` (and
-`<instance>.history.streamlined.json` for the canonically published winning
+Task finalization also writes the gzipped streamlined companion
+`attempts/<instance>.attempt<N>.history.streamlined.json.gz` (and
+`<instance>.history.streamlined.json.gz` for the canonically published winning
 attempt): prefix fragments merged, original tool arguments restored and stripped
-stop sequences re-attached. Disable that companion with
+stop sequences re-attached. Next to each streamlined file, the plain-text
+`*.history.streamlined-lite.json` drops each trajectory's `turns` and the
+aligned `reasoning_content`/`loss_mask`/`path_turn_indices` arrays, because the
+streamliner already folded the reasoning and training mask into the message
+dicts. It keeps the identifying/filter fields (`trajectory_id`, `kind`,
+`exclude_from_training`, `tool_sets`, ...), so agent, auxiliary-classifier and
+compaction trajectories remain distinguishable. Use the lite file for streaming
+downstream processing and the full streamlined file when per-turn request
+metadata is needed (e.g. `--split-tool-sets`). Disable the companions with
 `--no-streamline-history`; the raw history is always written. See
 [Streamlining fragmented histories](#streamlining-fragmented-histories).
 
@@ -551,15 +567,21 @@ HuggingFace-loadable JSONL files:
 Classifier trajectories are exported even when they are capture-excluded (the
 main file still honours ``--include-excluded`` / ``--train-excluded``).
 
-Collect the history files first (each history file is already a one-line JSON
-document, so plain `cat` works; the reader also accepts JSONL or older
-pretty-printed dumps):
+Collect the history files first: the reader accepts plain or gzipped JSONL,
+concatenated pretty-printed dumps, raw histories, streamlined histories and the
+plain-text streamlined-lite companions. Flattening a **streamlined** history is
+preferred (fragments already merged, original tool arguments restored, reasoning
+and loss masks folded into messages); the lite file is the cheapest input if you
+do not need per-turn metadata:
 
 ```bash
-# either real JSONL ...
-jq -c . eval_outputs/.../harnesses/claude-code/*.history.json > histories.jsonl
-# ... or a concatenation of the pretty-printed documents
-cat eval_outputs/.../harnesses/claude-code/*.history.json > histories.jsonl
+# one-line gzipped JSON docs -> JSONL
+zcat eval_outputs/.../harnesses/claude-code/*.history.json.gz > histories.jsonl
+# or the plain-text lite companions
+cat eval_outputs/.../harnesses/claude-code/*.history.streamlined-lite.json > histories.jsonl
+# or point the flatten command straight at gzipped streamlined files
+uv run harness-flatten-histories \
+  eval_outputs/.../harnesses/claude-code/*.history.streamlined.json.gz -o flat.jsonl
 
 # main file: flat.jsonl, classifier file: flat.classifier.jsonl
 uv run harness-flatten-histories histories.jsonl -o flat.jsonl
@@ -680,9 +702,14 @@ Notes:
   `trajectories[].tool_sets` with a `turns[].tool_set` index. The flattened
   `tools` field is the variant used by the trajectory's last turn (falling back
   to the first variant), or `[]` when the request was tool-less. The root-level
-  `tools` in `*.history.json` is already the resolved list for the main
+  `tools` in `*.history.json[.gz]` is already the resolved list for the main
   trajectory; `tool_sets` keeps all variants for provenance (older dumps without
   per-trajectory sets may still expose the legacy list-of-lists `tools`).
+- Flattening a `*.history.streamlined-lite.json` recovers `loss_mask` and
+  `reasoning_content` from the folded message fields. It cannot provide
+  `trained_turns`/per-turn indices and cannot split tool-set phases, because
+  `turns` is omitted; use the full `*.history.streamlined.json.gz` (or raw
+  history) when those are needed.
 - `--split-tool-sets` handles trajectories whose tool list changed mid-way: the
   capture intentionally keeps them as one trajectory (tools are not part of the
   message-prefix identity), so the flattener emits one record per contiguous
@@ -752,10 +779,13 @@ the flattening step:
   pre-compaction leaf (`:N+1.parent = :N`), so a long session with 6 compactions
   keeps 7 merged chains plus the 6 pre-compaction branch leaves — both are needed
   because their trained turns are disjoint;
-- output is written next to the input as `<id>.history.streamlined.json` (one
-  compact JSON line + trailing newline, like the raw dumps); the original
+- output is written next to the input as gzipped
+  `<id>.history.streamlined.json.gz` (one compact JSON line + trailing newline,
+  like the raw dumps); a plain-text `<id>.history.streamlined-lite.json` drops
+  the per-trajectory `turns`/`reasoning_content`/`loss_mask`/`path_turn_indices`
+  fields (already folded into messages) for streaming consumers. The original
   history is never modified and existing outputs are skipped unless
-  `--overwrite` is passed.
+  `--overwrite` is passed (a missing lite companion is written on skip).
 
 ```bash
 # one claude-code dir
@@ -767,7 +797,7 @@ uv run harness-streamline-histories --root /path/to/run --list > dirs.txt
 
 # dry-run / include per-attempt histories / keep API-verbatim aux replies
 uv run harness-streamline-histories --dir ... --dry-run
-uv run harness-streamline-histories --dir ... --include-attempts
+uv run harness-streamline-histories --dir ... --include-attempts  # also attempts/*.json.gz
 uv run harness-streamline-histories --dir ... --no-restore-stop-sequences
 ```
 
@@ -806,7 +836,7 @@ up-to-date ones:
 
 ```bash
 # one task per job directory, repairing stale companions (add --include-attempts
-# for runs that only have <id>.attemptN.history.json files)
+# for runs that only have attempts/<id>.attemptN.history.json.gz files)
 uv run harness-streamline-histories --root <run-root> --list > dirs.txt
 sbatch --array=0-$(($(wc -l < dirs.txt) - 1)) \
   /path/to/repo/scripts/streamline_histories_slurm.sh dirs.txt
@@ -814,9 +844,11 @@ sbatch --array=0-$(($(wc -l < dirs.txt) - 1)) \
 uv run harness-streamline-histories --root <run-root> [--include-attempts]
 ```
 
-The old raw `*.history.json` files are left untouched (they are still valid
-inputs); the repaired `<id>.history.streamlined.json` companion is the compact,
-merged, reasoning-embedded artifact to use downstream. `harness-flatten-histories`
+The raw `*.history.json[.gz]` files are left untouched (legacy plain dumps are
+still valid inputs); the repaired `<id>.history.streamlined.json.gz` companion is
+the compact, merged, reasoning-embedded artifact to use downstream, and
+`<id>.history.streamlined-lite.json` is the plain-text derivative for streaming
+consumers. `harness-flatten-histories`
 also upgrades old raw histories on the fly (one-line records with reasoning
 embedded, restored tool arguments and stop sequences).
 

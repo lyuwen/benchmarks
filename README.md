@@ -147,10 +147,13 @@ HuggingFace-loadable JSONL files: agentic trajectories + compactions, and a
 separate classifier file (`classifier: yes|no`) for auto-mode classifier calls;
 records are normalized (`instance_id`/`messages`/`tools`/`metadata` JSON string).
 Large JSONL corpora can be flattened in place with `--workers N` (local
-byte-range sharding, no copy) and `--progress`. Task finalization writes each history as one compact JSON
-line (`cat *.history.json` is valid JSONL), re-attaches stripped stop sequences,
-and emits a streamlined companion with fragmented trajectories merged and the
-model's original tool arguments restored. See
+byte-range sharding, no copy) and `--progress`. Task finalization writes the
+per-attempt histories under `attempts/` as gzipped one-line JSON documents
+(`zcat attempts/*.history.json.gz` is valid JSONL), re-attaches stripped stop
+sequences, and emits gzipped streamlined companions with fragmented trajectories
+merged and the model's original tool arguments restored, plus a plain-text
+`*.history.streamlined-lite.json` (per-trajectory `turns`/aligned arrays dropped)
+for streaming downstream processing. See
 **[docs/harnesses.md](docs/harnesses.md)** for architecture, configuration,
 outputs, flattening and troubleshooting.
 

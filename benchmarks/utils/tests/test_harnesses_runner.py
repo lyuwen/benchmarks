@@ -11,7 +11,7 @@ import pytest
 from pydantic import Field
 
 from benchmarks.utils.execution_judge import ExecutionBasedJudge
-from benchmarks.utils.harnesses import runner
+from benchmarks.utils.harnesses import history_io, runner
 from benchmarks.utils.harnesses.claude_code import HarnessRun
 from benchmarks.utils.harnesses.config import HarnessConfig
 from benchmarks.utils.harnesses.distribution import HarnessDistribution
@@ -290,10 +290,12 @@ def test_run_harness_instance_success(
     assert result.metrics is not None
     assert result.metrics.accumulated_token_usage is not None
     assert result.metrics.accumulated_token_usage.prompt_tokens == 30
-    assert Path(result.history_path).is_file()
-    raw_text = Path(result.history_path).read_text()
-    assert raw_text.endswith("\n") and raw_text.count("\n") == 1
-    history = json.loads(raw_text)
+    history_path = Path(result.history_path)
+    assert history_path.is_file()
+    assert history_path.parent.name == "attempts"
+    assert history_path.name.endswith(".history.json.gz")
+    assert history_path.read_bytes()[:2] == b"\x1f\x8b"
+    history = history_io.read_json(history_path)
     assert history["instance_id"] == "i1"
     assert history["test_result"]["git_patch"].strip() == PATCH.strip()
     assert history["messages"][0]["role"] == "user"
@@ -318,9 +320,10 @@ def test_run_harness_instance_success(
     # The harness ran inside the container, pointed at the proxy.
     # Finalization also writes a one-line streamlined companion.
     assert result.streamlined_history_path is not None
-    streamlined_text = Path(result.streamlined_history_path).read_text()
-    assert streamlined_text.endswith("\n") and streamlined_text.count("\n") == 1
-    streamlined = json.loads(streamlined_text)
+    streamlined_path = Path(result.streamlined_history_path)
+    assert streamlined_path.name.endswith(".history.streamlined.json.gz")
+    assert streamlined_path.parent.name == "attempts"
+    streamlined = history_io.read_json(streamlined_path)
     assert streamlined["streamlined"]["fragments_before"] == 1
     assert streamlined["streamlined"]["trajectories_after"] == 1
     assert list(streamlined["trajectories"][0]["messages"][1].keys()) == [
@@ -331,7 +334,25 @@ def test_run_harness_instance_success(
     ]
     # New-format marker used to distinguish finalized output from stale files.
     assert "reasoning_embedded_messages" in streamlined["streamlined"]
-    assert history["streamlined_history"] == "i1.attempt1.history.streamlined.json"
+    assert history["streamlined_history"] == (
+        "attempts/i1.attempt1.history.streamlined.json.gz"
+    )
+    assert history["streamlined_lite_history"] == (
+        "attempts/i1.attempt1.history.streamlined-lite.json"
+    )
+    lite_path = history_path.parent / "i1.attempt1.history.streamlined-lite.json"
+    assert lite_path.parent.name == "attempts"
+    assert lite_path.read_bytes()[:2] != b"\x1f\x8b"
+    lite = json.loads(lite_path.read_text())
+    assert lite["streamlined_lite"]["omitted_trajectory_fields"] == [
+        "turns",
+        "reasoning_content",
+        "loss_mask",
+        "path_turn_indices",
+    ]
+    assert "turns" not in lite["trajectories"][0]
+    assert "loss_mask" not in lite["trajectories"][0]
+    assert "reasoning_content" not in lite["trajectories"][0]
 
     run_kwargs = harness.ran[0]
     assert run_kwargs["proxy_url"] == "http://host.docker.internal:34567"
@@ -409,17 +430,24 @@ def test_publish_canonical_histories(tmp_path: Path) -> None:
             {"instance_id": instance_id},
         )
     runner.publish_canonical_histories(str(output_dir), str(output_path))
-    assert json.loads((output_dir / "i1.history.json").read_text()) == {
+    canonical = history_io.read_json(output_dir / "i1.history.json.gz")
+    assert canonical == {
         "instance_id": "i1",
-        "streamlined_history": "i1.history.streamlined.json",
+        "streamlined_history": "i1.history.streamlined.json.gz",
+        "streamlined_lite_history": "i1.history.streamlined-lite.json",
     }
-    assert json.loads((output_dir / "i2.history.json").read_text()) == {
+    canonical_two = history_io.read_json(output_dir / "i2.history.json.gz")
+    assert canonical_two == {
         "instance_id": "i2",
-        "streamlined_history": "i2.history.streamlined.json",
+        "streamlined_history": "i2.history.streamlined.json.gz",
+        "streamlined_lite_history": "i2.history.streamlined-lite.json",
     }
-    streamlined = json.loads((output_dir / "i1.history.streamlined.json").read_text())
+    streamlined = history_io.read_json(output_dir / "i1.history.streamlined.json.gz")
     assert streamlined["streamlined"]["fragments_before"] == 0
     assert streamlined["trajectories"] == []
+    lite = json.loads((output_dir / "i1.history.streamlined-lite.json").read_text())
+    assert lite["trajectories"] == []
+    assert (output_dir / "i1.history.json.gz").read_bytes()[:2] == b"\x1f\x8b"
 
 
 def test_start_rollout_manager_passes_request_params(

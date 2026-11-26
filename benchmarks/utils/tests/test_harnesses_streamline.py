@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from benchmarks.utils.harnesses import streamline
+from benchmarks.utils.harnesses import history_io, streamline
 
 
 BASH = {
@@ -384,20 +384,40 @@ def test_streamline_keeps_divergent_branches() -> None:
 def test_streamline_history_file_and_attempt_skip(tmp_path: Path) -> None:
     source = tmp_path / "owner__repo-1.history.json"
     source.write_text(json.dumps(make_history()), encoding="utf-8")
-    attempt = tmp_path / "owner__repo-1.attempt1.history.json"
+    attempts_dir = tmp_path / "attempts"
+    attempts_dir.mkdir()
+    attempt = attempts_dir / "owner__repo-1.attempt1.history.json"
     attempt.write_text(json.dumps(make_history()), encoding="utf-8")
 
     summary = streamline.streamline_history_file(source)
     assert summary is not None
-    target = tmp_path / "owner__repo-1.history.streamlined.json"
-    assert target.is_file()
-    text = target.read_text(encoding="utf-8")
-    assert text.endswith("\n") and text.count("\n") == 1
-    data = json.loads(text)
+    target = tmp_path / "owner__repo-1.history.streamlined.json.gz"
+    lite = tmp_path / "owner__repo-1.history.streamlined-lite.json"
+    assert target.is_file() and lite.is_file()
+    data = history_io.read_json(target)
     assert data["streamlined"]["fragments_before"] == 6
     assert data["streamlined"]["trajectories_after"] == 4
+    lite_data = json.loads(lite.read_text(encoding="utf-8"))
+    assert lite_data["streamlined_lite"]["omitted_trajectory_fields"] == [
+        "turns",
+        "reasoning_content",
+        "loss_mask",
+        "path_turn_indices",
+    ]
+    assert lite.read_bytes()[:2] != b"\x1f\x8b"
+    assert all("turns" not in trajectory for trajectory in lite_data["trajectories"])
 
-    # Idempotent: a second run skips the existing output.
+    attempt_summary = streamline.streamline_history_file(attempt)
+    assert attempt_summary is not None
+    attempt_target = attempts_dir / (
+        "owner__repo-1.attempt1.history.streamlined.json.gz"
+    )
+    attempt_lite = attempts_dir / (
+        "owner__repo-1.attempt1.history.streamlined-lite.json"
+    )
+    assert attempt_target.is_file() and attempt_lite.is_file()
+
+    # Idempotent: a second run skips the existing outputs.
     assert streamline.streamline_history_file(source) is None
     assert streamline.streamline_history_file(source, overwrite=True) is not None
 
@@ -407,16 +427,25 @@ def test_streamline_main_processes_only_final_histories(
 ) -> None:
     source = tmp_path / "claude-code"
     source.mkdir()
+    attempts_dir = source / "attempts"
+    attempts_dir.mkdir()
     (source / "owner__repo-1.history.json").write_text(
         json.dumps(make_history()), encoding="utf-8"
     )
-    (source / "owner__repo-1.attempt1.history.json").write_text(
+    (attempts_dir / "owner__repo-1.attempt1.history.json").write_text(
         json.dumps(make_history()), encoding="utf-8"
     )
 
     assert streamline.main(["--dir", str(source)]) == 0
-    assert (source / "owner__repo-1.history.streamlined.json").is_file()
-    assert not (source / "owner__repo-1.attempt1.history.streamlined.json").exists()
+    assert (source / "owner__repo-1.history.streamlined.json.gz").is_file()
+    assert not (
+        attempts_dir / "owner__repo-1.attempt1.history.streamlined.json.gz"
+    ).exists()
+
+    assert streamline.main(["--dir", str(source), "--include-attempts"]) == 0
+    assert (
+        attempts_dir / "owner__repo-1.attempt1.history.streamlined.json.gz"
+    ).is_file()
 
 
 def test_streamline_list_discovers_claude_code_dirs(tmp_path: Path) -> None:
@@ -435,7 +464,8 @@ def test_streamline_dry_run_writes_nothing(tmp_path: Path) -> None:
         json.dumps(make_history()), encoding="utf-8"
     )
     assert streamline.main(["--dir", str(source), "--dry-run"]) == 0
-    assert not (source / "owner__repo-1.history.streamlined.json").exists()
+    assert not (source / "owner__repo-1.history.streamlined.json.gz").exists()
+    assert not (source / "owner__repo-1.history.streamlined-lite.json").exists()
 
 
 def test_argument_normalization_matches_replay_rewrites_only() -> None:
@@ -589,24 +619,22 @@ def test_merge_fills_reasoning_missing_from_base_context() -> None:
 def test_streamline_regenerates_stale_companion(tmp_path: Path) -> None:
     source = tmp_path / "owner__repo-1.history.json"
     source.write_text(json.dumps(make_history()), encoding="utf-8")
-    stale = tmp_path / "owner__repo-1.history.streamlined.json"
+    stale = tmp_path / "owner__repo-1.history.streamlined.json.gz"
     # An older output: pretty-printed and without the new summary marker.
     # Older outputs may have the reasoning marker but not the loss-mask one.
-    stale.write_text(
-        json.dumps(
-            {
-                "streamlined": {
-                    "fragments_before": 99,
-                    "reasoning_embedded_messages": 1,
-                }
+    history_io.write_json_atomic(
+        stale,
+        {
+            "streamlined": {
+                "fragments_before": 99,
+                "reasoning_embedded_messages": 1,
             }
-        ),
-        encoding="utf-8",
+        },
     )
 
     summary = streamline.streamline_history_file(source)
     assert summary is not None
-    refreshed = json.loads(stale.read_text(encoding="utf-8"))
+    refreshed = history_io.read_json(stale)
     assert refreshed["streamlined"]["trajectories_after"] == 4
     assert "reasoning_embedded_messages" in refreshed["streamlined"]
     assert "loss_mask_embedded_messages" in refreshed["streamlined"]
@@ -635,3 +663,49 @@ def test_streamline_progress_line(
         == 0
     )
     assert "[streamline]" in capsys.readouterr().err
+
+
+def test_streamline_reads_gzipped_history_and_writes_missing_lite(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "owner__repo-1.history.json.gz"
+    history_io.write_json_atomic(source, make_history())
+    summary = streamline.streamline_history_file(source)
+    assert summary is not None
+    target = tmp_path / "owner__repo-1.history.streamlined.json.gz"
+    lite = tmp_path / "owner__repo-1.history.streamlined-lite.json"
+    assert target.is_file() and lite.is_file()
+
+    # A current streamlined file with a deleted lite companion is repaired
+    # without regenerating the streamlined file.
+    lite.unlink()
+    streamlined_mtime = target.stat().st_mtime_ns
+    assert streamline.streamline_history_file(source) is None
+    assert lite.is_file()
+    assert target.stat().st_mtime_ns == streamlined_mtime
+
+
+def test_build_streamlined_lite_drops_enriched_arrays() -> None:
+    streamlined = streamline.streamline_history(make_history())
+    lite = streamline.build_streamlined_lite(streamlined)
+    assert set(lite["streamlined_lite"]["omitted_trajectory_fields"]) == {
+        "turns",
+        "reasoning_content",
+        "loss_mask",
+        "path_turn_indices",
+    }
+    for trajectory in lite["trajectories"]:
+        assert "turns" not in trajectory
+        assert "reasoning_content" not in trajectory
+        assert "loss_mask" not in trajectory
+        assert "path_turn_indices" not in trajectory
+        # Identification/filter metadata survives.
+        assert "trajectory_id" in trajectory
+        assert "exclude_from_training" in trajectory
+        assert "tool_sets" in trajectory
+        # Folded training fields stay on the messages.
+        assert any(
+            "loss_mask" in message or "reasoning_content" in message
+            for message in trajectory["messages"]
+            if isinstance(message, dict)
+        )

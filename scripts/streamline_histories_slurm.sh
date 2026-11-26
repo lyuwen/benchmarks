@@ -2,11 +2,13 @@
 # Launch harness-streamline-histories as a SLURM job array.
 #
 # Each array task streamlines one run directory {i}: it reads the final
-# <id>.history.json (per-attempt files are ignored), merges the fragment
-# trajectories split by Claude Code's replayed-tool normalization (leading
-# "cd <cwd> &&" and Edit defaults), restores the tool arguments the model
-# originally generated, keeps auxiliary/compaction trajectories unchanged and
-# writes <id>.history.streamlined.json next to the input.
+# <id>.history.json[.gz] (per-attempt files under attempts/ are ignored unless
+# --include-attempts is passed), merges the fragment trajectories split by
+# Claude Code's replayed-tool normalization (leading "cd <cwd> &&" and Edit
+# defaults), restores the tool arguments the model originally generated, keeps
+# auxiliary/compaction trajectories unchanged and writes
+# <id>.history.streamlined.json.gz plus a plain-text
+# <id>.history.streamlined-lite.json next to the input.
 #
 # The job is expected to run with the run root (the directory containing the
 # {i} job directories) as its working directory; SLURM_ARRAY_TASK_ID selects

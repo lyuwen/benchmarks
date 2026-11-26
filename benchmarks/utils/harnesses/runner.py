@@ -20,15 +20,21 @@ import logging
 import os
 import re
 import shlex
-import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from benchmarks.utils.execution_judge import ExecutionBasedJudge
 from benchmarks.utils.harnesses.base import create_harness
 from benchmarks.utils.harnesses.config import HarnessConfig
 from benchmarks.utils.harnesses.distribution import ensure_distribution
+from benchmarks.utils.harnesses.history_io import (
+    ATTEMPTS_DIRNAME,
+    HISTORY_GZ_SUFFIX,
+    STREAMLINED_GZ_SUFFIX,
+    STREAMLINED_LITE_SUFFIX,
+    read_json,
+    write_json_atomic,
+)
 from benchmarks.utils.harnesses.rollout import (
     RolloutManager,
     RolloutManagerConfig,
@@ -45,7 +51,7 @@ from benchmarks.utils.harnesses.rollout import (
     upstream_credentials,
 )
 from benchmarks.utils.harnesses.streamline import (
-    STREAMLINED_SUFFIX,
+    build_streamlined_lite,
     streamline_history,
 )
 from benchmarks.utils.harnesses.workspace import DockerContainerWorkspace
@@ -228,6 +234,9 @@ def run_harness_instance(
     streamlined_path = streamlined_history_file_path(
         output_dir, instance_id, request.attempt
     )
+    streamlined_lite_path = streamlined_lite_history_file_path(
+        output_dir, instance_id, request.attempt
+    )
     streamlined: dict[str, Any] | None = None
     if config.write_streamlined_history:
         try:
@@ -272,9 +281,13 @@ def run_harness_instance(
         )
     if streamlined is not None:
         history["streamlined_history"] = os.path.relpath(streamlined_path, output_dir)
+        history["streamlined_lite_history"] = os.path.relpath(
+            streamlined_lite_path, output_dir
+        )
     write_json_atomic(history_path, history)
     if streamlined is not None:
         write_json_atomic(streamlined_path, streamlined)
+        write_json_atomic(streamlined_lite_path, build_streamlined_lite(streamlined))
     logger.info(
         "Harness run for %s finished: patch=%d bytes, captures=%s, trajectories=%s",
         instance_id,
@@ -590,52 +603,54 @@ def build_history_payload(
     return payload
 
 
+def _attempts_dir(output_dir: str) -> str:
+    return os.path.join(output_dir, ATTEMPTS_DIRNAME)
+
+
 def history_file_path(output_dir: str, instance_id: str, attempt: int) -> str:
-    return os.path.join(output_dir, f"{instance_id}.attempt{attempt}.history.json")
+    return os.path.join(
+        _attempts_dir(output_dir),
+        f"{instance_id}.attempt{attempt}{HISTORY_GZ_SUFFIX}",
+    )
 
 
 def streamlined_history_file_path(
     output_dir: str, instance_id: str, attempt: int
 ) -> str:
     return os.path.join(
-        output_dir, f"{instance_id}.attempt{attempt}{STREAMLINED_SUFFIX}"
+        _attempts_dir(output_dir),
+        f"{instance_id}.attempt{attempt}{STREAMLINED_GZ_SUFFIX}",
+    )
+
+
+def streamlined_lite_history_file_path(
+    output_dir: str, instance_id: str, attempt: int
+) -> str:
+    return os.path.join(
+        _attempts_dir(output_dir),
+        f"{instance_id}.attempt{attempt}{STREAMLINED_LITE_SUFFIX}",
     )
 
 
 def canonical_streamlined_history_path(output_dir: str, instance_id: str) -> str:
-    return os.path.join(output_dir, f"{instance_id}{STREAMLINED_SUFFIX}")
+    return os.path.join(output_dir, f"{instance_id}{STREAMLINED_GZ_SUFFIX}")
+
+
+def canonical_streamlined_lite_history_path(output_dir: str, instance_id: str) -> str:
+    return os.path.join(output_dir, f"{instance_id}{STREAMLINED_LITE_SUFFIX}")
 
 
 def canonical_history_path(output_dir: str, instance_id: str) -> str:
-    return os.path.join(output_dir, f"{instance_id}.history.json")
-
-
-def write_json_atomic(path: str, payload: dict[str, Any]) -> None:
-    """Write a JSON document atomically (tmp file in the same directory)."""
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(Path(path).parent),
-        prefix=f".{Path(path).name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    temporary = handle.name
-    try:
-        with handle:
-            # One JSON document per line (+ trailing newline) so
-            # ``cat <output>/*.history.json`` is directly valid JSONL.
-            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
-            handle.write("\n")
-        os.replace(temporary, path)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
+    return os.path.join(output_dir, f"{instance_id}{HISTORY_GZ_SUFFIX}")
 
 
 def publish_canonical_histories(output_dir: str, output_path: str) -> None:
-    """Copy each instance's winning-attempt history to ``<id>.history.json``."""
+    """Publish each instance's winning-attempt history under the canonical names.
+
+    Writes gzipped ``<id>.history.json.gz`` and
+    ``<id>.history.streamlined.json.gz`` plus the plain-text
+    ``<id>.history.streamlined-lite.json`` companion.
+    """
     selected: dict[str, int] = {}
     candidates = [output_path, output_path.replace(".jsonl", "_errors.jsonl")]
     for path in candidates:
@@ -658,9 +673,8 @@ def publish_canonical_histories(output_dir: str, output_path: str) -> None:
         if not os.path.isfile(source):
             continue
         try:
-            with open(source, encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:  # pragma: no cover - best effort
+            payload = read_json(source)
+        except (OSError, ValueError) as exc:  # pragma: no cover - best effort
             logger.warning("Failed to publish history for %s: %s", instance_id, exc)
             continue
         try:
@@ -678,6 +692,9 @@ def publish_canonical_histories(output_dir: str, output_path: str) -> None:
         canonical_streamlined = canonical_streamlined_history_path(
             output_dir, instance_id
         )
+        canonical_lite = canonical_streamlined_lite_history_path(
+            output_dir, instance_id
+        )
         if streamlined is not None:
             # The canonical payload is loaded from an already-finalized attempt,
             # so stop sequences were attached before this pass; keep the count
@@ -691,10 +708,14 @@ def publish_canonical_histories(output_dir: str, output_path: str) -> None:
             payload["streamlined_history"] = os.path.relpath(
                 canonical_streamlined, output_dir
             )
+            payload["streamlined_lite_history"] = os.path.relpath(
+                canonical_lite, output_dir
+            )
         try:
             write_json_atomic(canonical_history_path(output_dir, instance_id), payload)
             if streamlined is not None:
                 write_json_atomic(canonical_streamlined, streamlined)
+                write_json_atomic(canonical_lite, build_streamlined_lite(streamlined))
         except OSError as exc:  # pragma: no cover - best effort
             logger.warning(
                 "Failed to write canonical history for %s: %s", instance_id, exc

@@ -1,7 +1,7 @@
 """Flatten harness history dumps into training-ready trajectory records.
 
-``run_infer_harnesses.py`` writes one ``<instance>.attemptN.history.json`` per
-attempt. Typical downstream use is to concatenate those into a single file and
+``run_infer_harnesses.py`` writes one gzipped
+``attempts/<instance>.attemptN.history.json.gz`` per attempt. Typical downstream use is to concatenate those into a single file and
 turn every captured trajectory into one record that carries OpenAI
 Chat-Completions ``messages`` and ``tools``.
 
@@ -55,6 +55,10 @@ from typing import Any
 import orjson
 from tqdm import tqdm
 
+from benchmarks.utils.harnesses.history_io import (
+    open_binary_auto,
+    open_text_auto,
+)
 from benchmarks.utils.harnesses.normalize import classifier_label, normalize_record
 from benchmarks.utils.harnesses.progress import (
     add_progress_arguments,
@@ -99,7 +103,7 @@ def is_jsonl_file(path: str | Path) -> bool:
 def iter_json_documents(path: str | Path) -> Iterator[dict[str, Any]]:
     """Yield JSON objects from JSONL (fast orjson path) or concatenated docs."""
     seen_first = False
-    with open(path, "rb") as handle:
+    with open_binary_auto(path) as handle:
         for raw in handle:
             if not raw.strip():
                 continue
@@ -131,7 +135,7 @@ def _iter_concatenated_json_documents(
 ) -> Iterator[dict[str, Any]]:
     """Yield JSON objects from JSONL or concatenated pretty-printed documents."""
     decoder = json.JSONDecoder()
-    with open(path, encoding="utf-8") as handle:
+    with open_text_auto(path) as handle:
         buffer = ""
         position = 0
         eof = False
@@ -229,6 +233,46 @@ def _base_record(history: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _loss_mask_from_messages(messages: list[dict[str, Any]]) -> list[int] | None:
+    """Recover the aligned loss mask from folded per-message fields.
+
+    Streamlined histories fold ``loss_mask`` into assistant messages and the
+    compact ``streamlined-lite`` companion drops the trajectory-level array, so
+    flattening that file recovers the mask here. Returns ``None`` when no
+    message carries the field (raw captures keep the array instead).
+    """
+    if not any(
+        isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and "loss_mask" in message
+        for message in messages
+    ):
+        return None
+    return [
+        1
+        if isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and message.get("loss_mask")
+        else 0
+        for message in messages
+    ]
+
+
+def _reasoning_from_messages(
+    messages: list[dict[str, Any]],
+) -> list[str | None] | None:
+    """Recover the aligned reasoning array from folded per-message fields."""
+    if not any(
+        isinstance(message, dict) and message.get("reasoning_content")
+        for message in messages
+    ):
+        return None
+    return [
+        message.get("reasoning_content") if isinstance(message, dict) else None
+        for message in messages
+    ]
+
+
 def flatten_trajectory(
     history: dict[str, Any],
     trajectory: dict[str, Any],
@@ -263,10 +307,14 @@ def flatten_trajectory(
     if restored:
         record["restored_stop_sequences"] = restored
     loss_mask = _aligned(trajectory.get("loss_mask"), len(messages))
+    if loss_mask is None:
+        loss_mask = _loss_mask_from_messages(messages)
     if loss_mask is not None:
         record["loss_mask"] = loss_mask
         embed_loss_mask_into_messages(messages, loss_mask)
     reasoning = _aligned(trajectory.get("reasoning_content"), len(messages))
+    if reasoning is None:
+        reasoning = _reasoning_from_messages(messages)
     if reasoning is not None:
         record["reasoning_content"] = reasoning
     return record
@@ -506,6 +554,8 @@ def stitch_row(
     if restored:
         record["restored_stop_sequences"] = restored
     reasoning = _aligned(trajectory.get("reasoning_content"), len(messages))
+    if reasoning is None:
+        reasoning = _reasoning_from_messages(messages)
     if reasoning is not None:
         record["reasoning_content"] = reasoning
     return record
@@ -672,7 +722,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "input",
         type=str,
-        help="History file: JSONL or concatenated *.history.json documents",
+        help=(
+            "History file: JSONL or concatenated history documents, plain or "
+            ".gz (e.g. *.history.streamlined-lite.json)"
+        ),
     )
     parser.add_argument(
         "-o",

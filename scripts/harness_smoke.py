@@ -58,6 +58,7 @@ from benchmarks.utils.harnesses.distribution import (
     ensure_distribution,
     seed_deepseek_distribution,
 )
+from benchmarks.utils.harnesses.history_io import read_json
 from benchmarks.utils.harnesses.runner import HarnessRunRequest, run_harness_instance
 from benchmarks.utils.harnesses.workspace import DockerContainerWorkspace
 from benchmarks.utils.models import EvalInstance
@@ -350,7 +351,7 @@ def main() -> int:
         assert "smoke.txt" in result.git_patch, "harness change missing from patch"
         assert "smoke-ok" in result.git_patch, "file content missing from patch"
         assert Path(result.history_path).is_file(), "history file missing"
-        history = json.loads(Path(result.history_path).read_text())
+        history = read_json(result.history_path)
         assert history["stats"]["requests"] >= 1, "no captured requests"
         assert history["trajectories"], "no captured trajectories"
         assert upstream.requests, "upstream saw no traffic"
