@@ -745,13 +745,28 @@ def build_streamlined_lite(history: dict[str, Any]) -> dict[str, Any]:
     trajectories: list[Any] = []
     for trajectory in history.get("trajectories") or []:
         if isinstance(trajectory, dict):
-            trajectories.append(
-                {
-                    key: value
-                    for key, value in trajectory.items()
-                    if key not in LITE_OMITTED_TRAJECTORY_FIELDS
-                }
-            )
+            compact = {
+                key: value
+                for key, value in trajectory.items()
+                if key not in LITE_OMITTED_TRAJECTORY_FIELDS
+            }
+            # Keep a compact per-turn classification so auxiliary (classifier /
+            # title) and compaction turns remain distinguishable even when the
+            # full turn records are omitted, including runs that deliberately
+            # train auxiliary calls (where ``exclude_from_training`` is False).
+            turns = trajectory.get("turns")
+            if isinstance(turns, list):
+                # Two aligned arrays: ``request_classes[i]`` classifies the turn
+                # whose assistant message is ``messages[turn_message_indices[i]]``.
+                compact["request_classes"] = [
+                    turn.get("request_class") if isinstance(turn, dict) else None
+                    for turn in turns
+                ]
+                compact["turn_message_indices"] = [
+                    turn.get("message_index") if isinstance(turn, dict) else None
+                    for turn in turns
+                ]
+            trajectories.append(compact)
         else:
             trajectories.append(trajectory)
     result["trajectories"] = trajectories
@@ -759,7 +774,11 @@ def build_streamlined_lite(history: dict[str, Any]) -> dict[str, Any]:
         "omitted_trajectory_fields": list(LITE_OMITTED_TRAJECTORY_FIELDS),
         "note": (
             "turns/reasoning_content/loss_mask/path_turn_indices omitted; "
-            "assistant messages carry loss_mask and reasoning_content"
+            "assistant messages carry loss_mask and reasoning_content; "
+            "request_classes/turn_message_indices keep the per-turn request "
+            "classification and its assistant-message index; training status is "
+            "in each assistant message's folded loss_mask (trained_turns remains "
+            "for compatibility)"
         ),
     }
     return result

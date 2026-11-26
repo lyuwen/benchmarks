@@ -694,15 +694,35 @@ def test_build_streamlined_lite_drops_enriched_arrays() -> None:
         "loss_mask",
         "path_turn_indices",
     }
+    full_by_id = {
+        trajectory["trajectory_id"]: trajectory
+        for trajectory in streamlined["trajectories"]
+    }
     for trajectory in lite["trajectories"]:
         assert "turns" not in trajectory
         assert "reasoning_content" not in trajectory
         assert "loss_mask" not in trajectory
         assert "path_turn_indices" not in trajectory
-        # Identification/filter metadata survives.
+        # Identification/filter metadata survives, including the compact
+        # per-turn request classification and its assistant-message mapping.
         assert "trajectory_id" in trajectory
         assert "exclude_from_training" in trajectory
         assert "tool_sets" in trajectory
+        full_turns = full_by_id[trajectory["trajectory_id"]]["turns"]
+        assert trajectory["request_classes"] == [
+            turn.get("request_class") for turn in full_turns
+        ]
+        assert trajectory["turn_message_indices"] == [
+            turn.get("message_index") for turn in full_turns
+        ]
+        assert "turn_indices" not in trajectory
+        for index, message_index in zip(
+            trajectory["request_classes"], trajectory["turn_message_indices"]
+        ):
+            assert (
+                message_index is None
+                or trajectory["messages"][message_index]["role"] == "assistant"
+            )
         # Folded training fields stay on the messages.
         assert any(
             "loss_mask" in message or "reasoning_content" in message

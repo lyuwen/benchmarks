@@ -545,8 +545,13 @@ stop sequences re-attached. Next to each streamlined file, the plain-text
 aligned `reasoning_content`/`loss_mask`/`path_turn_indices` arrays, because the
 streamliner already folded the reasoning and training mask into the message
 dicts. It keeps the identifying/filter fields (`trajectory_id`, `kind`,
-`exclude_from_training`, `tool_sets`, ...), so agent, auxiliary-classifier and
-compaction trajectories remain distinguishable. Use the lite file for streaming
+`exclude_from_training`, `tool_sets`, ...) plus two aligned per-turn arrays:
+`request_classes[i]` is the request class (e.g. `main`, `auxiliary`,
+`compaction`) of the turn whose assistant message is
+`messages[turn_message_indices[i]]`. Training status for that turn is the folded
+`loss_mask` on the message, so the full `turns` records are not needed. This
+keeps agent, auxiliary-classifier and compaction turns distinguishable even in
+runs that deliberately train auxiliary calls. Use the lite file for streaming
 downstream processing and the full streamlined file when per-turn request
 metadata is needed (e.g. `--split-tool-sets`). Disable the companions with
 `--no-streamline-history`; the raw history is always written. See
