@@ -491,12 +491,45 @@ uv run harness-flatten-histories histories.jsonl -o flat-raw.jsonl \
 Classifier samples can only be split into a file: when writing the main output
 to stdout, either pass ``-o FILE`` or ``--classifier-output FILE``.
 
-Both `harness-flatten-histories` and `harness-streamline-histories` are
-single-process tools, but they print periodic progress lines to stderr while
-working (enabled automatically when stderr is a TTY), e.g.
+Both tools print periodic progress lines to stderr while working (enabled
+automatically when stderr is a TTY), e.g.
 `[flatten] 12.3s histories=2 emitted_main=14 emitted_classifier=3`. Use
 `--progress` to force them in a log file, `--no-progress` to disable them and
 `--progress-interval N` to change the cadence.
+
+### Large NFS corpora (speed)
+
+The flattener is optimized for large in-place JSONL corpora (many-GB files that
+must stay on NFS):
+
+- JSONL input is decoded with `orjson` (a first-line check selects the JSONL
+  fast path; concatenated pretty-printed documents still use the slower scanner)
+  and output records are written as buffered binary JSONL;
+- per-record format validation is **off by default** (`--validate` enables it;
+  `--strict` implies it) because it walks every message;
+- `--workers N` shards a JSONL file across N **local** worker processes without
+  copying it: each worker seeks to its own byte range of the same file, reads
+  only that slice (so the file is read once in total) and writes its own
+  `<output>.partNNN.jsonl` / `<classifier>.partNNN.jsonl` files. Only JSONL input
+  and a file `--output` are supported;
+- without `--merge-parts` the final files are the parts, which HuggingFace loads
+  directly with `data_files="flat.part*.jsonl"` (and
+  `"flat.classifier.part*.jsonl"`). `--merge-parts` streams the parts into the
+  regular `-o`/classifier paths, but that re-reads and re-writes the whole
+  output, so it is not recommended for 100 GB+ results.
+
+For a 126 GB / 16k-row corpus on NFS:
+
+```bash
+# N = physical cores you can spare; each worker reads a disjoint byte range
+uv run harness-flatten-histories histories.jsonl -o flat.jsonl \
+  --workers 16 --progress
+# outputs: flat.part000.jsonl ... flat.part015.jsonl (+ classifier parts)
+# load with HuggingFace: data_files="flat.part*.jsonl"
+```
+
+The tools stay self-contained (no SLURM dependency); `--workers` uses the local
+cores only.
 
 Two output shapes:
 

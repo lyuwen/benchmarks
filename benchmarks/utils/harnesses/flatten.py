@@ -43,11 +43,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing
 import os
 import sys
 from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
+
+import orjson
 
 from benchmarks.utils.harnesses.normalize import classifier_label, normalize_record
 from benchmarks.utils.harnesses.progress import (
@@ -74,7 +78,55 @@ MODES = ("trajectories", "stitch")
 # ---------------------------------------------------------------------------
 
 
+def is_jsonl_file(path: str | Path) -> bool:
+    """Whether the first non-empty line is a complete JSON document."""
+    try:
+        with open(path, "rb") as handle:
+            for raw in handle:
+                if raw.strip():
+                    try:
+                        orjson.loads(raw)
+                    except orjson.JSONDecodeError:
+                        return False
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def iter_json_documents(path: str | Path) -> Iterator[dict[str, Any]]:
+    """Yield JSON objects from JSONL (fast orjson path) or concatenated docs."""
+    seen_first = False
+    with open(path, "rb") as handle:
+        for raw in handle:
+            if not raw.strip():
+                continue
+            if not seen_first:
+                seen_first = True
+                try:
+                    document = orjson.loads(raw)
+                except orjson.JSONDecodeError:
+                    # Pretty-printed/concatenated documents: use the scanner.
+                    yield from _iter_concatenated_json_documents(path)
+                    return
+                if not isinstance(document, dict):
+                    raise ValueError(
+                        f"{path}: expected JSON objects, got {type(document)}"
+                    )
+                yield document
+                continue
+            try:
+                document = orjson.loads(raw)
+            except orjson.JSONDecodeError as exc:
+                raise ValueError(f"{path}: invalid JSONL line: {exc}") from exc
+            if not isinstance(document, dict):
+                raise ValueError(f"{path}: expected JSON objects, got {type(document)}")
+            yield document
+
+
+def _iter_concatenated_json_documents(
+    path: str | Path,
+) -> Iterator[dict[str, Any]]:
     """Yield JSON objects from JSONL or concatenated pretty-printed documents."""
     decoder = json.JSONDecoder()
     with open(path, encoding="utf-8") as handle:
@@ -706,11 +758,47 @@ def _build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Print at most this many warning details (default: 20)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Local worker processes for JSONL input: each worker reads its own "
+            "byte range of the same file (no copy) and writes part files"
+        ),
+    )
+    parser.add_argument(
+        "--merge-parts",
+        action="store_true",
+        help=(
+            "After --workers processing, concatenate the per-worker part files "
+            "into the regular output/classifier paths instead of leaving parts"
+        ),
+    )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "Run the per-record format/consistency checks (also implied by "
+            "--strict); skipped by default for speed"
+        ),
+    )
     add_progress_arguments(parser)
     parser.add_argument(
         "--log-level", type=str, default="INFO", help="Logging level (default INFO)"
     )
     return parser
+
+
+WRITE_BUFFER_BYTES = 1 << 20
+
+
+def _write_payload(handle: Any, payload: dict[str, Any], *, binary: bool) -> None:
+    """Write one JSONL record, using orjson and a large NFS-friendly buffer."""
+    if binary:
+        handle.write(orjson.dumps(payload) + b"\n")
+    else:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def classifier_output_path(output: str) -> str:
@@ -719,6 +807,284 @@ def classifier_output_path(output: str) -> str:
     if path.suffix == ".jsonl":
         return str(path.with_name(path.name[: -len(".jsonl")] + ".classifier.jsonl"))
     return f"{path}.classifier.jsonl"
+
+
+def _record_options(args: Any) -> dict[str, Any]:
+    """Picklable options shared by the serial path and worker processes."""
+    return {
+        "mode": args.mode,
+        "include_excluded": args.include_excluded,
+        "train_excluded": args.train_excluded,
+        "split_tool_sets": args.split_tool_sets,
+        "restore_stop_sequences": args.restore_stop_sequences,
+        "verbatim": args.stitch_verbatim,
+        "normalize": args.normalize_for_hf,
+        "validate": args.validate or args.strict,
+    }
+
+
+def _flatten_history_payload_lines(
+    history: dict[str, Any],
+    options: dict[str, Any],
+    warnings: list[str],
+) -> tuple[list[bytes], list[bytes], int]:
+    """Flatten one history into encoded main/classifier JSONL lines."""
+    main_lines: list[bytes] = []
+    classifier_lines: list[bytes] = []
+    records = 0
+    for record in iter_records(
+        iter([history]),
+        mode=options["mode"],
+        # Classifier trajectories may be capture-excluded yet still belong in
+        # the classifier JSONL; routing below decides.
+        include_excluded=True,
+        verbatim=options["verbatim"],
+        train_excluded=options["train_excluded"],
+        split_tool_sets=options["split_tool_sets"],
+        restore_stop_sequences=options["restore_stop_sequences"],
+    ):
+        records += 1
+        if options["validate"]:
+            warnings.extend(validate_record(record))
+        label = classifier_label(record)
+        if label is not None:
+            payload = (
+                normalize_record(record, classifier=label)
+                if options["normalize"]
+                else {**record, "classifier": label}
+            )
+            classifier_lines.append(orjson.dumps(payload) + b"\n")
+            continue
+        if record.get("exclude_from_training") and not (
+            options["include_excluded"] or options["train_excluded"]
+        ):
+            continue
+        payload = normalize_record(record) if options["normalize"] else record
+        main_lines.append(orjson.dumps(payload) + b"\n")
+    if records == 0:
+        warnings.append(
+            f"no trajectories emitted for {history.get('instance_id')} "
+            f"(attempt {history.get('attempt')})"
+        )
+    return main_lines, classifier_lines, records
+
+
+def _part_path(base: str, index: int) -> str:
+    path = Path(base)
+    if path.suffix == ".jsonl":
+        return str(path.with_name(f"{path.stem}.part{index:03d}.jsonl"))
+    return f"{base}.part{index:03d}"
+
+
+def _part_glob(base: str) -> str:
+    return _part_path(base, 0).replace("part000", "part*")
+
+
+def _concatenate_parts(parts: list[str], target: str) -> None:
+    Path(target).parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "wb", buffering=WRITE_BUFFER_BYTES) as output:
+        for part in parts:
+            with open(part, "rb", buffering=WRITE_BUFFER_BYTES) as source:
+                while True:
+                    chunk = source.read(WRITE_BUFFER_BYTES)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+
+
+def _flatten_byte_range(job: tuple[Any, ...]) -> dict[str, Any]:
+    """Worker: read and flatten the JSONL lines in one byte range."""
+    (
+        input_path,
+        start,
+        end,
+        shard_index,
+        main_part,
+        classifier_part,
+        options,
+    ) = job
+    histories = 0
+    emitted_main = 0
+    emitted_classifier = 0
+    skipped = 0
+    warnings: list[str] = []
+    main_handle = None
+    classifier_handle = None
+    try:
+        with open(input_path, "rb", buffering=WRITE_BUFFER_BYTES) as handle:
+            if start:
+                handle.seek(start)
+            while handle.tell() < end:
+                raw = handle.readline()
+                if not raw:
+                    break
+                if not raw.strip():
+                    continue
+                histories += 1
+                try:
+                    history = orjson.loads(raw)
+                except orjson.JSONDecodeError as exc:
+                    warnings.append(
+                        f"{input_path}: invalid JSONL line in shard {shard_index}: {exc}"
+                    )
+                    continue
+                if not isinstance(history, dict):
+                    warnings.append(
+                        f"{input_path}: shard {shard_index} expected JSON objects"
+                    )
+                    continue
+                main_lines, classifier_lines, records = _flatten_history_payload_lines(
+                    history, options, warnings
+                )
+                if main_lines:
+                    if main_handle is None:
+                        Path(main_part).parent.mkdir(parents=True, exist_ok=True)
+                        main_handle = open(  # noqa: SIM115 - closed below
+                            main_part, "wb", buffering=WRITE_BUFFER_BYTES
+                        )
+                    for line in main_lines:
+                        main_handle.write(line)
+                    emitted_main += len(main_lines)
+                if classifier_lines:
+                    if classifier_handle is None:
+                        Path(classifier_part).parent.mkdir(parents=True, exist_ok=True)
+                        classifier_handle = open(  # noqa: SIM115 - closed below
+                            classifier_part, "wb", buffering=WRITE_BUFFER_BYTES
+                        )
+                    for line in classifier_lines:
+                        classifier_handle.write(line)
+                    emitted_classifier += len(classifier_lines)
+                if records == 0:
+                    skipped += 1
+    finally:
+        if main_handle is not None:
+            main_handle.close()
+        if classifier_handle is not None:
+            classifier_handle.close()
+    return {
+        "histories": histories,
+        "emitted_main": emitted_main,
+        "emitted_classifier": emitted_classifier,
+        "skipped": skipped,
+        "warnings": warnings,
+        "main_part": main_part if main_handle is not None else None,
+        "classifier_part": (classifier_part if classifier_handle is not None else None),
+    }
+
+
+def _run_parallel(args: Any, parser: Any) -> int:
+    """Shard a JSONL corpus over local worker processes without copying it."""
+    if args.output == "-":
+        parser.error("--workers requires a file --output")
+    if not is_jsonl_file(args.input):
+        parser.error(
+            "--workers currently requires JSONL input (one JSON history per line)"
+        )
+    output_path = args.output
+    classifier_path = args.classifier_output or classifier_output_path(output_path)
+    if classifier_path == "-":
+        parser.error("--classifier-output cannot be stdout")
+    if os.path.abspath(classifier_path) == os.path.abspath(output_path):
+        parser.error("--classifier-output must differ from the main --output path")
+
+    input_path = str(args.input)
+    size = Path(input_path).stat().st_size
+    starts = [0]
+    if size:
+        with open(input_path, "rb", buffering=0) as handle:
+            for worker in range(1, max(1, args.workers)):
+                offset = size * worker // max(1, args.workers)
+                handle.seek(offset)
+                handle.readline()
+                starts.append(handle.tell())
+    starts.append(size)
+    ranges = [
+        (starts[index], starts[index + 1])
+        for index in range(len(starts) - 1)
+        if starts[index] < starts[index + 1]
+    ]
+
+    main_parts = [_part_path(output_path, index) for index in range(len(ranges))]
+    classifier_parts = [
+        _part_path(classifier_path, index) for index in range(len(ranges))
+    ]
+    options = _record_options(args)
+    reporter = reporter_from_args(args, "flatten")
+    reporter.update(workers=len(ranges), mode=args.mode)
+
+    warnings: list[str] = []
+    histories = emitted_main = emitted_classifier = skipped = failures = 0
+    jobs = [
+        (
+            input_path,
+            start,
+            end,
+            index,
+            main_parts[index],
+            classifier_parts[index],
+            options,
+        )
+        for index, (start, end) in enumerate(ranges)
+    ]
+    try:
+        if jobs:
+            with ProcessPoolExecutor(
+                max_workers=len(jobs),
+                mp_context=multiprocessing.get_context("spawn"),
+            ) as pool:
+                futures = [pool.submit(_flatten_byte_range, job) for job in jobs]
+                # Start the progress thread after the workers are forked.
+                reporter.start()
+                for future in futures:
+                    try:
+                        result = future.result()
+                    except Exception as exc:  # noqa: BLE001 - report and fail
+                        logger.exception("flatten worker failed")
+                        warnings.append(f"flatten worker failed: {exc}")
+                        failures += 1
+                        continue
+                    histories += result["histories"]
+                    emitted_main += result["emitted_main"]
+                    emitted_classifier += result["emitted_classifier"]
+                    skipped += result["skipped"]
+                    warnings.extend(result["warnings"])
+    finally:
+        reporter.stop()
+
+    existing_main = [path for path in main_parts if Path(path).is_file()]
+    existing_classifier = [path for path in classifier_parts if Path(path).is_file()]
+    if args.merge_parts:
+        if existing_main:
+            _concatenate_parts(existing_main, output_path)
+        if existing_classifier:
+            _concatenate_parts(existing_classifier, classifier_path)
+    else:
+        if existing_main:
+            print(f"main parts: {_part_glob(output_path)}", file=sys.stderr)
+        if existing_classifier:
+            print(
+                f"classifier parts: {_part_glob(classifier_path)}",
+                file=sys.stderr,
+            )
+    print(
+        f"workers={len(ranges)} histories={histories} "
+        f"emitted={emitted_main + emitted_classifier} "
+        f"emitted_main={emitted_main} emitted_classifier={emitted_classifier} "
+        f"skipped_empty={skipped} warnings={len(warnings)}",
+        file=sys.stderr,
+    )
+    for warning in warnings[: max(0, args.max_warnings)]:
+        print(f"WARNING {warning}", file=sys.stderr)
+    if len(warnings) > args.max_warnings:
+        print(
+            f"WARNING ... {len(warnings) - args.max_warnings} more warning(s)",
+            file=sys.stderr,
+        )
+    if failures:
+        return 1
+    if args.strict and warnings:
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -730,11 +1096,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.split_tool_sets and args.mode != "trajectories":
         parser.error("--split-tool-sets requires --mode trajectories")
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
+    if args.workers > 1:
+        return _run_parallel(args, parser)
+    validate = args.validate or args.strict
+    output_binary = args.output != "-"
     output = (
         sys.stdout
         if args.output == "-"
         else open(  # noqa: SIM115 - closed below
-            args.output, "w", encoding="utf-8"
+            args.output, "wb", buffering=WRITE_BUFFER_BYTES
         )
     )
     histories = 0
@@ -767,7 +1139,9 @@ def main(argv: list[str] | None = None) -> int:
                 "--classifier-output must differ from the main --output path"
             )
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        classifier_handle = open(path, "w", encoding="utf-8")  # noqa: SIM115
+        classifier_handle = open(  # noqa: SIM115 - closed below
+            path, "wb", buffering=WRITE_BUFFER_BYTES
+        )
         classifier_path = path
         return classifier_handle
 
@@ -799,7 +1173,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 label = classifier_label(record)
                 if label is not None:
-                    warnings.extend(validate_record(record))
+                    if validate:
+                        warnings.extend(validate_record(record))
                     payload = (
                         normalize_record(record, classifier=label)
                         if args.normalize_for_hf
@@ -810,16 +1185,17 @@ def main(argv: list[str] | None = None) -> int:
                     except (RuntimeError, OSError) as exc:
                         print(f"ERROR {exc}", file=sys.stderr)
                         return 1
-                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                    _write_payload(handle, payload, binary=True)
                     emitted_classifier += 1
                     continue
                 if record.get("exclude_from_training") and not (
                     args.include_excluded or args.train_excluded
                 ):
                     continue
-                warnings.extend(validate_record(record))
+                if validate:
+                    warnings.extend(validate_record(record))
                 payload = normalize_record(record) if args.normalize_for_hf else record
-                output.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                _write_payload(output, payload, binary=output_binary)
                 emitted_main += 1
                 reporter.update(
                     histories=histories,

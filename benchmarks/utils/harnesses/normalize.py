@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from typing import Any
+
+import orjson
 
 
 CLASSIFIER_RE = re.compile(r"^\s*<block>\s*(yes|no)\s*(?:</block>)?\s*$", re.IGNORECASE)
@@ -45,6 +48,14 @@ def classifier_label(record: dict[str, Any]) -> str | None:
     return None
 
 
+def _dumps_json(value: Any) -> str:
+    """Serialize JSON-safely to a compact string (orjson fast path)."""
+    try:
+        return orjson.dumps(value).decode("utf-8")
+    except TypeError:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
 def normalize_content(value: Any) -> str:
     """Coerce a message/tool payload to a string (JSON for dicts/lists)."""
     if value is None:
@@ -52,7 +63,7 @@ def normalize_content(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return _dumps_json(value)
     return str(value)
 
 
@@ -102,6 +113,24 @@ def normalize_tool(tool: Any) -> dict[str, Any]:
         "strict": bool(function.get("strict", False)),
     }
     return {"type": "function", "function": normalized_function}
+
+
+@lru_cache(maxsize=64)
+def _normalized_tools_cached(raw_tools: bytes) -> tuple[dict[str, Any], ...]:
+    """Normalize a tool list once per distinct schema (schemas repeat a lot)."""
+    tools = orjson.loads(raw_tools)
+    return tuple(normalize_tool(tool) for tool in tools)
+
+
+def normalize_tools(tools: Any) -> list[dict[str, Any]]:
+    """Normalize a tool list, caching per identical raw schema."""
+    if not isinstance(tools, list):
+        return []
+    try:
+        raw_tools = orjson.dumps(tools)
+    except TypeError:
+        return [normalize_tool(tool) for tool in tools]
+    return list(_normalized_tools_cached(raw_tools))
 
 
 def normalize_message(message: Any) -> dict[str, Any]:
@@ -160,7 +189,5 @@ def normalize_record(
     }
     if label in ("yes", "no"):
         normalized["classifier"] = label
-    normalized["metadata"] = json.dumps(
-        metadata, ensure_ascii=False, separators=(",", ":"), default=str
-    )
+    normalized["metadata"] = _dumps_json(metadata)
     return normalized

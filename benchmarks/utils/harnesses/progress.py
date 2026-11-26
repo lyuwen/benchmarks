@@ -27,6 +27,7 @@ class ProgressReporter:
         enabled: bool,
         interval_sec: float = 5.0,
         stream: TextIO | None = None,
+        provider: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         self.label = label
         self.enabled = enabled
@@ -36,6 +37,7 @@ class ProgressReporter:
         self._counter_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._provider = provider
         self._started = 0.0
 
     @property
@@ -47,8 +49,10 @@ class ProgressReporter:
             self._counters.update(counters)
 
     def _line(self) -> str:
+        counters = dict(self._provider()) if self._provider is not None else {}
         with self._counter_lock:
-            parts = [f"{key}={value}" for key, value in self._counters.items()]
+            counters.update(self._counters)
+        parts = [f"{key}={value}" for key, value in counters.items()]
         suffix = " ".join(parts)
         return f"[{self.label}] {self.elapsed:.1f}s {suffix}".rstrip()
 
@@ -111,7 +115,11 @@ def add_progress_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def reporter_from_args(
-    args: object, label: str, *, is_tty: Callable[[], bool] | None = None
+    args: object,
+    label: str,
+    *,
+    is_tty: Callable[[], bool] | None = None,
+    provider: Callable[[], dict[str, object]] | None = None,
 ) -> ProgressReporter:
     """Build a reporter from parsed CLI args (auto -> TTY detection)."""
     progress = getattr(args, "progress", None)
@@ -121,4 +129,5 @@ def reporter_from_args(
         label,
         enabled=bool(progress),
         interval_sec=float(getattr(args, "progress_interval", 5.0)),
+        provider=provider,
     )

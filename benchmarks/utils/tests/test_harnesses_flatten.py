@@ -836,3 +836,86 @@ def test_flatten_progress_line(
         == 0
     )
     assert "[flatten]" in capsys.readouterr().err
+
+
+def _write_corpus(tmp_path: Path, histories: list[dict]) -> Path:
+    source = tmp_path / "histories.jsonl"
+    source.write_text("".join(json.dumps(h) + "\n" for h in histories))
+    return source
+
+
+def make_corpus() -> list[dict]:
+    histories = []
+    for index in range(6):
+        history = make_history()
+        history["instance_id"] = f"i{index}"
+        history["attempt"] = 1
+        histories.append(history)
+    histories.append(make_aux_stop_history())
+    return histories
+
+
+def test_workers_match_serial_output(tmp_path: Path) -> None:
+    source = _write_corpus(tmp_path, make_corpus())
+    serial = tmp_path / "serial.jsonl"
+    assert flatten.main([str(source), "-o", str(serial)]) == 0
+
+    parallel = tmp_path / "parallel.jsonl"
+    assert (
+        flatten.main(
+            [
+                str(source),
+                "-o",
+                str(parallel),
+                "--workers",
+                "3",
+                "--merge-parts",
+            ]
+        )
+        == 0
+    )
+    assert [json.loads(line) for line in serial.read_text().splitlines()] == [
+        json.loads(line) for line in parallel.read_text().splitlines()
+    ]
+    classifier_serial = tmp_path / "serial.classifier.jsonl"
+    classifier_parallel = tmp_path / "parallel.classifier.jsonl"
+    assert [
+        json.loads(line) for line in classifier_serial.read_text().splitlines()
+    ] == [json.loads(line) for line in classifier_parallel.read_text().splitlines()]
+
+
+def test_workers_write_parts_by_default(tmp_path: Path) -> None:
+    source = _write_corpus(tmp_path, make_corpus())
+    output = tmp_path / "flat.jsonl"
+    assert flatten.main([str(source), "-o", str(output), "--workers", "2"]) == 0
+    parts = sorted(tmp_path.glob("flat.part*.jsonl"))
+    classifier_parts = sorted(tmp_path.glob("flat.classifier.part*.jsonl"))
+    assert len(parts) == 2
+    assert len(classifier_parts) == 1
+    assert not output.exists()
+    rows = [
+        json.loads(line) for part in parts for line in part.read_text().splitlines()
+    ]
+    assert len(rows) == 12
+    classifier_rows = [
+        json.loads(line)
+        for part in classifier_parts
+        for line in part.read_text().splitlines()
+    ]
+    assert len(classifier_rows) == 1
+    assert classifier_rows[0]["classifier"] == "no"
+
+
+def test_workers_require_jsonl_input(tmp_path: Path) -> None:
+    source = tmp_path / "pretty.json"
+    source.write_text(json.dumps(make_history(), indent=2))
+    with pytest.raises(SystemExit):
+        flatten.main(
+            [str(source), "-o", str(tmp_path / "flat.jsonl"), "--workers", "2"]
+        )
+
+
+def test_workers_require_file_output(tmp_path: Path) -> None:
+    source = _write_corpus(tmp_path, [make_history()])
+    with pytest.raises(SystemExit):
+        flatten.main([str(source), "--workers", "2"])

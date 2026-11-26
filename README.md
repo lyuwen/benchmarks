@@ -143,7 +143,9 @@ conversation can be captured with `--harness-permission-mode auto`, and
 `uv run harness-flatten-histories` flattens the history dumps into two
 HuggingFace-loadable JSONL files: agentic trajectories + compactions, and a
 separate classifier file (`classifier: yes|no`) for auto-mode classifier calls;
-records are normalized (`instance_id`/`messages`/`tools`/`metadata` JSON string). Task finalization writes each history as one compact JSON
+records are normalized (`instance_id`/`messages`/`tools`/`metadata` JSON string).
+Large JSONL corpora can be flattened in place with `--workers N` (local
+byte-range sharding, no copy) and `--progress`. Task finalization writes each history as one compact JSON
 line (`cat *.history.json` is valid JSONL), re-attaches stripped stop sequences,
 and emits a streamlined companion with fragmented trajectories merged and the
 model's original tool arguments restored. See

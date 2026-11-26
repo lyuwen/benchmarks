@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "datasets",
+    "orjson",
     "huggingface-hub",
     "jinja2",
     "pandas",
