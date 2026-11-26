@@ -50,6 +50,10 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.utils.harnesses.normalize import classifier_label, normalize_record
+from benchmarks.utils.harnesses.progress import (
+    add_progress_arguments,
+    reporter_from_args,
+)
 from benchmarks.utils.harnesses.rollout import (
     embed_loss_mask_into_messages,
     embed_reasoning_into_messages,
@@ -702,6 +706,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Print at most this many warning details (default: 20)",
     )
+    add_progress_arguments(parser)
     parser.add_argument(
         "--log-level", type=str, default="INFO", help="Logging level (default INFO)"
     )
@@ -739,6 +744,9 @@ def main(argv: list[str] | None = None) -> int:
     warnings: list[str] = []
     classifier_handle = None
     classifier_path = args.classifier_output
+    reporter = reporter_from_args(args, "flatten")
+    reporter.update(histories=0, emitted_main=0, emitted_classifier=0)
+    reporter.start()
 
     def open_classifier() -> Any:
         nonlocal classifier_handle, classifier_path
@@ -766,27 +774,29 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for history in iter_json_documents(args.input):
             histories += 1
-            records = list(
-                iter_records(
-                    iter([history]),
-                    mode=args.mode,
-                    # Classifier trajectories may be capture-excluded yet still
-                    # belong in the classifier JSONL; routing below decides.
-                    include_excluded=True,
-                    verbatim=args.stitch_verbatim,
-                    train_excluded=args.train_excluded,
-                    split_tool_sets=args.split_tool_sets,
-                    restore_stop_sequences=args.restore_stop_sequences,
-                )
+            reporter.update(
+                histories=histories,
+                emitted_main=emitted_main,
+                emitted_classifier=emitted_classifier,
             )
-            if not records:
-                skipped_empty += 1
-                warnings.append(
-                    f"no trajectories emitted for {history.get('instance_id')} "
-                    f"(attempt {history.get('attempt')})"
+            history_records = 0
+            for record in iter_records(
+                iter([history]),
+                mode=args.mode,
+                # Classifier trajectories may be capture-excluded yet still
+                # belong in the classifier JSONL; routing below decides.
+                include_excluded=True,
+                verbatim=args.stitch_verbatim,
+                train_excluded=args.train_excluded,
+                split_tool_sets=args.split_tool_sets,
+                restore_stop_sequences=args.restore_stop_sequences,
+            ):
+                history_records += 1
+                reporter.update(
+                    histories=histories,
+                    emitted_main=emitted_main,
+                    emitted_classifier=emitted_classifier,
                 )
-                continue
-            for record in records:
                 label = classifier_label(record)
                 if label is not None:
                     warnings.extend(validate_record(record))
@@ -811,7 +821,19 @@ def main(argv: list[str] | None = None) -> int:
                 payload = normalize_record(record) if args.normalize_for_hf else record
                 output.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 emitted_main += 1
+                reporter.update(
+                    histories=histories,
+                    emitted_main=emitted_main,
+                    emitted_classifier=emitted_classifier,
+                )
+            if history_records == 0:
+                skipped_empty += 1
+                warnings.append(
+                    f"no trajectories emitted for {history.get('instance_id')} "
+                    f"(attempt {history.get('attempt')})"
+                )
     finally:
+        reporter.stop()
         if classifier_handle is not None:
             classifier_handle.close()
         if output is not sys.stdout:

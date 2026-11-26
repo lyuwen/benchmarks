@@ -814,3 +814,25 @@ def test_no_normalize_keeps_raw_records(tmp_path: Path) -> None:
     row = json.loads(output.read_text().splitlines()[0])
     assert "trajectory_id" in row
     assert "metadata" not in row
+
+
+def test_flatten_progress_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_history()) + "\n")
+    output = tmp_path / "flat.jsonl"
+    assert (
+        flatten.main(
+            [
+                str(source),
+                "-o",
+                str(output),
+                "--progress",
+                "--progress-interval",
+                "0.01",
+            ]
+        )
+        == 0
+    )
+    assert "[flatten]" in capsys.readouterr().err

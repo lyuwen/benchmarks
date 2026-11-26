@@ -491,6 +491,13 @@ uv run harness-flatten-histories histories.jsonl -o flat-raw.jsonl \
 Classifier samples can only be split into a file: when writing the main output
 to stdout, either pass ``-o FILE`` or ``--classifier-output FILE``.
 
+Both `harness-flatten-histories` and `harness-streamline-histories` are
+single-process tools, but they print periodic progress lines to stderr while
+working (enabled automatically when stderr is a TTY), e.g.
+`[flatten] 12.3s histories=2 emitted_main=14 emitted_classifier=3`. Use
+`--progress` to force them in a log file, `--no-progress` to disable them and
+`--progress-interval N` to change the cadence.
+
 Two output shapes:
 
 ```bash

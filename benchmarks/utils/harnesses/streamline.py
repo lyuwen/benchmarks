@@ -46,6 +46,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from benchmarks.utils.harnesses.progress import (
+    add_progress_arguments,
+    reporter_from_args,
+)
 from benchmarks.utils.harnesses.rollout import (
     collect_tool_sets,
     embed_loss_mask_into_messages,
@@ -700,6 +704,7 @@ def streamline_history_file(
             logger.info("skip (up to date): %s", target)
             return None
         logger.info("stale streamlined output, regenerating: %s", target)
+    logger.info("streamlining %s", source)
     history = json.loads(source.read_text(encoding="utf-8"))
     result = streamline_history(history, restore_stop_sequences=restore_stop_sequences)
     summary = {
@@ -859,6 +864,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "classifier's </block>)"
         ),
     )
+    add_progress_arguments(parser)
     parser.add_argument(
         "--log-level", default="INFO", help="Logging level (default INFO)."
     )
@@ -907,6 +913,10 @@ def main(argv: list[str] | None = None) -> int:
             seen.add(path)
             files.append(path)
 
+    reporter = reporter_from_args(args, "streamline")
+    reporter.update(files=f"0/{len(files)}", processed=0, skipped=0)
+    reporter.start()
+
     counters = {
         "processed": 0,
         "skipped": 0,
@@ -914,7 +924,13 @@ def main(argv: list[str] | None = None) -> int:
         "trajectories_after": 0,
     }
     summaries: list[dict[str, Any]] = []
-    for path in files:
+    for file_index, path in enumerate(files):
+        reporter.update(
+            files=f"{file_index}/{len(files)}",
+            current=path.name,
+            processed=counters["processed"],
+            skipped=counters["skipped"],
+        )
         try:
             summary = streamline_history_file(
                 path,
@@ -933,6 +949,8 @@ def main(argv: list[str] | None = None) -> int:
         counters["fragments_before"] += summary["fragments_before"]
         counters["trajectories_after"] += summary["trajectories_after"]
         summaries.append(summary)
+    reporter.stop()
+    reporter.update(files=f"{len(files)}/{len(files)}")
 
     print(
         "streamline: files={processed} skipped={skipped} fragments {fragments_before}"

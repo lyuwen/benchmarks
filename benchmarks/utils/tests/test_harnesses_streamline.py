@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from benchmarks.utils.harnesses import streamline
 
 
@@ -610,3 +612,26 @@ def test_streamline_regenerates_stale_companion(tmp_path: Path) -> None:
     assert "loss_mask_embedded_messages" in refreshed["streamlined"]
     # A current companion is skipped on the next run.
     assert streamline.streamline_history_file(source) is None
+
+
+def test_streamline_progress_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "claude-code"
+    source.mkdir()
+    (source / "owner__repo-1.history.json").write_text(
+        json.dumps(make_history()), encoding="utf-8"
+    )
+    assert (
+        streamline.main(
+            [
+                "--dir",
+                str(source),
+                "--progress",
+                "--progress-interval",
+                "0.01",
+            ]
+        )
+        == 0
+    )
+    assert "[streamline]" in capsys.readouterr().err
