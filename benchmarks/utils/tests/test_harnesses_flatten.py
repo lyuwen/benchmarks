@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -146,12 +147,27 @@ def test_iter_json_documents_rejects_truncated(tmp_path: Path) -> None:
         list(flatten.iter_json_documents(path))
 
 
+def with_loss_mask(messages: list[dict], loss_mask: list[int]) -> list[dict]:
+    """Expected messages with the per-message assistant loss_mask folded in."""
+    return [
+        {**message, "loss_mask": int(bool(value))}
+        if message.get("role") == "assistant"
+        else message
+        for message, value in zip(messages, loss_mask)
+    ]
+
+
 def test_flatten_trajectories_mode_has_messages_and_tools() -> None:
     records = list(flatten.iter_records(iter([make_history()])))
     assert len(records) == 2
     first = records[0]
     assert first["source"] == "trajectory"
-    assert first["messages"] == [SYSTEM, USER, ASSISTANT_1_REPLAYED]
+    assert first["messages"][:2] == [SYSTEM, USER]
+    assert first["messages"][2] == {
+        **ASSISTANT_1_REPLAYED,
+        "reasoning_content": "thinking",
+        "loss_mask": 1,
+    }
     assert first["tools"] == [TOOL]
     assert first["loss_mask"] == [0, 0, 1]
     assert first["reasoning_content"] == [None, None, "thinking"]
@@ -176,13 +192,10 @@ def test_projects_total_turn_set_into_single_stitched_record() -> None:
     assert record["stitched"] is True
     assert record["fragmented"] is True
     assert record["num_fragments"] == 2
-    assert record["messages"] == [
-        SYSTEM,
-        USER,
-        ASSISTANT_1_REPLAYED,
-        TOOL_RESULT,
-        ASSISTANT_2,
-    ]
+    assert record["messages"] == with_loss_mask(
+        [SYSTEM, USER, ASSISTANT_1_REPLAYED, TOOL_RESULT, ASSISTANT_2],
+        [0, 0, 1, 0, 1],
+    )
     assert record["loss_mask"] == [0, 0, 1, 0, 1]
     assert record["tools"] == [TOOL]
     assert record["turn_indices"] == [1, 2]
@@ -286,7 +299,7 @@ def test_stitch_ignores_excluded_trajectories() -> None:
     main = [t for t in history["trajectories"] if not t.get("exclude_from_training")][
         -1
     ]
-    assert record["messages"] == main["messages"]
+    assert record["messages"] == with_loss_mask(main["messages"], record["loss_mask"])
     assert record["tools"] == [TOOL]
 
 
@@ -325,10 +338,16 @@ def test_main_writes_jsonl_and_summary(
     assert exit_code == 0
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert len(rows) == 4
-    assert all("messages" in row and "tools" in row for row in rows)
+    # HuggingFace-friendly normalized schema.
+    assert all(
+        set(row) == {"instance_id", "messages", "tools", "metadata"} for row in rows
+    )
+    assert all(isinstance(row["metadata"], str) for row in rows)
     stderr = capsys.readouterr().err
     assert "histories=2" in stderr
     assert "emitted=4" in stderr
+    assert "emitted_main=4" in stderr
+    assert "emitted_classifier=0" in stderr
     assert "warnings=0" in stderr
 
 
@@ -344,7 +363,7 @@ def test_main_stitch_mode_and_strict(
     assert exit_code == 0
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert len(rows) == 1
-    assert rows[0]["stitched"] is True
+    assert json.loads(rows[0]["metadata"])["stitched"] is True
 
     broken = make_history()
     broken["trajectories"] = []
@@ -437,14 +456,18 @@ def test_split_tool_sets_emits_segment_per_tool_phase() -> None:
     assert first["turn_indices"] == [1, 2]
     assert first["trained_turns"] == [1, 2]
     # Context up to the last turn of the phase, only its turns are targets.
-    assert first["messages"] == history["trajectories"][0]["messages"][:5]
+    assert first["messages"] == with_loss_mask(
+        history["trajectories"][0]["messages"][:5], first["loss_mask"]
+    )
     assert first["loss_mask"] == [0, 0, 1, 0, 1]
 
     assert second["tools"] == [TOOL, TOOL_B]
     assert second["tool_set_index"] == 1
     assert second["split_index"] == 1
     assert second["turn_indices"] == [3]
-    assert second["messages"] == history["trajectories"][0]["messages"]
+    assert second["messages"] == with_loss_mask(
+        history["trajectories"][0]["messages"], second["loss_mask"]
+    )
     assert second["loss_mask"] == [0, 0, 0, 0, 0, 0, 1]
     for record in records:
         assert flatten.validate_record(record) == []
@@ -496,8 +519,8 @@ def test_main_split_tool_sets_output(
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert len(rows) == 2
     assert [len(row["tools"]) for row in rows] == [1, 2]
-    assert [row["split_index"] for row in rows] == [0, 1]
-    assert "emitted=2" in capsys.readouterr().err
+    assert [json.loads(row["metadata"])["split_index"] for row in rows] == [0, 1]
+    assert "emitted_main=2" in capsys.readouterr().err
 
 
 def make_aux_stop_history(
@@ -635,5 +658,290 @@ def test_main_cli_no_restore_stop_sequences(tmp_path: Path) -> None:
         )
         == 0
     )
-    row = json.loads(output.read_text())
+    classifier_output = tmp_path / "flat.classifier.jsonl"
+    assert classifier_output.is_file()
+    row = json.loads(classifier_output.read_text())
+    assert row["classifier"] == "no"
     assert row["messages"][2]["content"] == "<block>no"
+
+
+def make_compaction_trajectory() -> dict:
+    return {
+        "trajectory_id": "s:comp",
+        "trajectory_index": 2,
+        "kind": "compaction",
+        "exclude_from_training": False,
+        "leaf_turn_index": 9,
+        "messages": [
+            SYSTEM,
+            USER,
+            {"role": "assistant", "content": "Summary of the work."},
+        ],
+        "loss_mask": [0, 0, 1],
+        "tool_sets": [],
+        "turns": [{"turn_index": 9, "message_index": 2, "trained": True}],
+    }
+
+
+def make_classifier_trajectory() -> dict:
+    history = make_aux_stop_history()
+    trajectory = history["trajectories"][0]
+    trajectory["exclude_from_training"] = True
+    trajectory["loss_mask"] = [0, 0, 0]
+    return trajectory
+
+
+def test_flatten_splits_classifier_and_keeps_compactions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    history = make_history()
+    history["trajectories"].append(make_compaction_trajectory())
+    history["trajectories"].append(make_classifier_trajectory())
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(history) + "\n")
+    output = tmp_path / "flat.jsonl"
+
+    assert flatten.main([str(source), "-o", str(output)]) == 0
+    main_rows = [json.loads(line) for line in output.read_text().splitlines()]
+    classifier_path = tmp_path / "flat.classifier.jsonl"
+    classifier_rows = [
+        json.loads(line) for line in classifier_path.read_text().splitlines()
+    ]
+
+    # Main JSONL: the two main fragments + compaction, no classifier.
+    assert len(main_rows) == 3
+    assert all("classifier" not in row for row in main_rows)
+    kinds = [json.loads(row["metadata"])["kind"] for row in main_rows]
+    assert "compaction" in kinds
+
+    # Classifier JSONL: exported even though the trajectory is capture-excluded.
+    assert len(classifier_rows) == 1
+    assert classifier_rows[0]["classifier"] == "no"
+    assert classifier_rows[0]["messages"][-1]["content"] == "<block>no</block>"
+    stderr = capsys.readouterr().err
+    assert "emitted_main=3" in stderr
+    assert "emitted_classifier=1" in stderr
+    assert "classifier_output=" in stderr
+
+
+def test_normalized_schema_is_huggingface_loadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    history = make_history()
+    history["trajectories"].append(make_compaction_trajectory())
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(history) + "\n")
+    output = tmp_path / "flat.jsonl"
+    assert flatten.main([str(source), "-o", str(output)]) == 0
+
+    row = json.loads(output.read_text().splitlines()[0])
+    assert set(row) == {"instance_id", "messages", "tools", "metadata"}
+    metadata = json.loads(row["metadata"])
+    assert "trajectory_id" in metadata
+    assert "test_result" in metadata
+
+    tool = row["tools"][0]
+    assert tool["type"] == "function"
+    assert isinstance(tool["function"]["name"], str)
+    assert isinstance(tool["function"]["description"], str)
+    assert isinstance(tool["function"]["parameters"], str)
+    assert isinstance(tool["function"]["required"], list)
+    assert isinstance(tool["function"]["strict"], bool)
+    json.loads(row["tools"][0]["function"]["parameters"])
+
+    assistant = [
+        message for message in row["messages"] if message["role"] == "assistant"
+    ][0]
+    assert isinstance(assistant["content"], str)
+    if "tool_calls" in assistant:
+        assert isinstance(assistant["tool_calls"][0]["function"]["arguments"], str)
+    assert isinstance(assistant["loss_mask"], int)
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf" / "datasets"))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    datasets = pytest.importorskip("datasets")
+    # Other tests may already have imported datasets with the default (possibly
+    # read-only) cache; point the resolved config at the writable tmp dir.
+    datasets.config.HF_DATASETS_CACHE = str(tmp_path / "hf" / "datasets")
+    datasets.config.HF_MODULES_CACHE = str(tmp_path / "hf" / "modules")
+    datasets.config.HF_HUB_CACHE = str(tmp_path / "hf" / "hub")
+    from datasets import load_dataset
+
+    dataset = cast(Any, load_dataset("json", data_files=str(output), split="train"))
+    assert dataset.num_rows == 3
+    assert "messages" in dataset.features
+    assert "metadata" in dataset.features
+
+
+def test_classifier_output_can_be_explicit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_aux_stop_history()) + "\n")
+    output = tmp_path / "flat.jsonl"
+    classifier = tmp_path / "labels.jsonl"
+    assert (
+        flatten.main(
+            [
+                str(source),
+                "-o",
+                str(output),
+                "--classifier-output",
+                str(classifier),
+            ]
+        )
+        == 0
+    )
+    assert classifier.is_file()
+    assert not (tmp_path / "flat.classifier.jsonl").exists()
+
+
+def test_classifier_samples_need_a_file_destination(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_aux_stop_history()) + "\n")
+    assert flatten.main([str(source)]) == 1
+    assert "classifier" in capsys.readouterr().err
+
+
+def test_no_normalize_keeps_raw_records(tmp_path: Path) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_history()) + "\n")
+    output = tmp_path / "flat.jsonl"
+    assert flatten.main([str(source), "-o", str(output), "--no-normalize-for-hf"]) == 0
+    row = json.loads(output.read_text().splitlines()[0])
+    assert "trajectory_id" in row
+    assert "metadata" not in row
+
+
+def test_flatten_progress_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_history()) + "\n")
+    output = tmp_path / "flat.jsonl"
+    assert (
+        flatten.main(
+            [
+                str(source),
+                "-o",
+                str(output),
+                "--progress",
+                "--progress-interval",
+                "0.01",
+            ]
+        )
+        == 0
+    )
+    assert "[flatten]" in capsys.readouterr().err
+
+
+def _write_corpus(tmp_path: Path, histories: list[dict]) -> Path:
+    source = tmp_path / "histories.jsonl"
+    source.write_text("".join(json.dumps(h) + "\n" for h in histories))
+    return source
+
+
+def make_corpus() -> list[dict]:
+    histories = []
+    for index in range(6):
+        history = make_history()
+        history["instance_id"] = f"i{index}"
+        history["attempt"] = 1
+        histories.append(history)
+    histories.append(make_aux_stop_history())
+    return histories
+
+
+def test_workers_match_serial_output(tmp_path: Path) -> None:
+    source = _write_corpus(tmp_path, make_corpus())
+    serial = tmp_path / "serial.jsonl"
+    assert flatten.main([str(source), "-o", str(serial)]) == 0
+
+    parallel = tmp_path / "parallel.jsonl"
+    assert (
+        flatten.main(
+            [
+                str(source),
+                "-o",
+                str(parallel),
+                "--workers",
+                "3",
+                "--merge-parts",
+            ]
+        )
+        == 0
+    )
+    assert [json.loads(line) for line in serial.read_text().splitlines()] == [
+        json.loads(line) for line in parallel.read_text().splitlines()
+    ]
+    classifier_serial = tmp_path / "serial.classifier.jsonl"
+    classifier_parallel = tmp_path / "parallel.classifier.jsonl"
+    assert [
+        json.loads(line) for line in classifier_serial.read_text().splitlines()
+    ] == [json.loads(line) for line in classifier_parallel.read_text().splitlines()]
+
+
+def test_workers_write_parts_by_default(tmp_path: Path) -> None:
+    source = _write_corpus(tmp_path, make_corpus())
+    output = tmp_path / "flat.jsonl"
+    assert flatten.main([str(source), "-o", str(output), "--workers", "2"]) == 0
+    parts = sorted(tmp_path.glob("flat.part*.jsonl"))
+    classifier_parts = sorted(tmp_path.glob("flat.classifier.part*.jsonl"))
+    assert len(parts) == 2
+    assert len(classifier_parts) == 1
+    assert not output.exists()
+    rows = [
+        json.loads(line) for part in parts for line in part.read_text().splitlines()
+    ]
+    assert len(rows) == 12
+    classifier_rows = [
+        json.loads(line)
+        for part in classifier_parts
+        for line in part.read_text().splitlines()
+    ]
+    assert len(classifier_rows) == 1
+    assert classifier_rows[0]["classifier"] == "no"
+
+
+def test_workers_require_jsonl_input(tmp_path: Path) -> None:
+    source = tmp_path / "pretty.json"
+    source.write_text(json.dumps(make_history(), indent=2))
+    with pytest.raises(SystemExit):
+        flatten.main(
+            [str(source), "-o", str(tmp_path / "flat.jsonl"), "--workers", "2"]
+        )
+
+
+def test_workers_require_file_output(tmp_path: Path) -> None:
+    source = _write_corpus(tmp_path, [make_history()])
+    with pytest.raises(SystemExit):
+        flatten.main([str(source), "--workers", "2"])
+
+
+def test_workers_tqdm_progress_bar(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = _write_corpus(tmp_path, make_corpus())
+    output = tmp_path / "flat.jsonl"
+    assert (
+        flatten.main(
+            [
+                str(source),
+                "-o",
+                str(output),
+                "--workers",
+                "2",
+                "--merge-parts",
+                "--progress",
+                "--total-rows",
+                "7",
+            ]
+        )
+        == 0
+    )
+    stderr = capsys.readouterr().err
+    assert "flatten" in stderr
+    assert "7/7" in stderr

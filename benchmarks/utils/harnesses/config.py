@@ -321,6 +321,14 @@ class HarnessConfig(BaseModel):
             "Maximum request-body characters logged in 'full' mode (0 = unlimited)"
         ),
     )
+    write_streamlined_history: bool = Field(
+        default=True,
+        description=(
+            "Write a streamlined <id>.attemptN.history.streamlined.json (merged "
+            "fragments, original tool arguments, stop sequences re-attached) "
+            "next to the raw history at task finalization"
+        ),
+    )
     exclude_request_classes: str = Field(
         default=DEFAULT_EXCLUDE_REQUEST_CLASSES,
         description=(
@@ -601,6 +609,15 @@ def add_harness_args(parser: ArgumentParser) -> None:
         ),
     )
     group.add_argument(
+        "--no-streamline-history",
+        dest="write_streamlined_history",
+        action="store_false",
+        help=(
+            "Do not write the streamlined history companion file at task "
+            "finalization (the raw history is still written)"
+        ),
+    )
+    group.add_argument(
         "--rollout-log-upstream",
         choices=["off", "summary", "full"],
         default="off",
@@ -745,6 +762,7 @@ def harness_config_from_args(args: Any) -> HarnessConfig:
         exclude_request_classes=(
             "" if args.harness_include_auxiliary else args.exclude_request_classes
         ),
+        write_streamlined_history=args.write_streamlined_history,
         rollout_log_upstream=args.rollout_log_upstream,
         rollout_log_upstream_max_chars=args.rollout_log_upstream_max_chars,
         skip_image_pull=args.skip_image_pull,

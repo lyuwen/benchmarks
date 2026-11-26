@@ -325,8 +325,10 @@ How this is wired:
   records them as their own trajectories/turns with `request_class: auxiliary`.
   They are masked out of training by default (`--exclude-request-classes
   auxiliary`): they stay in the export (`excluded_turns`,
-  `exclude_from_training=true`, `loss_mask=0`) but `harness-flatten-histories`
-  drops them unless you pass `--include-excluded`.
+  `exclude_from_training=true`, `loss_mask=0`). `harness-flatten-histories`
+  always routes these `<block>yes|no</block>` classifier samples into the
+  separate classifier JSONL (with the verdict in `classifier`), so they never
+  pollute the main training file.
 
 How to read the masks in an auto-mode history dump:
 
@@ -339,7 +341,9 @@ How to read the masks in an auto-mode history dump:
   whose `loss_mask` is entirely zero — by design, not a missing assistant
   target. Their assistant verdicts (`<block>no`, …) are masked at capture time.
 
-To train auxiliary calls as well, either capture differently or post-process:
+To include non-classifier auxiliary traffic in training, either capture
+differently or post-process; classifier samples always go to the classifier
+JSONL regardless:
 
 ```bash
 # capture-side: do not mask any request class (rerun needed)
@@ -347,7 +351,7 @@ uv run swebench-infer-harnesses ... --harness-permission-mode auto --harness-inc
 # equivalent explicit form
 uv run swebench-infer-harnesses ... --harness-permission-mode auto --exclude-request-classes ""
 
-# post-hoc: recompute loss masks for an existing capture
+# post-hoc: recompute loss masks for excluded non-classifier trajectories
 uv run harness-flatten-histories histories.jsonl -o flat.jsonl --train-excluded
 ```
 
@@ -463,8 +467,10 @@ OpenHands runs, so resume and attempt bookkeeping never mix):
 ├── output.jsonl                          # EvalOutput per instance (test_result.git_patch)
 ├── output_errors.jsonl
 ├── output.critic_attempt_<N>.jsonl
-├── <instance>.attempt<N>.history.json    # trajectory + patch + run metadata
-├── <instance>.history.json               # winning attempt (published after the run)
+├── <instance>.attempt<N>.history.json              # trajectory + patch + run metadata
+├── <instance>.attempt<N>.history.streamlined.json  # auto-streamlined companion
+├── <instance>.history.json                         # winning attempt (published after the run)
+├── <instance>.history.streamlined.json             # streamlined winning attempt
 ├── rollout/
 │   └── <instance>.attempt<N>.json        # rollout-manager trajectory export (schema v2)
 ├── logs/
@@ -478,9 +484,25 @@ OpenHands runs, so resume and attempt bookkeeping never mix):
 The **trajectory export** is the primary artifact: `trajectories` (prefix-tree
 order) with strict OpenAI Chat-Completions `messages`, `loss_mask`,
 `reasoning_content`, per-turn `request`/`response`, plus `request_log` (capture
-order) and `stats`. See the upstream
+order) and `stats`. In the **raw export** `messages` stays strict OpenAI
+(`role`/`content`/`tools`/`tool_call_id`/`name`) and reasoning lives in the
+message-aligned `reasoning_content` array (`null` where the model produced none).
+The **assembled** artifacts (finalized history dumps, streamlined companions and
+flattened records) mirror the model-facing request representation: assistant
+messages carry the reasoning field right after `role`:
+
+```json
+{"role": "assistant", "reasoning_content": "...", "content": "...", "tool_calls": [...], "loss_mask": 0}
+```
+
+`loss_mask` is folded into assistant messages (`0`/`1`, last field) so each
+sample carries its training targets directly; non-assistant messages have no
+`loss_mask`, and the aligned trajectory array is kept for provenance.
+
+The aligned `reasoning_content` arrays are kept on the trajectories for
+provenance and older consumers. See the upstream
 [rollout-manager README](https://github.com/lyuwen/rollout-manager#export-format)
-for the full schema.
+for the export schema.
 
 The per-instance **history JSON** mirrors the other benchmarks' dumps:
 
@@ -496,14 +518,42 @@ The per-instance **history JSON** mirrors the other benchmarks' dumps:
 | `rollout_export` | relative path to the trajectory export |
 | `repository` | repo path, base commit, ignored pre-existing untracked files |
 | `warnings` | non-fatal harness/proxy problems (e.g. no captures) |
+| `streamlined_history` | relative path to the auto-streamlined companion file |
+| `restored_stop_sequences` | number of stripped stop sequences re-attached (when any) |
+
+Every history dump is written as **one compact JSON document per file, terminated
+by a newline**, so files can be concatenated directly into a JSONL corpus:
+
+```bash
+cat <eval_output_dir>/harnesses/claude-code/*.history.json > histories.jsonl
+```
+
+Task finalization also writes the streamlined companion
+`<instance>.attempt<N>.history.streamlined.json` (and
+`<instance>.history.streamlined.json` for the canonically published winning
+attempt): prefix fragments merged, original tool arguments restored and stripped
+stop sequences re-attached. Disable that companion with
+`--no-streamline-history`; the raw history is always written. See
+[Streamlining fragmented histories](#streamlining-fragmented-histories).
 
 ## Building training data: flattening histories
 
-`harness-flatten-histories` turns per-instance history dumps into JSONL records
-that carry **OpenAI Chat-Completions `messages` and `tools`** directly.
+`harness-flatten-histories` turns per-instance history dumps into **two**
+HuggingFace-loadable JSONL files:
 
-Collect the history files first (a real JSONL file, or plain `cat` of the
-pretty-printed JSON files — the reader handles both):
+- the main file (``-o``): agentic trajectories **and compaction/summarization**
+  records;
+- the classifier file (derived as ``<output stem>.classifier.jsonl``, or
+  ``--classifier-output``): auto-mode classifier samples whose reply is
+  ``<block>yes</block>`` / ``<block>no</block>``, with the verdict extracted into
+  a top-level ``classifier`` field (``"yes"`` / ``"no"``).
+
+Classifier trajectories are exported even when they are capture-excluded (the
+main file still honours ``--include-excluded`` / ``--train-excluded``).
+
+Collect the history files first (each history file is already a one-line JSON
+document, so plain `cat` works; the reader also accepts JSONL or older
+pretty-printed dumps):
 
 ```bash
 # either real JSONL ...
@@ -511,8 +561,62 @@ jq -c . eval_outputs/.../harnesses/claude-code/*.history.json > histories.jsonl
 # ... or a concatenation of the pretty-printed documents
 cat eval_outputs/.../harnesses/claude-code/*.history.json > histories.jsonl
 
+# main file: flat.jsonl, classifier file: flat.classifier.jsonl
 uv run harness-flatten-histories histories.jsonl -o flat.jsonl
+# explicit classifier destination
+uv run harness-flatten-histories histories.jsonl -o flat.jsonl \
+  --classifier-output classifier.jsonl
+# raw (non-HF-normalized) records for debugging
+uv run harness-flatten-histories histories.jsonl -o flat-raw.jsonl \
+  --no-normalize-for-hf
 ```
+
+Classifier samples can only be split into a file: when writing the main output
+to stdout, either pass ``-o FILE`` or ``--classifier-output FILE``.
+
+Both tools report progress on stderr (enabled automatically when stderr is a
+TTY). Serial flattening and streamline print periodic status lines such as
+`[flatten] 12.3s histories=2 emitted_main=14 emitted_classifier=3`; `--workers`
+mode shows a **tqdm progress bar** over input rows with a live record count,
+e.g. `flatten: 63%|██████ | 10310/16384 [04:12<02:28, 41.2row/s, records=20311]`.
+Use `--progress` to force progress in a log file, `--no-progress` to disable
+it and `--progress-interval N` to change the cadence. In workers mode pass
+`--total-rows N` (e.g. `--total-rows 16384`) so the bar has a total, percentage
+and ETA; without it you still get rows done and rate but no ETA.
+
+### Large NFS corpora (speed)
+
+The flattener is optimized for large in-place JSONL corpora (many-GB files that
+must stay on NFS):
+
+- JSONL input is decoded with `orjson` (a first-line check selects the JSONL
+  fast path; concatenated pretty-printed documents still use the slower scanner)
+  and output records are written as buffered binary JSONL;
+- per-record format validation is **off by default** (`--validate` enables it;
+  `--strict` implies it) because it walks every message;
+- `--workers N` shards a JSONL file across N **local** worker processes without
+  copying it: each worker seeks to its own byte range of the same file, reads
+  only that slice (so the file is read once in total) and writes its own
+  `<output>.partNNN.jsonl` / `<classifier>.partNNN.jsonl` files. Only JSONL input
+  and a file `--output` are supported;
+- without `--merge-parts` the final files are the parts, which HuggingFace loads
+  directly with `data_files="flat.part*.jsonl"` (and
+  `"flat.classifier.part*.jsonl"`). `--merge-parts` streams the parts into the
+  regular `-o`/classifier paths, but that re-reads and re-writes the whole
+  output, so it is not recommended for 100 GB+ results.
+
+For a 126 GB / 16k-row corpus on NFS:
+
+```bash
+# N = physical cores you can spare; each worker reads a disjoint byte range
+uv run harness-flatten-histories histories.jsonl -o flat.jsonl \
+  --workers 16 --total-rows 16384 --progress
+# outputs: flat.part000.jsonl ... flat.part015.jsonl (+ classifier parts)
+# load with HuggingFace: data_files="flat.part*.jsonl"
+```
+
+The tools stay self-contained (no SLURM dependency); `--workers` uses the local
+cores only.
 
 Two output shapes:
 
@@ -546,19 +650,24 @@ uv run harness-flatten-histories histories.jsonl --include-excluded \
 uv run harness-flatten-histories histories.jsonl --strict
 ```
 
-Each output record contains at least:
+Each output record has a stable top-level schema (normalized for
+`datasets.load_dataset("json", ...)`):
 
 | Key | Meaning |
 | --- | --- |
-| `messages` | strict OpenAI Chat-Completions messages (`role`, `content`, assistant `tool_calls` with JSON-string `function.arguments`, `tool_call_id`) |
-| `tools` | one OpenAI function-tool list, resolved from the trajectory's `tool_sets`/`turn.tool_set`; `[]` for requests that carried no tools (auto-mode classifier/security monitor) |
-| `loss_mask`, `reasoning_content` | message-aligned arrays from the capture (`reasoning_content` is kept out of `messages` by design) |
-| `loss_mask` sum / `trained_turns` | which turns of the record are training targets |
-| `instance_id`, `attempt`, `harness`, `harness_version`, `model`, `instruction` | provenance |
-| `test_result.git_patch`, `evaluation`, `rollout_export`, `stats` | patch, judge verdict, raw capture path |
-| `trajectory_id`, `parent_trajectory_id`, `path_turn_indices`, `turn_indices` | tree position / request-log order (per-fragment mode) |
-| `fragmented`, `num_fragments`, `trajectory_ids` | fragment count (stitch mode) |
-| `restored_stop_sequences` | present when a single configured stop sequence was re-attached to a reply (see below) |
+| `instance_id` | instance identifier |
+| `messages` | chat messages: `role`/`content` strings; `tool_calls` with JSON-string `function.arguments`; assistant messages additionally carry `reasoning_content` right after `role` when present and `loss_mask` (0/1) as the last field |
+| `tools` | normalized function tools: `description` string, `parameters` as a JSON **string**, `required` string list, `strict` bool; `[]` for tool-less requests |
+| `metadata` | JSON **string** with everything else (provenance, `attempt`, `harness`, `model`, `instruction`, `test_result`, `evaluation`, `rollout_export`, `stats`, trajectory ids/turn sets, aligned `loss_mask`/`reasoning_content` arrays, `restored_stop_sequences`, split/stitch fields, ...) |
+| `classifier` | only in the classifier file: `"yes"` or `"no"` (extracted from `<block>yes|no</block>`) |
+
+The normalization mirrors `zjlm/scripts/normalize_agentic_jsonl.py`: content is
+always a string (structured content is JSON-serialized), tool-call arguments are
+JSON strings, tools are wrapped/normalized (`parameters` serialized,
+`required` defaulted) and all other entries are moved into the JSON-string
+`metadata`, which HuggingFace loads as a plain string instead of inferring a
+deep nested schema. Use `--no-normalize-for-hf` to keep the raw flattened
+records for debugging.
 
 Notes:
 
@@ -578,17 +687,21 @@ Notes:
   capture intentionally keeps them as one trajectory (tools are not part of the
   message-prefix identity), so the flattener emits one record per contiguous
   tool-set phase. Each record has `source: "trajectory-split"`, the phase's
-  `tools`/`tool_set_index`, duplicated preceding context, only the phase's turns
-  as training targets, and `split_index`/`split_count`/
-  `split_from_trajectory_id` for reassembly.
+  `tools`/`tool_set_index`, duplicated preceding context and only the phase's
+  turns as training targets; `split_index`/`split_count`/
+  `split_from_trajectory_id` are in `metadata` for reassembly.
 - `tool.message` ids are checked against preceding assistant calls; trailing
   assistant tool calls without results are allowed (that continuation lives in
   the next fragment).
-- `--include-excluded` keeps trajectories masked out of training
-  (`exclude_from_training`, e.g. auxiliary calls); they are dropped by default.
+- `--include-excluded` keeps non-classifier trajectories masked out of training
+  (`exclude_from_training`); they are dropped from the main file by default.
 - `--train-excluded` does the same but recomputes `loss_mask` from the messages
-  (assistant = 1) and sets `loss_mask_recomputed: true`, for using auxiliary
-  turns as training data without re-capturing.
+  (assistant = 1) and sets `loss_mask_recomputed: true` (in `metadata`), for
+  using excluded non-classifier turns as training data without re-capturing.
+- Auto-mode classifier samples (`<block>yes|no</block>`) are always written to
+  the classifier file, even if capture-excluded, so the main file never contains
+  them; `--include-excluded`/`--train-excluded` do not move them into the main
+  file.
 - **Stop sequences are re-attached.** Chat-Completions and the Anthropic
   Messages API strip the matched stop sequence from the returned content.
   Claude Code's auto-mode classifier sends `stop: ["</block>"]` and gets back
@@ -600,10 +713,124 @@ Notes:
   in `restored_stop_sequences: [{message_index, turn_index, stop_sequence}]`.
   Multiple stop sequences are ambiguous (the API does not report which matched)
   and are left verbatim; use `--no-restore-stop-sequences` to disable the
-  normalization entirely (the raw capture and `*.history.json` are never
-  modified — this is a flatten-time, training-oriented change).
-- A summary (`histories=… emitted=… warnings=…`) is printed to stderr; warnings
-  never change stdout, which is pure JSONL.
+  normalization entirely. New runs already have stop sequences re-attached at
+  task finalization (raw and streamlined histories), so flattening is a no-op
+  there — it is kept for older captures and for the capture export.
+- A summary (`histories=… emitted_main=… emitted_classifier=… warnings=…`) is
+  printed to stderr; warnings never change stdout, which is pure JSONL.
+
+## Streamlining fragmented histories
+
+Claude Code replays the conversation on every request but normalizes the replayed
+tool arguments first (strips a leading `cd <cwd> &&` from Bash, adds
+`replace_all: false` and trims trailing whitespace in Edit). Those replays no
+longer match the stored assistant responses, so one logical conversation can be
+exported as many prefix fragments (6 fragments for a 23-request run). The
+`harness-streamline-histories` tool merges them **in the history JSON**, next to
+the flattening step:
+
+- fragments are grouped when one message list is a prefix of the other after
+  both sides' tool calls are restored to the captured originals (the matching
+  view is the same one written to the output, so any client replay rewrite is
+  tolerated as long as the captured response recovers the original; Bash `cd`,
+  Edit `replace_all` and trailing whitespace are recognized for contexts whose
+  original response is missing); this covers the main conversation, sub-agents
+  and other side conversations;
+- a merged trajectory reuses the longest fragment's messages, restores the
+  tool-call arguments the model originally generated (recovered from the
+  captured responses, so the `cd <cwd> &&` prefix is back), unions the fragments'
+  trained turns into `loss_mask`, re-interns `tool_sets`, and records the merge
+  under `streamlined`; kept branch leaves that were not merged also get their
+  original tool-call arguments restored;
+- auxiliary requests (auto-mode classifier/security monitor) and
+  compaction/summarization trajectories are kept unchanged (never merged);
+- the root `messages`/`tools` come from the latest main-agent conversation
+  trajectory (auxiliary and compaction trajectories are excluded);
+- divergent conversation branches that are not prefixes of the chosen canonical
+  fragment are kept as separate trajectories (no data is silently dropped).
+  Auto-compaction is the common case: the compaction request branches from the
+  pre-compaction leaf (`:N+1.parent = :N`), so a long session with 6 compactions
+  keeps 7 merged chains plus the 6 pre-compaction branch leaves — both are needed
+  because their trained turns are disjoint;
+- output is written next to the input as `<id>.history.streamlined.json` (one
+  compact JSON line + trailing newline, like the raw dumps); the original
+  history is never modified and existing outputs are skipped unless
+  `--overwrite` is passed.
+
+```bash
+# one claude-code dir
+uv run harness-streamline-histories --dir \
+  eval_outputs/.../harnesses/claude-code
+
+# recursively discover directories for a job-array list
+uv run harness-streamline-histories --root /path/to/run --list > dirs.txt
+
+# dry-run / include per-attempt histories / keep API-verbatim aux replies
+uv run harness-streamline-histories --dir ... --dry-run
+uv run harness-streamline-histories --dir ... --include-attempts
+uv run harness-streamline-histories --dir ... --no-restore-stop-sequences
+```
+
+### Distributed SLURM job array
+
+`scripts/streamline_histories_slurm.sh` processes one job directory per array
+task. It is meant to run with the **run root** (the directory containing the
+`{i}` job directories) as its working directory; `SLURM_ARRAY_TASK_ID` selects
+`{i}` (zero-padded names like `00000` are handled, otherwise the i-th sorted
+sub-directory is used):
+
+```bash
+cd logs/dsv41f1017-high-synth-cc-swerebenchv2-osr-all-run2
+sbatch --array=0-$(($(find . -maxdepth 1 -mindepth 1 -type d | wc -l) - 1)) \
+  /path/to/repo/scripts/streamline_histories_slurm.sh          # extra flags OK
+
+# or one task per precomputed claude-code directory
+uv run harness-streamline-histories --root "$PWD" --list > dirs.txt
+sbatch --array=0-$(($(wc -l < dirs.txt) - 1)) \
+  /path/to/repo/scripts/streamline_histories_slurm.sh dirs.txt
+```
+
+The launcher forwards extra arguments (`--overwrite`, `--dry-run`, ...), runs the
+module via `uv run`, and falls back to the active Python interpreter when `uv`
+is not on `PATH`. Run `uv sync` once on the cluster so the project environment
+is available; the job itself needs no GPU and only reads/writes the run tree.
+
+### Repairing runs produced before finalization existed
+
+New runs need no post-processing: the runner writes the finalized raw history
+and the streamlined companion itself. Older runs can be brought to the same
+format by re-running the streamliner over the run tree; it detects streamlined
+files written by old code (the `reasoning_embedded_messages` /
+`loss_mask_embedded_messages` markers are missing), regenerates those, and skips
+up-to-date ones:
+
+```bash
+# one task per job directory, repairing stale companions (add --include-attempts
+# for runs that only have <id>.attemptN.history.json files)
+uv run harness-streamline-histories --root <run-root> --list > dirs.txt
+sbatch --array=0-$(($(wc -l < dirs.txt) - 1)) \
+  /path/to/repo/scripts/streamline_histories_slurm.sh dirs.txt
+# or locally in one process
+uv run harness-streamline-histories --root <run-root> [--include-attempts]
+```
+
+The old raw `*.history.json` files are left untouched (they are still valid
+inputs); the repaired `<id>.history.streamlined.json` companion is the compact,
+merged, reasoning-embedded artifact to use downstream. `harness-flatten-histories`
+also upgrades old raw histories on the fly (one-line records with reasoning
+embedded, restored tool arguments and stop sequences).
+
+Reference effects:
+
+- `unidata__netcdf-c-1692` (23 requests): 6 fragments / 11 MB → 1 merged
+  trajectory / 4.4 MB, 23 trained turns, 22 restored tool-call messages, root
+  messages from the last (23rd) trajectory.
+- `unidata__netcdf-c-2106` (506 requests, 6 compactions): 47 fragments / 566 MB
+  → 13 trajectories / 358 MB (7 merged chains + 6 pre-compaction branch leaves),
+  all 506 trained turns conserved, 500 unique tool-call messages restored (994
+  restorations in total because branch-leaf contexts are duplicated; see
+  `branch_trajectories_restored` in the `streamlined` summary), root messages
+  from the last (506th) trajectory.
 
 ## Reliability notes
 

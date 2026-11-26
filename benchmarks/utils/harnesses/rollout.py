@@ -472,6 +472,220 @@ def _status_from_payload(payload: dict[str, Any]) -> RolloutManagerStatus:
     )
 
 
+def restore_stop_sequences(
+    trajectory: dict[str, Any], messages: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Reattach single stop sequences the API stripped from assistant replies.
+
+    Chat-Completions (like the Anthropic Messages API) removes the matched stop
+    sequence from the returned content. Claude Code's auto-mode classifier, for
+    example, sends ``stop: ["</block>"]`` and receives ``"<block>no"``; for
+    training the model output should be ``"<block>no</block>"``. Only turns
+    whose request configured exactly one stop sequence and that finished with
+    ``finish_reason == "stop"`` are changed, and only for non-empty text
+    assistant messages without tool calls. Multiple stop sequences are
+    ambiguous (the API does not report which one matched), so they are left
+    untouched.
+    """
+    turns_by_message: dict[int, dict[str, Any]] = {}
+    for turn in trajectory.get("turns") or []:
+        if isinstance(turn, dict) and isinstance(turn.get("message_index"), int):
+            turns_by_message[int(turn["message_index"])] = turn
+    restored: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if message.get("tool_calls"):
+            continue
+        turn = turns_by_message.get(index)
+        if turn is None or turn.get("finish_reason") != "stop":
+            continue
+        request = turn.get("request")
+        stop = request.get("stop") if isinstance(request, dict) else None
+        if isinstance(stop, str):
+            candidates = [stop]
+        elif isinstance(stop, list):
+            candidates = [value for value in stop if isinstance(value, str) and value]
+        else:
+            candidates = []
+        if len(candidates) != 1:
+            continue
+        sequence = candidates[0]
+        content = message.get("content")
+        if not isinstance(content, str) or not content or content.endswith(sequence):
+            continue
+        messages[index] = {**message, "content": content + sequence}
+        restored.append(
+            {
+                "message_index": index,
+                "turn_index": turn.get("turn_index"),
+                "stop_sequence": sequence,
+            }
+        )
+    return restored
+
+
+def embed_reasoning_into_messages(
+    messages: list[dict[str, Any]], reasoning_content: Any
+) -> int:
+    """Embed the aligned ``reasoning_content`` strings into assistant messages.
+
+    The rollout export keeps strict OpenAI messages and stores reasoning in a
+    parallel array, but the model-facing request messages carry
+    ``reasoning_content`` on assistant turns (Claude Code's replayed thinking
+    blocks convert to it). Assembled training histories/flattened records mirror
+    that representation, with the field placed right after ``role``:
+
+    ``{"role": "assistant", "reasoning_content": ..., "content": ...,
+    "tool_calls": [...]}``
+
+    Returns the number of messages whose shape changed.
+    """
+    reasoning = reasoning_content if isinstance(reasoning_content, list) else []
+    changed = 0
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        captured = reasoning[index] if index < len(reasoning) else None
+        existing = message.get("reasoning_content")
+        value = captured or existing
+        if not value:
+            continue
+        replacement: dict[str, Any] = {
+            "role": "assistant",
+            "reasoning_content": value,
+            "content": message.get("content"),
+        }
+        if message.get("name") is not None:
+            replacement["name"] = message["name"]
+        if message.get("tool_calls"):
+            replacement["tool_calls"] = message["tool_calls"]
+        for key, extra in message.items():
+            if key not in {
+                "role",
+                "content",
+                "reasoning_content",
+                "name",
+                "tool_calls",
+            }:
+                replacement[key] = extra
+        if replacement != message or list(replacement) != list(message):
+            messages[index] = replacement
+            changed += 1
+    return changed
+
+
+def embed_history_reasoning(history: dict[str, Any]) -> int:
+    """Embed reasoning in every trajectory's messages and refresh root messages."""
+    trajectories = history.get("trajectories")
+    if not isinstance(trajectories, list):
+        return 0
+    changed = 0
+    for index, trajectory in enumerate(trajectories):
+        if not isinstance(trajectory, dict):
+            continue
+        messages = list(trajectory.get("messages") or [])
+        embedded = embed_reasoning_into_messages(
+            messages, trajectory.get("reasoning_content")
+        )
+        if not embedded:
+            continue
+        updated = dict(trajectory)
+        updated["messages"] = messages
+        trajectories[index] = updated
+        changed += embedded
+    if changed:
+        main = main_trajectory(history)
+        if main is not None:
+            history["messages"] = main.get("messages") or []
+    return changed
+
+
+def embed_loss_mask_into_messages(
+    messages: list[dict[str, Any]], loss_mask: Any
+) -> int:
+    """Fold the aligned ``loss_mask`` array into each message as an int field.
+
+    Assembled artifacts carry per-message training targets so downstream code
+    does not have to keep two aligned lists; the array stays on the trajectory
+    for provenance. Returns the number of messages changed.
+    """
+    if not isinstance(loss_mask, list):
+        return 0
+    changed = 0
+    limit = min(len(messages), len(loss_mask))
+    for index in range(limit):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            # Non-assistant messages are never training targets.
+            continue
+        value = 1 if loss_mask[index] else 0
+        if message.get("loss_mask") == value and "loss_mask" in message:
+            # Keep it as the last key for a stable shape.
+            if list(message)[-1] == "loss_mask":
+                continue
+        replacement = {
+            key: extra for key, extra in message.items() if key != "loss_mask"
+        }
+        replacement["loss_mask"] = value
+        messages[index] = replacement
+        changed += 1
+    return changed
+
+
+def embed_history_loss_mask(history: dict[str, Any]) -> int:
+    """Fold ``loss_mask`` into every trajectory's messages and refresh root messages."""
+    trajectories = history.get("trajectories")
+    if not isinstance(trajectories, list):
+        return 0
+    changed = 0
+    for index, trajectory in enumerate(trajectories):
+        if not isinstance(trajectory, dict):
+            continue
+        messages = list(trajectory.get("messages") or [])
+        embedded = embed_loss_mask_into_messages(messages, trajectory.get("loss_mask"))
+        if not embedded:
+            continue
+        updated = dict(trajectory)
+        updated["messages"] = messages
+        trajectories[index] = updated
+        changed += embedded
+    if changed:
+        main = main_trajectory(history)
+        if main is not None:
+            history["messages"] = main.get("messages") or []
+    return changed
+
+
+def attach_stop_sequences_to_history(history: dict[str, Any]) -> int:
+    """Reattach stripped stop sequences in every trajectory of a history dump.
+
+    Returns the number of assistant messages changed. The history's top-level
+    ``messages`` are refreshed from the main trajectory so they stay consistent.
+    """
+    trajectories = history.get("trajectories")
+    if not isinstance(trajectories, list):
+        return 0
+    changed = 0
+    for index, trajectory in enumerate(trajectories):
+        if not isinstance(trajectory, dict):
+            continue
+        messages = list(trajectory.get("messages") or [])
+        restored = restore_stop_sequences(trajectory, messages)
+        if not restored:
+            continue
+        updated = dict(trajectory)
+        updated["messages"] = messages
+        updated["restored_stop_sequences"] = restored
+        trajectories[index] = updated
+        changed += len(restored)
+    if changed:
+        main = main_trajectory(history)
+        if main is not None:
+            history["messages"] = main.get("messages") or []
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # upstream resolution
 # ---------------------------------------------------------------------------

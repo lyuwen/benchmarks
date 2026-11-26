@@ -6,12 +6,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "datasets",
+    "orjson",
+    "tqdm",
     "huggingface-hub",
     "jinja2",
     "pandas",
     "Pillow",
     "toml",
-    "tqdm",
     "openhands-sdk",
     "openhands-tools",
     "unidiff>=0.7.5,<0.8.0",
@@ -56,6 +57,7 @@ miniswe = [
 validate-cfg = "benchmarks.scripts.validate_cfg:main"
 harness-prepare = "benchmarks.utils.harnesses.prepare:main"
 harness-flatten-histories = "benchmarks.utils.harnesses.flatten:main"
+harness-streamline-histories = "benchmarks.utils.harnesses.streamline:main"
 swebench-infer = "benchmarks.swebench.run_infer:main"
 swebench-infer-harnesses = "benchmarks.swebench.run_infer_harnesses:main"
 swebench-infer-miniswe = "benchmarks.swebench.run_infer_miniswe:main"

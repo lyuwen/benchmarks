@@ -33,13 +33,20 @@ from benchmarks.utils.harnesses.rollout import (
     RolloutManager,
     RolloutManagerConfig,
     RolloutManagerError,
+    attach_stop_sequences_to_history,
     build_metrics,
     collect_tool_sets,
+    embed_history_loss_mask,
+    embed_history_reasoning,
     export_summary,
     load_rollout_export,
     main_trajectory,
     resolve_trajectory_tools,
     upstream_credentials,
+)
+from benchmarks.utils.harnesses.streamline import (
+    STREAMLINED_SUFFIX,
+    streamline_history,
 )
 from benchmarks.utils.harnesses.workspace import DockerContainerWorkspace
 from benchmarks.utils.models import EvalInstance
@@ -51,7 +58,6 @@ logger = logging.getLogger(__name__)
 
 GIT_AUTHOR_NAME = "OpenHands Evaluation"
 GIT_AUTHOR_EMAIL = "evaluation@openhands.dev"
-HISTORY_JSON_INDENT = 2
 
 
 @dataclass
@@ -80,6 +86,7 @@ class HarnessRunResult:
     evaluation: bool | None
     metrics: Metrics | None
     rollout_export_path: str | None = None
+    streamlined_history_path: str | None = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -218,7 +225,56 @@ def run_harness_instance(
         warnings=warnings,
     )
     history_path = history_file_path(output_dir, instance_id, request.attempt)
+    streamlined_path = streamlined_history_file_path(
+        output_dir, instance_id, request.attempt
+    )
+    streamlined: dict[str, Any] | None = None
+    if config.write_streamlined_history:
+        try:
+            streamlined = streamline_history(history)
+        except Exception as exc:  # noqa: BLE001 - never fail a scored attempt
+            warnings.append(f"history streamlining failed: {exc}")
+            logger.warning(
+                "History streamlining failed for %s: %s",
+                instance_id,
+                exc,
+                exc_info=True,
+            )
+    try:
+        embedded_reasoning = embed_history_reasoning(history)
+        if embedded_reasoning:
+            history["reasoning_embedded_messages"] = embedded_reasoning
+    except Exception as exc:  # noqa: BLE001 - best-effort normalization
+        warnings.append(f"reasoning embedding failed: {exc}")
+        logger.warning(
+            "Reasoning embedding failed for %s: %s", instance_id, exc, exc_info=True
+        )
+    try:
+        embedded_loss_mask = embed_history_loss_mask(history)
+        if embedded_loss_mask:
+            history["loss_mask_embedded_messages"] = embedded_loss_mask
+    except Exception as exc:  # noqa: BLE001 - best-effort normalization
+        warnings.append(f"loss-mask embedding failed: {exc}")
+        logger.warning(
+            "Loss-mask embedding failed for %s: %s", instance_id, exc, exc_info=True
+        )
+    try:
+        restored_stops = attach_stop_sequences_to_history(history)
+        if restored_stops:
+            history["restored_stop_sequences"] = restored_stops
+    except Exception as exc:  # noqa: BLE001 - best-effort normalization
+        warnings.append(f"stop-sequence restoration failed: {exc}")
+        logger.warning(
+            "Stop-sequence restoration failed for %s: %s",
+            instance_id,
+            exc,
+            exc_info=True,
+        )
+    if streamlined is not None:
+        history["streamlined_history"] = os.path.relpath(streamlined_path, output_dir)
     write_json_atomic(history_path, history)
+    if streamlined is not None:
+        write_json_atomic(streamlined_path, streamlined)
     logger.info(
         "Harness run for %s finished: patch=%d bytes, captures=%s, trajectories=%s",
         instance_id,
@@ -231,6 +287,7 @@ def run_harness_instance(
         instruction=request.instruction,
         history=history,
         history_path=history_path,
+        streamlined_history_path=streamlined_path if streamlined is not None else None,
         evaluation=evaluation,
         metrics=metrics,
         rollout_export_path=rollout_export if export is not None else None,
@@ -537,6 +594,18 @@ def history_file_path(output_dir: str, instance_id: str, attempt: int) -> str:
     return os.path.join(output_dir, f"{instance_id}.attempt{attempt}.history.json")
 
 
+def streamlined_history_file_path(
+    output_dir: str, instance_id: str, attempt: int
+) -> str:
+    return os.path.join(
+        output_dir, f"{instance_id}.attempt{attempt}{STREAMLINED_SUFFIX}"
+    )
+
+
+def canonical_streamlined_history_path(output_dir: str, instance_id: str) -> str:
+    return os.path.join(output_dir, f"{instance_id}{STREAMLINED_SUFFIX}")
+
+
 def canonical_history_path(output_dir: str, instance_id: str) -> str:
     return os.path.join(output_dir, f"{instance_id}.history.json")
 
@@ -555,7 +624,9 @@ def write_json_atomic(path: str, payload: dict[str, Any]) -> None:
     temporary = handle.name
     try:
         with handle:
-            json.dump(payload, handle, indent=HISTORY_JSON_INDENT)
+            # One JSON document per line (+ trailing newline) so
+            # ``cat <output>/*.history.json`` is directly valid JSONL.
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
             handle.write("\n")
         os.replace(temporary, path)
     except BaseException:
@@ -589,6 +660,42 @@ def publish_canonical_histories(output_dir: str, output_path: str) -> None:
         try:
             with open(source, encoding="utf-8") as handle:
                 payload = json.load(handle)
-            write_json_atomic(canonical_history_path(output_dir, instance_id), payload)
         except (OSError, json.JSONDecodeError) as exc:  # pragma: no cover - best effort
             logger.warning("Failed to publish history for %s: %s", instance_id, exc)
+            continue
+        try:
+            embed_history_reasoning(payload)
+            embed_history_loss_mask(payload)
+            restored_stops = attach_stop_sequences_to_history(payload)
+            if restored_stops:
+                payload["restored_stop_sequences"] = restored_stops
+            streamlined = streamline_history(payload)
+        except Exception as exc:  # noqa: BLE001 - publish raw history regardless
+            logger.warning(
+                "Failed to streamline canonical history for %s: %s", instance_id, exc
+            )
+            streamlined = None
+        canonical_streamlined = canonical_streamlined_history_path(
+            output_dir, instance_id
+        )
+        if streamlined is not None:
+            # The canonical payload is loaded from an already-finalized attempt,
+            # so stop sequences were attached before this pass; keep the count
+            # visible in the streamlined summary.
+            if not streamlined["streamlined"].get(
+                "restored_stop_sequences"
+            ) and payload.get("restored_stop_sequences"):
+                streamlined["streamlined"]["restored_stop_sequences"] = payload[
+                    "restored_stop_sequences"
+                ]
+            payload["streamlined_history"] = os.path.relpath(
+                canonical_streamlined, output_dir
+            )
+        try:
+            write_json_atomic(canonical_history_path(output_dir, instance_id), payload)
+            if streamlined is not None:
+                write_json_atomic(canonical_streamlined, streamlined)
+        except OSError as exc:  # pragma: no cover - best effort
+            logger.warning(
+                "Failed to write canonical history for %s: %s", instance_id, exc
+            )
