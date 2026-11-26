@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -337,10 +338,16 @@ def test_main_writes_jsonl_and_summary(
     assert exit_code == 0
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert len(rows) == 4
-    assert all("messages" in row and "tools" in row for row in rows)
+    # HuggingFace-friendly normalized schema.
+    assert all(
+        set(row) == {"instance_id", "messages", "tools", "metadata"} for row in rows
+    )
+    assert all(isinstance(row["metadata"], str) for row in rows)
     stderr = capsys.readouterr().err
     assert "histories=2" in stderr
     assert "emitted=4" in stderr
+    assert "emitted_main=4" in stderr
+    assert "emitted_classifier=0" in stderr
     assert "warnings=0" in stderr
 
 
@@ -356,7 +363,7 @@ def test_main_stitch_mode_and_strict(
     assert exit_code == 0
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert len(rows) == 1
-    assert rows[0]["stitched"] is True
+    assert json.loads(rows[0]["metadata"])["stitched"] is True
 
     broken = make_history()
     broken["trajectories"] = []
@@ -512,8 +519,8 @@ def test_main_split_tool_sets_output(
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert len(rows) == 2
     assert [len(row["tools"]) for row in rows] == [1, 2]
-    assert [row["split_index"] for row in rows] == [0, 1]
-    assert "emitted=2" in capsys.readouterr().err
+    assert [json.loads(row["metadata"])["split_index"] for row in rows] == [0, 1]
+    assert "emitted_main=2" in capsys.readouterr().err
 
 
 def make_aux_stop_history(
@@ -651,5 +658,159 @@ def test_main_cli_no_restore_stop_sequences(tmp_path: Path) -> None:
         )
         == 0
     )
-    row = json.loads(output.read_text())
+    classifier_output = tmp_path / "flat.classifier.jsonl"
+    assert classifier_output.is_file()
+    row = json.loads(classifier_output.read_text())
+    assert row["classifier"] == "no"
     assert row["messages"][2]["content"] == "<block>no"
+
+
+def make_compaction_trajectory() -> dict:
+    return {
+        "trajectory_id": "s:comp",
+        "trajectory_index": 2,
+        "kind": "compaction",
+        "exclude_from_training": False,
+        "leaf_turn_index": 9,
+        "messages": [
+            SYSTEM,
+            USER,
+            {"role": "assistant", "content": "Summary of the work."},
+        ],
+        "loss_mask": [0, 0, 1],
+        "tool_sets": [],
+        "turns": [{"turn_index": 9, "message_index": 2, "trained": True}],
+    }
+
+
+def make_classifier_trajectory() -> dict:
+    history = make_aux_stop_history()
+    trajectory = history["trajectories"][0]
+    trajectory["exclude_from_training"] = True
+    trajectory["loss_mask"] = [0, 0, 0]
+    return trajectory
+
+
+def test_flatten_splits_classifier_and_keeps_compactions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    history = make_history()
+    history["trajectories"].append(make_compaction_trajectory())
+    history["trajectories"].append(make_classifier_trajectory())
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(history) + "\n")
+    output = tmp_path / "flat.jsonl"
+
+    assert flatten.main([str(source), "-o", str(output)]) == 0
+    main_rows = [json.loads(line) for line in output.read_text().splitlines()]
+    classifier_path = tmp_path / "flat.classifier.jsonl"
+    classifier_rows = [
+        json.loads(line) for line in classifier_path.read_text().splitlines()
+    ]
+
+    # Main JSONL: the two main fragments + compaction, no classifier.
+    assert len(main_rows) == 3
+    assert all("classifier" not in row for row in main_rows)
+    kinds = [json.loads(row["metadata"])["kind"] for row in main_rows]
+    assert "compaction" in kinds
+
+    # Classifier JSONL: exported even though the trajectory is capture-excluded.
+    assert len(classifier_rows) == 1
+    assert classifier_rows[0]["classifier"] == "no"
+    assert classifier_rows[0]["messages"][-1]["content"] == "<block>no</block>"
+    stderr = capsys.readouterr().err
+    assert "emitted_main=3" in stderr
+    assert "emitted_classifier=1" in stderr
+    assert "classifier_output=" in stderr
+
+
+def test_normalized_schema_is_huggingface_loadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    history = make_history()
+    history["trajectories"].append(make_compaction_trajectory())
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(history) + "\n")
+    output = tmp_path / "flat.jsonl"
+    assert flatten.main([str(source), "-o", str(output)]) == 0
+
+    row = json.loads(output.read_text().splitlines()[0])
+    assert set(row) == {"instance_id", "messages", "tools", "metadata"}
+    metadata = json.loads(row["metadata"])
+    assert "trajectory_id" in metadata
+    assert "test_result" in metadata
+
+    tool = row["tools"][0]
+    assert tool["type"] == "function"
+    assert isinstance(tool["function"]["name"], str)
+    assert isinstance(tool["function"]["description"], str)
+    assert isinstance(tool["function"]["parameters"], str)
+    assert isinstance(tool["function"]["required"], list)
+    assert isinstance(tool["function"]["strict"], bool)
+    json.loads(row["tools"][0]["function"]["parameters"])
+
+    assistant = [
+        message for message in row["messages"] if message["role"] == "assistant"
+    ][0]
+    assert isinstance(assistant["content"], str)
+    if "tool_calls" in assistant:
+        assert isinstance(assistant["tool_calls"][0]["function"]["arguments"], str)
+    assert isinstance(assistant["loss_mask"], int)
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf" / "datasets"))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    datasets = pytest.importorskip("datasets")
+    # Other tests may already have imported datasets with the default (possibly
+    # read-only) cache; point the resolved config at the writable tmp dir.
+    datasets.config.HF_DATASETS_CACHE = str(tmp_path / "hf" / "datasets")
+    datasets.config.HF_MODULES_CACHE = str(tmp_path / "hf" / "modules")
+    datasets.config.HF_HUB_CACHE = str(tmp_path / "hf" / "hub")
+    from datasets import load_dataset
+
+    dataset = cast(Any, load_dataset("json", data_files=str(output), split="train"))
+    assert dataset.num_rows == 3
+    assert "messages" in dataset.features
+    assert "metadata" in dataset.features
+
+
+def test_classifier_output_can_be_explicit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_aux_stop_history()) + "\n")
+    output = tmp_path / "flat.jsonl"
+    classifier = tmp_path / "labels.jsonl"
+    assert (
+        flatten.main(
+            [
+                str(source),
+                "-o",
+                str(output),
+                "--classifier-output",
+                str(classifier),
+            ]
+        )
+        == 0
+    )
+    assert classifier.is_file()
+    assert not (tmp_path / "flat.classifier.jsonl").exists()
+
+
+def test_classifier_samples_need_a_file_destination(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_aux_stop_history()) + "\n")
+    assert flatten.main([str(source)]) == 1
+    assert "classifier" in capsys.readouterr().err
+
+
+def test_no_normalize_keeps_raw_records(tmp_path: Path) -> None:
+    source = tmp_path / "histories.jsonl"
+    source.write_text(json.dumps(make_history()) + "\n")
+    output = tmp_path / "flat.jsonl"
+    assert flatten.main([str(source), "-o", str(output), "--no-normalize-for-hf"]) == 0
+    row = json.loads(output.read_text().splitlines()[0])
+    assert "trajectory_id" in row
+    assert "metadata" not in row

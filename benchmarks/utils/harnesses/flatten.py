@@ -43,11 +43,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from benchmarks.utils.harnesses.normalize import classifier_label, normalize_record
 from benchmarks.utils.harnesses.rollout import (
     embed_loss_mask_into_messages,
     embed_reasoning_into_messages,
@@ -622,6 +624,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output JSONL path (default: stdout)",
     )
     parser.add_argument(
+        "--classifier-output",
+        type=str,
+        default=None,
+        help=(
+            "JSONL path for auto-mode classifier samples (<block>yes/no</block>). "
+            "Defaults to <output stem>.classifier.jsonl when --output is a file"
+        ),
+    )
+    parser.add_argument(
+        "--no-normalize-for-hf",
+        dest="normalize_for_hf",
+        action="store_false",
+        help=(
+            "Write raw flattened records instead of the normalized "
+            "HuggingFace-friendly schema (instance_id/messages/tools/metadata)"
+        ),
+    )
+    parser.add_argument(
         "--mode",
         choices=list(MODES),
         default="trajectories",
@@ -688,6 +708,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def classifier_output_path(output: str) -> str:
+    """Default classifier JSONL path derived from the main output path."""
+    path = Path(output)
+    if path.suffix == ".jsonl":
+        return str(path.with_name(path.name[: -len(".jsonl")] + ".classifier.jsonl"))
+    return f"{path}.classifier.jsonl"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -705,9 +733,36 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     histories = 0
-    emitted = 0
+    emitted_main = 0
+    emitted_classifier = 0
     skipped_empty = 0
     warnings: list[str] = []
+    classifier_handle = None
+    classifier_path = args.classifier_output
+
+    def open_classifier() -> Any:
+        nonlocal classifier_handle, classifier_path
+        if classifier_handle is not None:
+            return classifier_handle
+        path = classifier_path
+        if path is None:
+            if args.output == "-":
+                raise RuntimeError(
+                    "auto-mode classifier samples need a file destination: pass "
+                    "-o FILE (classifier JSONL is derived) or --classifier-output"
+                )
+            path = classifier_output_path(args.output)
+        if path == "-":
+            raise RuntimeError("--classifier-output cannot be stdout")
+        if args.output != "-" and os.path.abspath(path) == os.path.abspath(args.output):
+            raise RuntimeError(
+                "--classifier-output must differ from the main --output path"
+            )
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        classifier_handle = open(path, "w", encoding="utf-8")  # noqa: SIM115
+        classifier_path = path
+        return classifier_handle
+
     try:
         for history in iter_json_documents(args.input):
             histories += 1
@@ -715,7 +770,9 @@ def main(argv: list[str] | None = None) -> int:
                 iter_records(
                     iter([history]),
                     mode=args.mode,
-                    include_excluded=(args.include_excluded or args.train_excluded),
+                    # Classifier trajectories may be capture-excluded yet still
+                    # belong in the classifier JSONL; routing below decides.
+                    include_excluded=True,
                     verbatim=args.stitch_verbatim,
                     train_excluded=args.train_excluded,
                     split_tool_sets=args.split_tool_sets,
@@ -730,15 +787,43 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 continue
             for record in records:
+                label = classifier_label(record)
+                if label is not None:
+                    warnings.extend(validate_record(record))
+                    payload = (
+                        normalize_record(record, classifier=label)
+                        if args.normalize_for_hf
+                        else {**record, "classifier": label}
+                    )
+                    try:
+                        handle = open_classifier()
+                    except (RuntimeError, OSError) as exc:
+                        print(f"ERROR {exc}", file=sys.stderr)
+                        return 1
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                    emitted_classifier += 1
+                    continue
+                if record.get("exclude_from_training") and not (
+                    args.include_excluded or args.train_excluded
+                ):
+                    continue
                 warnings.extend(validate_record(record))
-                output.write(json.dumps(record, ensure_ascii=False) + "\n")
-                emitted += 1
+                payload = normalize_record(record) if args.normalize_for_hf else record
+                output.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                emitted_main += 1
     finally:
+        if classifier_handle is not None:
+            classifier_handle.close()
         if output is not sys.stdout:
             output.close()
+    classifier_summary = (
+        f" classifier_output={classifier_path}" if classifier_path is not None else ""
+    )
     print(
-        f"histories={histories} emitted={emitted} mode={args.mode} "
-        f"skipped_empty={skipped_empty} warnings={len(warnings)}",
+        f"histories={histories} emitted={emitted_main + emitted_classifier} "
+        f"emitted_main={emitted_main} emitted_classifier={emitted_classifier} "
+        f"mode={args.mode} skipped_empty={skipped_empty} "
+        f"warnings={len(warnings)}{classifier_summary}",
         file=sys.stderr,
     )
     for warning in warnings[: max(0, args.max_warnings)]:

@@ -280,8 +280,10 @@ How this is wired:
   records them as their own trajectories/turns with `request_class: auxiliary`.
   They are masked out of training by default (`--exclude-request-classes
   auxiliary`): they stay in the export (`excluded_turns`,
-  `exclude_from_training=true`, `loss_mask=0`) but `harness-flatten-histories`
-  drops them unless you pass `--include-excluded`.
+  `exclude_from_training=true`, `loss_mask=0`). `harness-flatten-histories`
+  always routes these `<block>yes|no</block>` classifier samples into the
+  separate classifier JSONL (with the verdict in `classifier`), so they never
+  pollute the main training file.
 
 How to read the masks in an auto-mode history dump:
 
@@ -294,7 +296,9 @@ How to read the masks in an auto-mode history dump:
   whose `loss_mask` is entirely zero — by design, not a missing assistant
   target. Their assistant verdicts (`<block>no`, …) are masked at capture time.
 
-To train auxiliary calls as well, either capture differently or post-process:
+To include non-classifier auxiliary traffic in training, either capture
+differently or post-process; classifier samples always go to the classifier
+JSONL regardless:
 
 ```bash
 # capture-side: do not mask any request class (rerun needed)
@@ -302,7 +306,7 @@ uv run swebench-infer-harnesses ... --harness-permission-mode auto --harness-inc
 # equivalent explicit form
 uv run swebench-infer-harnesses ... --harness-permission-mode auto --exclude-request-classes ""
 
-# post-hoc: recompute loss masks for an existing capture
+# post-hoc: recompute loss masks for excluded non-classifier trajectories
 uv run harness-flatten-histories histories.jsonl -o flat.jsonl --train-excluded
 ```
 
@@ -451,8 +455,18 @@ stop sequences re-attached. Disable that companion with
 
 ## Building training data: flattening histories
 
-`harness-flatten-histories` turns per-instance history dumps into JSONL records
-that carry **OpenAI Chat-Completions `messages` and `tools`** directly.
+`harness-flatten-histories` turns per-instance history dumps into **two**
+HuggingFace-loadable JSONL files:
+
+- the main file (``-o``): agentic trajectories **and compaction/summarization**
+  records;
+- the classifier file (derived as ``<output stem>.classifier.jsonl``, or
+  ``--classifier-output``): auto-mode classifier samples whose reply is
+  ``<block>yes</block>`` / ``<block>no</block>``, with the verdict extracted into
+  a top-level ``classifier`` field (``"yes"`` / ``"no"``).
+
+Classifier trajectories are exported even when they are capture-excluded (the
+main file still honours ``--include-excluded`` / ``--train-excluded``).
 
 Collect the history files first (each history file is already a one-line JSON
 document, so plain `cat` works; the reader also accepts JSONL or older
@@ -464,8 +478,18 @@ jq -c . eval_outputs/.../harnesses/claude-code/*.history.json > histories.jsonl
 # ... or a concatenation of the pretty-printed documents
 cat eval_outputs/.../harnesses/claude-code/*.history.json > histories.jsonl
 
+# main file: flat.jsonl, classifier file: flat.classifier.jsonl
 uv run harness-flatten-histories histories.jsonl -o flat.jsonl
+# explicit classifier destination
+uv run harness-flatten-histories histories.jsonl -o flat.jsonl \
+  --classifier-output classifier.jsonl
+# raw (non-HF-normalized) records for debugging
+uv run harness-flatten-histories histories.jsonl -o flat-raw.jsonl \
+  --no-normalize-for-hf
 ```
+
+Classifier samples can only be split into a file: when writing the main output
+to stdout, either pass ``-o FILE`` or ``--classifier-output FILE``.
 
 Two output shapes:
 
@@ -499,19 +523,24 @@ uv run harness-flatten-histories histories.jsonl --include-excluded \
 uv run harness-flatten-histories histories.jsonl --strict
 ```
 
-Each output record contains at least:
+Each output record has a stable top-level schema (normalized for
+`datasets.load_dataset("json", ...)`):
 
 | Key | Meaning |
 | --- | --- |
-| `messages` | OpenAI Chat-Completions messages (`role`, `content`, assistant `tool_calls` with JSON-string `function.arguments`, `tool_call_id`); assistant messages additionally carry `reasoning_content` right after `role` when present and `loss_mask` (0/1) as the last field |
-| `tools` | one OpenAI function-tool list, resolved from the trajectory's `tool_sets`/`turn.tool_set`; `[]` for requests that carried no tools (auto-mode classifier/security monitor) |
-| `loss_mask`, `reasoning_content` | message-aligned arrays from the capture (`reasoning_content` and the assistant `loss_mask` are also folded into the messages; the arrays are kept for back-compat) |
-| `loss_mask` sum / `trained_turns` | which turns of the record are training targets |
-| `instance_id`, `attempt`, `harness`, `harness_version`, `model`, `instruction` | provenance |
-| `test_result.git_patch`, `evaluation`, `rollout_export`, `stats` | patch, judge verdict, raw capture path |
-| `trajectory_id`, `parent_trajectory_id`, `path_turn_indices`, `turn_indices` | tree position / request-log order (per-fragment mode) |
-| `fragmented`, `num_fragments`, `trajectory_ids` | fragment count (stitch mode) |
-| `restored_stop_sequences` | present when a single configured stop sequence was re-attached to a reply (see below) |
+| `instance_id` | instance identifier |
+| `messages` | chat messages: `role`/`content` strings; `tool_calls` with JSON-string `function.arguments`; assistant messages additionally carry `reasoning_content` right after `role` when present and `loss_mask` (0/1) as the last field |
+| `tools` | normalized function tools: `description` string, `parameters` as a JSON **string**, `required` string list, `strict` bool; `[]` for tool-less requests |
+| `metadata` | JSON **string** with everything else (provenance, `attempt`, `harness`, `model`, `instruction`, `test_result`, `evaluation`, `rollout_export`, `stats`, trajectory ids/turn sets, aligned `loss_mask`/`reasoning_content` arrays, `restored_stop_sequences`, split/stitch fields, ...) |
+| `classifier` | only in the classifier file: `"yes"` or `"no"` (extracted from `<block>yes|no</block>`) |
+
+The normalization mirrors `zjlm/scripts/normalize_agentic_jsonl.py`: content is
+always a string (structured content is JSON-serialized), tool-call arguments are
+JSON strings, tools are wrapped/normalized (`parameters` serialized,
+`required` defaulted) and all other entries are moved into the JSON-string
+`metadata`, which HuggingFace loads as a plain string instead of inferring a
+deep nested schema. Use `--no-normalize-for-hf` to keep the raw flattened
+records for debugging.
 
 Notes:
 
@@ -531,17 +560,21 @@ Notes:
   capture intentionally keeps them as one trajectory (tools are not part of the
   message-prefix identity), so the flattener emits one record per contiguous
   tool-set phase. Each record has `source: "trajectory-split"`, the phase's
-  `tools`/`tool_set_index`, duplicated preceding context, only the phase's turns
-  as training targets, and `split_index`/`split_count`/
-  `split_from_trajectory_id` for reassembly.
+  `tools`/`tool_set_index`, duplicated preceding context and only the phase's
+  turns as training targets; `split_index`/`split_count`/
+  `split_from_trajectory_id` are in `metadata` for reassembly.
 - `tool.message` ids are checked against preceding assistant calls; trailing
   assistant tool calls without results are allowed (that continuation lives in
   the next fragment).
-- `--include-excluded` keeps trajectories masked out of training
-  (`exclude_from_training`, e.g. auxiliary calls); they are dropped by default.
+- `--include-excluded` keeps non-classifier trajectories masked out of training
+  (`exclude_from_training`); they are dropped from the main file by default.
 - `--train-excluded` does the same but recomputes `loss_mask` from the messages
-  (assistant = 1) and sets `loss_mask_recomputed: true`, for using auxiliary
-  turns as training data without re-capturing.
+  (assistant = 1) and sets `loss_mask_recomputed: true` (in `metadata`), for
+  using excluded non-classifier turns as training data without re-capturing.
+- Auto-mode classifier samples (`<block>yes|no</block>`) are always written to
+  the classifier file, even if capture-excluded, so the main file never contains
+  them; `--include-excluded`/`--train-excluded` do not move them into the main
+  file.
 - **Stop sequences are re-attached.** Chat-Completions and the Anthropic
   Messages API strip the matched stop sequence from the returned content.
   Claude Code's auto-mode classifier sends `stop: ["</block>"]` and gets back
@@ -556,8 +589,8 @@ Notes:
   normalization entirely. New runs already have stop sequences re-attached at
   task finalization (raw and streamlined histories), so flattening is a no-op
   there — it is kept for older captures and for the capture export.
-- A summary (`histories=… emitted=… warnings=…`) is printed to stderr; warnings
-  never change stdout, which is pure JSONL.
+- A summary (`histories=… emitted_main=… emitted_classifier=… warnings=…`) is
+  printed to stderr; warnings never change stdout, which is pure JSONL.
 
 ## Streamlining fragmented histories
 

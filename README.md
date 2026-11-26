@@ -140,8 +140,10 @@ NFS). Compaction is configured explicitly for these runs
 Sampling parameters from the LLM config (temperature/top_p/reasoning_effort/…)
 are forced through the rollout manager, Claude Code's auto-mode classifier
 conversation can be captured with `--harness-permission-mode auto`, and
-`uv run harness-flatten-histories` flattens the history dumps into OpenAI-format
-training trajectories. Task finalization writes each history as one compact JSON
+`uv run harness-flatten-histories` flattens the history dumps into two
+HuggingFace-loadable JSONL files: agentic trajectories + compactions, and a
+separate classifier file (`classifier: yes|no`) for auto-mode classifier calls;
+records are normalized (`instance_id`/`messages`/`tools`/`metadata` JSON string). Task finalization writes each history as one compact JSON
 line (`cat *.history.json` is valid JSONL), re-attaches stripped stop sequences,
 and emits a streamlined companion with fragmented trajectories merged and the
 model's original tool arguments restored. See
