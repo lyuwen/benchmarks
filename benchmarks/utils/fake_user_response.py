@@ -454,6 +454,7 @@ def run_conversation_with_fake_user_response(
     fake_user_response_fn: FakeUserResponseFn = fake_user_response,
     max_fake_responses: int = 10,
     timeout: int | None = None,
+    deadline: float | None = None,
 ) -> None:
     """Run a conversation with automatic fake user responses.
 
@@ -473,7 +474,11 @@ def run_conversation_with_fake_user_response(
         max_fake_responses: Maximum number of fake responses to send before
             stopping. This prevents infinite loops.
         timeout: Timeout in seconds for each conversation.run() call.
-            If None, no timeout is applied.
+            If None, no per-call timeout is applied.
+        deadline: Optional absolute deadline as a ``time.monotonic()``
+            timestamp. The whole fake-user loop (not just one ``run()`` call)
+            stops when it is reached, so a benchmark-level agent timeout is a
+            total budget rather than a per-continuation budget.
     """
 
     _ensure_user_message_synced(conversation)
@@ -481,11 +486,26 @@ def run_conversation_with_fake_user_response(
     fake_response_count = 0
 
     while True:
+        # Compute the per-call timeout, bounded by the overall deadline.
+        call_timeout: float | None = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "Agent deadline reached after %d fake responses; "
+                    "stopping the conversation",
+                    fake_response_count,
+                )
+                break
+            call_timeout = (
+                remaining if timeout is None else min(float(timeout), remaining)
+            )
+
         # Run the conversation
         # Only pass timeout if it's not None and the conversation supports it
         # (RemoteConversation supports timeout, LocalConversation does not)
         run = conversation.run
-        if timeout is not None and hasattr(run, "__code__"):
+        if call_timeout is not None and hasattr(run, "__code__"):
             # Check if the run method accepts a timeout parameter
             import inspect
 
@@ -493,7 +513,7 @@ def run_conversation_with_fake_user_response(
             if "timeout" in sig.parameters:
                 # Unpack the kwarg so type checkers don't flag it against the
                 # BaseConversation.run signature, which has no timeout parameter.
-                run(**{"timeout": timeout})
+                run(**{"timeout": call_timeout})
             else:
                 run()
         else:
@@ -571,6 +591,7 @@ def run_conversation_with_smart_fake_user_response(
     max_fake_responses: int = 10,
     timeout: int | None = None,
     encapsulate_solution: bool = False,
+    deadline: float | None = None,
 ) -> None:
     """Run a conversation with LLM-classified fake user responses.
 
@@ -589,6 +610,8 @@ def run_conversation_with_smart_fake_user_response(
             If None, no timeout is applied.
         encapsulate_solution: If True, instructs the agent to encapsulate the
             final answer within <solution> tags.
+        deadline: Optional absolute ``time.monotonic()`` deadline for the whole
+            continuation loop (see ``run_conversation_with_fake_user_response``).
     """
     run_conversation_with_fake_user_response(
         conversation,
@@ -597,4 +620,5 @@ def run_conversation_with_smart_fake_user_response(
         ),
         max_fake_responses=max_fake_responses,
         timeout=timeout,
+        deadline=deadline,
     )

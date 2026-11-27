@@ -12,6 +12,7 @@ This repository contains benchmark evaluation infrastructure for [OpenHands](htt
 | [GAIA](benchmarks/gaia/) | General AI assistant tasks requiring multi-step reasoning | ✅ Active |
 | [Commit0](benchmarks/commit0/) | Python function implementation tasks with unit tests | ✅ Active |
 | [OpenAgentSafety](benchmarks/openagentsafety/) | AI agent safety evaluation in workplace scenarios with NPC interactions | ✅ Active |
+| [Harbor](benchmarks/harbor/) | Harbor-format task directories (`harbor-infer` / `harbor-eval`) | ✅ Phase 1 |
 
 See the individual benchmark directories for detailed usage instructions.
 
@@ -116,6 +117,7 @@ After setting up the environment and configuring your LLM, see the individual be
 - **[SWE-Bench](benchmarks/swebench/)**: Software engineering tasks from GitHub issues
 - **[GAIA](benchmarks/gaia/)**: General AI assistant tasks requiring multi-step reasoning  
 - **[OpenAgentSafety](benchmarks/openagentsafety/)**: AI agent safety evaluation in workplace scenarios with NPC interactions
+- **[Harbor](benchmarks/harbor/)**: Harbor-format tasks run with the customized agent harness (`uv run harbor-infer .llm_config/model.json --tasks-path <tasks>`)
 
 ### Blackbox harness runs (Claude Code + trajectory capture)
 
